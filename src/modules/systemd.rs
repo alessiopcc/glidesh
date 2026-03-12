@@ -12,12 +12,12 @@ impl SystemdModule {
     }
 
     fn unit_name(resource_name: &str) -> String {
-        let known_suffixes = [".service", ".timer", ".socket", ".mount", ".target"];
-        if known_suffixes.iter().any(|s| resource_name.ends_with(s)) {
-            resource_name.to_string()
-        } else {
-            format!("{}.service", resource_name)
+        if let Some((_base, ext)) = resource_name.rsplit_once('.') {
+            if !ext.is_empty() {
+                return resource_name.to_string();
+            }
         }
+        format!("{}.service", resource_name)
     }
 
     fn validate_unit_name_for_creation(resource_name: &str) -> Result<(), GlideshError> {
@@ -27,6 +27,20 @@ impl SystemdModule {
                 module: "systemd".to_string(),
                 message: format!(
                     "unit file creation requires a .service unit, got '{}'",
+                    unit
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_unit_name(name: &str) -> Result<(), GlideshError> {
+        let unit = Self::unit_name(name);
+        if unit.contains('/') || unit.contains("..") {
+            return Err(GlideshError::Module {
+                module: "systemd".to_string(),
+                message: format!(
+                    "unit name '{}' contains path separators or dot-segments",
                     unit
                 ),
             });
@@ -79,6 +93,19 @@ impl SystemdModule {
         }
     }
 
+    fn validate_directive_value(name: &str, value: &str) -> Result<(), GlideshError> {
+        if value.contains('\n') || value.contains('\r') {
+            return Err(GlideshError::Module {
+                module: "systemd".to_string(),
+                message: format!(
+                    "'{}' value contains newline characters, which would inject additional unit-file directives",
+                    name
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn generate_unit_file(
         resource_name: &str,
         params: &ModuleParams,
@@ -100,6 +127,7 @@ impl SystemdModule {
                 message: "command parameter must be a non-empty string".to_string(),
             });
         }
+        Self::validate_directive_value("command", command)?;
 
         let description = params
             .args
@@ -107,30 +135,35 @@ impl SystemdModule {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{} service", resource_name));
+        Self::validate_directive_value("description", &description)?;
 
         let after = params
             .args
             .get("after")
             .and_then(|v| v.as_str())
             .unwrap_or("network.target");
+        Self::validate_directive_value("after", after)?;
 
         let service_type = params
             .args
             .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("simple");
+        Self::validate_directive_value("type", service_type)?;
 
         let restart_policy = params
             .args
             .get("restart-policy")
             .and_then(|v| v.as_str())
             .unwrap_or("on-failure");
+        Self::validate_directive_value("restart-policy", restart_policy)?;
 
         let wanted_by = params
             .args
             .get("wanted-by")
             .and_then(|v| v.as_str())
             .unwrap_or("multi-user.target");
+        Self::validate_directive_value("wanted-by", wanted_by)?;
 
         let mut unit_content = String::new();
 
@@ -144,12 +177,15 @@ impl SystemdModule {
         unit_content.push_str(&format!("Restart={}\n", restart_policy));
 
         if let Some(user) = params.args.get("user").and_then(|v| v.as_str()) {
+            Self::validate_directive_value("user", user)?;
             unit_content.push_str(&format!("User={}\n", user));
         }
         if let Some(group) = params.args.get("group").and_then(|v| v.as_str()) {
+            Self::validate_directive_value("group", group)?;
             unit_content.push_str(&format!("Group={}\n", group));
         }
         if let Some(working_dir) = params.args.get("working-dir").and_then(|v| v.as_str()) {
+            Self::validate_directive_value("working-dir", working_dir)?;
             unit_content.push_str(&format!("WorkingDirectory={}\n", working_dir));
         }
 
@@ -251,6 +287,7 @@ impl Module for SystemdModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
+        Self::validate_unit_name(&params.resource_name)?;
         let unit = Self::unit_name(&params.resource_name);
         let desired_state = params
             .args
@@ -308,6 +345,7 @@ impl Module for SystemdModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleResult, GlideshError> {
+        Self::validate_unit_name(&params.resource_name)?;
         let unit = Self::unit_name(&params.resource_name);
         let desired_state = params
             .args
@@ -354,19 +392,6 @@ impl Module for SystemdModule {
             "stopped" => commands.push(format!("systemctl stop {}", unit)),
             "restarted" => commands.push(format!("systemctl restart {}", unit)),
             _ => unreachable!(),
-        }
-
-        if commands.is_empty() {
-            return Ok(ModuleResult {
-                changed: file_changed,
-                output: if file_changed {
-                    format!("uploaded unit file for {}", unit)
-                } else {
-                    String::new()
-                },
-                stderr: String::new(),
-                exit_code: 0,
-            });
         }
 
         let combined = commands.join(" && ");
@@ -657,5 +682,55 @@ mod tests {
 
         let content = SystemdModule::generate_unit_file("test", &params).unwrap();
         assert!(content.contains(r#"Environment="GREETING=hello \"world\"""#));
+    }
+
+    #[test]
+    fn test_unit_name_with_path_suffix() {
+        assert_eq!(SystemdModule::unit_name("monitor.path"), "monitor.path");
+    }
+
+    #[test]
+    fn test_unit_name_with_slice_suffix() {
+        assert_eq!(SystemdModule::unit_name("user.slice"), "user.slice");
+    }
+
+    #[test]
+    fn test_validate_unit_name_valid() {
+        assert!(SystemdModule::validate_unit_name("my-app").is_ok());
+        assert!(SystemdModule::validate_unit_name("backup.timer").is_ok());
+    }
+
+    #[test]
+    fn test_validate_unit_name_path_traversal() {
+        assert!(SystemdModule::validate_unit_name("../etc/passwd").is_err());
+        assert!(SystemdModule::validate_unit_name("foo/bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_directive_value_valid() {
+        assert!(SystemdModule::validate_directive_value("command", "/usr/bin/app").is_ok());
+    }
+
+    #[test]
+    fn test_validate_directive_value_newline() {
+        assert!(
+            SystemdModule::validate_directive_value("command", "/bin/app\nExecStop=/bin/bad")
+                .is_err()
+        );
+        assert!(SystemdModule::validate_directive_value("description", "line1\rline2").is_err());
+    }
+
+    #[test]
+    fn test_generate_unit_file_command_with_newline() {
+        let mut args = HashMap::new();
+        args.insert(
+            "command".to_string(),
+            ParamValue::String("/usr/bin/app\nExecStop=/bin/evil".to_string()),
+        );
+        let params = ModuleParams {
+            resource_name: "test".to_string(),
+            args,
+        };
+        assert!(SystemdModule::generate_unit_file("test", &params).is_err());
     }
 }
