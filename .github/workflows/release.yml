@@ -107,3 +107,11 @@ jobs:
             artifacts/glidesh-*.tar.gz
             artifacts/glidesh-*.zip
             artifacts/checksums-sha256.txt
+
+  deploy-docs:
+    name: Deploy Documentation
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Netlify deploy
+        run: curl -s -X POST "${{ secrets.NETLIFY_BUILD_HOOK }}"
