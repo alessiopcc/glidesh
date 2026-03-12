@@ -1,0 +1,4 @@
+group "storage" {
+    host "storage-1" "192.168.1.30" user="root"
+    host "storage-2" "192.168.1.31" user="root"
+}

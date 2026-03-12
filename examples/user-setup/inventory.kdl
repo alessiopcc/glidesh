@@ -1,0 +1,4 @@
+group "servers" {
+    host "srv-1" "192.168.1.10" user="root"
+    host "srv-2" "192.168.1.11" user="root"
+}

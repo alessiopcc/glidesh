@@ -1,0 +1,19 @@
+plan "base" {
+    vars {
+        ntp-service "chrony"
+    }
+
+    step "Install base packages" {
+        package "curl" state="present"
+        package "vim" state="present"
+        package "htop" state="present"
+    }
+
+    step "Enable NTP" {
+        package "${ntp-service}" state="present"
+        systemd "${ntp-service}" {
+            state "started"
+            enabled #true
+        }
+    }
+}

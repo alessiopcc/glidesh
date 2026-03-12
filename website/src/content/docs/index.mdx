@@ -1,0 +1,75 @@
+---
+title: glidesh
+description: Fast, stateless, SSH-only infrastructure automation built in Rust.
+template: splash
+hero:
+  tagline: Fast, stateless, SSH-only infrastructure automation built in Rust.
+  image:
+    dark: ../../../public/logo-white.webp
+    light: ../../../public/logo-black.webp
+    alt: glidesh logo
+  actions:
+    - text: Get Started
+      link: /getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/alessiopcc/glidesh
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why glidesh?
+
+<CardGrid stagger>
+  <Card title="Blazing Fast" icon="rocket">
+    Built in Rust with async SSH connections. Execute plans across hundreds of hosts concurrently with minimal overhead.
+  </Card>
+  <Card title="Zero Dependencies" icon="approve-check-circle">
+    No agent, no runtime, no Python — nothing to install on target machines. Just SSH access.
+  </Card>
+  <Card title="Stateless" icon="random">
+    No state files, no databases. Desired state is computed fresh every run using the two-phase check/apply pattern.
+  </Card>
+  <Card title="Idempotent" icon="setting">
+    Every module checks current state before acting. Run plans repeatedly — only necessary changes are applied.
+  </Card>
+</CardGrid>
+
+## Quick Example
+
+Define your targets in an inventory:
+
+```kdl
+group "web" {
+    host "web-1" "192.168.1.10" user="deploy"
+    host "web-2" "192.168.1.11" user="deploy"
+}
+```
+
+Describe the desired state in a plan:
+
+```kdl
+plan "setup" {
+    target "web"
+
+    step "Install nginx" {
+        package "nginx" state="present"
+    }
+
+    step "Start nginx" {
+        systemd "nginx" {
+            state "started"
+            enabled #true
+        }
+    }
+}
+```
+
+Run it:
+
+```bash
+glidesh run -i inventory.kdl -p plan.kdl
+```

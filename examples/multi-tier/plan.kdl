@@ -1,0 +1,17 @@
+plan "multi-tier" {
+    target "web"
+    mode "sync"
+
+    include "common/base.kdl"
+
+    step "Install nginx" {
+        package "nginx" state="present"
+    }
+
+    step "Start nginx" {
+        systemd "nginx" {
+            state "started"
+            enabled #true
+        }
+    }
+}

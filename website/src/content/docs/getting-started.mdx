@@ -1,0 +1,100 @@
+---
+title: Getting Started
+description: Install glidesh and run your first plan.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Prerequisites
+
+- SSH access to target machines (key-based authentication)
+- No agent or runtime required on target hosts
+
+## Installation
+
+Download the latest binary from [GitHub Releases](https://github.com/alessiopcc/glidesh/releases):
+
+<Tabs>
+  <TabItem label="Linux">
+    ```bash
+    curl -L https://github.com/alessiopcc/glidesh/releases/latest/download/glidesh-linux-amd64 -o glidesh
+    chmod +x glidesh
+    sudo mv glidesh /usr/local/bin/
+    ```
+  </TabItem>
+  <TabItem label="macOS">
+    ```bash
+    curl -L https://github.com/alessiopcc/glidesh/releases/latest/download/glidesh-darwin-arm64 -o glidesh
+    chmod +x glidesh
+    sudo mv glidesh /usr/local/bin/
+    ```
+  </TabItem>
+  <TabItem label="Windows">
+    ```powershell
+    Invoke-WebRequest -Uri https://github.com/alessiopcc/glidesh/releases/latest/download/glidesh-windows-amd64.exe -OutFile glidesh.exe
+    Move-Item glidesh.exe C:\Windows\System32\
+    ```
+  </TabItem>
+</Tabs>
+
+### From source
+
+Requires Rust 1.85+.
+
+```bash
+git clone https://github.com/alessiopcc/glidesh.git
+cd glidesh
+cargo build --release
+```
+
+The binary will be at `target/release/glidesh`.
+
+## Quick Start
+
+### 1. Define your inventory
+
+Create an `inventory.kdl` file listing your target machines:
+
+```kdl
+vars {
+    deploy-user "deploy"
+}
+
+group "web" {
+    host "web-1" "192.168.1.10" user="deploy" port=22
+    host "web-2" "192.168.1.11" user="deploy"
+}
+```
+
+### 2. Write a plan
+
+Create a `plan.kdl` describing the desired state:
+
+```kdl
+plan "setup-web" {
+    target "web"
+
+    step "Install nginx" {
+        package "nginx" state="present"
+    }
+
+    step "Start nginx" {
+        systemd "nginx" {
+            state "started"
+            enabled #true
+        }
+    }
+}
+```
+
+### 3. Run it
+
+```bash
+glidesh run -i inventory.kdl -p plan.kdl
+```
+
+Add `--dry-run` to preview changes without applying them:
+
+```bash
+glidesh run -i inventory.kdl -p plan.kdl --dry-run
+```

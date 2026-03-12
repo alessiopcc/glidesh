@@ -1,0 +1,19 @@
+plan "disk-management" {
+    target "storage"
+
+    step "Discover available disks" {
+        shell "lsblk -dn -o NAME | grep -v sda" register="available_disks"
+    }
+
+    step "Format and mount each disk" loop="${available_disks}" {
+        disk "/dev/${item}" {
+            fs "ext4"
+            mount "/mnt/${item}"
+            opts "defaults,noatime"
+        }
+    }
+
+    step "Verify mounts" {
+        shell "df -h | grep /mnt"
+    }
+}

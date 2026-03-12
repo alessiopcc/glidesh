@@ -1,0 +1,33 @@
+plan "hello-echo" {
+    target "app"
+    mode "sync"
+
+    vars {
+        echo-port 4242
+    }
+
+    step "Say hello" {
+        shell "echo 'Hello, world!'"
+    }
+
+    step "Run echo server" {
+        container "echo-server" {
+            image "hashicorp/http-echo"
+            state "running"
+            restart "always"
+            ports {
+                - "${echo-port}:5678"
+            }
+            environment {
+                ECHO_TEXT "hello from glidesh"
+            }
+        }
+    }
+
+    step "Verify echo server" {
+        shell "curl -sf http://localhost:${echo-port}" {
+            retries 5
+            delay 2
+        }
+    }
+}

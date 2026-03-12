@@ -1,0 +1,38 @@
+plan "user-setup" {
+    target "servers"
+
+    vars {
+        deploy-shell "/bin/bash"
+    }
+
+    step "Create deploy user" {
+        user "deploy" {
+            uid 1000
+            groups "sudo" "docker"
+            shell "${deploy-shell}"
+            state "present"
+        }
+    }
+
+    step "Create app user" {
+        user "appuser" {
+            uid 1001
+            groups "docker"
+            shell "/bin/bash"
+            state "present"
+        }
+    }
+
+    step "Deploy SSH authorized keys" {
+        file "/home/deploy/.ssh/authorized_keys" {
+            src "files/authorized_keys"
+            owner "deploy"
+            group "deploy"
+            mode "0600"
+        }
+    }
+
+    step "Verify users" {
+        shell "id deploy && id appuser"
+    }
+}
