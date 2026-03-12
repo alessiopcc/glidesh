@@ -8,11 +8,7 @@ pub struct SystemdModule;
 
 impl SystemdModule {
     fn has_command(params: &ModuleParams) -> bool {
-        params
-            .args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
+        params.args.contains_key("command")
     }
 
     fn unit_name(resource_name: &str) -> String {
@@ -22,6 +18,20 @@ impl SystemdModule {
         } else {
             format!("{}.service", resource_name)
         }
+    }
+
+    fn validate_unit_name_for_creation(resource_name: &str) -> Result<(), GlideshError> {
+        let unit = Self::unit_name(resource_name);
+        if !unit.ends_with(".service") {
+            return Err(GlideshError::Module {
+                module: "systemd".to_string(),
+                message: format!(
+                    "unit file creation requires a .service unit, got '{}'",
+                    unit
+                ),
+            });
+        }
+        Ok(())
     }
 
     fn unit_path(resource_name: &str) -> String {
@@ -34,23 +44,60 @@ impl SystemdModule {
         format!("{:x}", hasher.finalize())
     }
 
+    fn validate_env_value(key: &str, val: &str) -> Result<(), GlideshError> {
+        if key.contains('\n') || key.contains('"') || key.contains('\\') {
+            return Err(GlideshError::Module {
+                module: "systemd".to_string(),
+                message: format!(
+                    "environment key '{}' contains invalid characters (newlines, quotes, or backslashes)",
+                    key
+                ),
+            });
+        }
+        if val.contains('\n') {
+            return Err(GlideshError::Module {
+                module: "systemd".to_string(),
+                message: format!(
+                    "environment value for '{}' contains newlines, which are not supported in systemd Environment= directives",
+                    key
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_desired_state(state: &str) -> Result<(), GlideshError> {
+        match state {
+            "started" | "stopped" | "restarted" => Ok(()),
+            other => Err(GlideshError::Module {
+                module: "systemd".to_string(),
+                message: format!(
+                    "invalid state '{}'; expected one of: started, stopped, restarted",
+                    other
+                ),
+            }),
+        }
+    }
+
     fn generate_unit_file(
         resource_name: &str,
         params: &ModuleParams,
     ) -> Result<String, GlideshError> {
+        Self::validate_unit_name_for_creation(resource_name)?;
+
         let command = params
             .args
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| GlideshError::Module {
                 module: "systemd".to_string(),
-                message: "command parameter cannot be empty".to_string(),
+                message: "command parameter must be a non-empty string".to_string(),
             })?;
 
         if command.is_empty() {
             return Err(GlideshError::Module {
                 module: "systemd".to_string(),
-                message: "command parameter cannot be empty".to_string(),
+                message: "command parameter must be a non-empty string".to_string(),
             });
         }
 
@@ -87,12 +134,10 @@ impl SystemdModule {
 
         let mut unit_content = String::new();
 
-        // [Unit] section
         unit_content.push_str("[Unit]\n");
         unit_content.push_str(&format!("Description={}\n", description));
         unit_content.push_str(&format!("After={}\n", after));
 
-        // [Service] section
         unit_content.push_str("\n[Service]\n");
         unit_content.push_str(&format!("Type={}\n", service_type));
         unit_content.push_str(&format!("ExecStart={}\n", command));
@@ -115,7 +160,10 @@ impl SystemdModule {
                     keys.sort();
                     for key in keys {
                         let val = &env_map[key];
-                        unit_content.push_str(&format!("Environment=\"{}={}\"\n", key, val));
+                        Self::validate_env_value(key, val)?;
+                        let escaped_val = val.replace('\\', "\\\\").replace('"', "\\\"");
+                        unit_content
+                            .push_str(&format!("Environment=\"{}={}\"\n", key, escaped_val));
                     }
                 }
                 None => {
@@ -127,7 +175,6 @@ impl SystemdModule {
             }
         }
 
-        // [Install] section
         unit_content.push_str("\n[Install]\n");
         unit_content.push_str(&format!("WantedBy={}\n", wanted_by));
 
@@ -210,12 +257,13 @@ impl Module for SystemdModule {
             .get("state")
             .and_then(|v| v.as_str())
             .unwrap_or("started");
+        Self::validate_desired_state(desired_state)?;
         let desired_enabled = params.args.get("enabled").and_then(|v| v.as_bool());
 
         let mut needs_change = Vec::new();
 
-        // Check unit file if command is provided
-        if let Some(_content) = self.check_unit_file(ctx, params).await? {
+        let unit_file_changed = self.check_unit_file(ctx, params).await?.is_some();
+        if unit_file_changed {
             needs_change.push("upload unit file + daemon-reload".to_string());
         }
 
@@ -227,6 +275,7 @@ impl Module for SystemdModule {
 
         match desired_state {
             "started" if !active => needs_change.push("start".to_string()),
+            "started" if active && unit_file_changed => needs_change.push("restart".to_string()),
             "stopped" if active => needs_change.push("stop".to_string()),
             "restarted" => needs_change.push("restart".to_string()),
             _ => {}
@@ -265,6 +314,7 @@ impl Module for SystemdModule {
             .get("state")
             .and_then(|v| v.as_str())
             .unwrap_or("started");
+        Self::validate_desired_state(desired_state)?;
         let desired_enabled = params.args.get("enabled").and_then(|v| v.as_bool());
 
         if ctx.dry_run {
@@ -297,10 +347,13 @@ impl Module for SystemdModule {
         }
 
         match desired_state {
+            "started" if file_changed => {
+                commands.push(format!("systemctl restart {}", unit));
+            }
             "started" => commands.push(format!("systemctl start {}", unit)),
             "stopped" => commands.push(format!("systemctl stop {}", unit)),
             "restarted" => commands.push(format!("systemctl restart {}", unit)),
-            _ => {}
+            _ => unreachable!(),
         }
 
         if commands.is_empty() {
@@ -526,6 +579,83 @@ mod tests {
             resource_name: "test".to_string(),
             args,
         };
-        assert!(!SystemdModule::has_command(&params));
+        assert!(SystemdModule::has_command(&params));
+    }
+
+    #[test]
+    fn test_validate_desired_state_valid() {
+        assert!(SystemdModule::validate_desired_state("started").is_ok());
+        assert!(SystemdModule::validate_desired_state("stopped").is_ok());
+        assert!(SystemdModule::validate_desired_state("restarted").is_ok());
+    }
+
+    #[test]
+    fn test_validate_desired_state_invalid() {
+        assert!(SystemdModule::validate_desired_state("running").is_err());
+        assert!(SystemdModule::validate_desired_state("").is_err());
+    }
+
+    #[test]
+    fn test_validate_unit_name_for_creation_service() {
+        assert!(SystemdModule::validate_unit_name_for_creation("my-app").is_ok());
+        assert!(SystemdModule::validate_unit_name_for_creation("my-app.service").is_ok());
+    }
+
+    #[test]
+    fn test_validate_unit_name_for_creation_non_service() {
+        assert!(SystemdModule::validate_unit_name_for_creation("backup.timer").is_err());
+        assert!(SystemdModule::validate_unit_name_for_creation("my.socket").is_err());
+    }
+
+    #[test]
+    fn test_validate_env_value_valid() {
+        assert!(SystemdModule::validate_env_value("PORT", "8080").is_ok());
+        assert!(SystemdModule::validate_env_value("PATH", "/usr/bin:/bin").is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_value_newline_in_value() {
+        assert!(SystemdModule::validate_env_value("KEY", "line1\nline2").is_err());
+    }
+
+    #[test]
+    fn test_validate_env_value_bad_key() {
+        assert!(SystemdModule::validate_env_value("KEY\"BAD", "val").is_err());
+        assert!(SystemdModule::validate_env_value("KEY\nBAD", "val").is_err());
+    }
+
+    #[test]
+    fn test_generate_unit_file_non_service_suffix() {
+        let mut args = HashMap::new();
+        args.insert(
+            "command".to_string(),
+            ParamValue::String("/usr/bin/app".to_string()),
+        );
+        let params = ModuleParams {
+            resource_name: "backup.timer".to_string(),
+            args,
+        };
+        let result = SystemdModule::generate_unit_file("backup.timer", &params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_environment_escaping() {
+        let mut env = HashMap::new();
+        env.insert("GREETING".to_string(), "hello \"world\"".to_string());
+
+        let mut args = HashMap::new();
+        args.insert(
+            "command".to_string(),
+            ParamValue::String("/usr/bin/app".to_string()),
+        );
+        args.insert("environment".to_string(), ParamValue::Map(env));
+        let params = ModuleParams {
+            resource_name: "test".to_string(),
+            args,
+        };
+
+        let content = SystemdModule::generate_unit_file("test", &params).unwrap();
+        assert!(content.contains(r#"Environment="GREETING=hello \"world\"""#));
     }
 }
