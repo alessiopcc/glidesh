@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check:
@@ -57,7 +58,7 @@ jobs:
         run: |
           cargo llvm-cov --all-targets --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
-          cargo llvm-cov report --summary-only --ignore-filename-regex '(main\.rs|executor/|tui/|logs/|cli\.rs)'
+          cargo llvm-cov report --summary-only --ignore-filename-regex '(main\.rs|executor/|tui/|logging/|cli\.rs)'
         env:
           GLIDESH_INTEGRATION: "1"
       - uses: actions/upload-artifact@v4
