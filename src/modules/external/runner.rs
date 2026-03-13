@@ -8,7 +8,7 @@ use crate::ssh::SshSession;
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 
 use super::discovery::ExternalModuleInfo;
 
@@ -24,7 +24,7 @@ impl ExternalModule {
     }
 
     fn spawn_plugin(&self) -> Result<Child, GlideshError> {
-        Command::new(&self.info.path)
+        super::discovery::build_tokio_command(&self.info)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

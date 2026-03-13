@@ -7,15 +7,9 @@ pub struct ExternalModuleInfo {
     pub name: String,
     pub path: PathBuf,
     pub version: String,
+    pub interpreter: Option<String>,
 }
 
-/// Discover external modules from conventional locations and extra paths.
-///
-/// Search order:
-/// 1. `plan_dir/modules/` (if plan_dir is provided)
-/// 2. `~/.glidesh/modules/`
-/// 3. Extra paths from `--module-path`
-/// 4. `$PATH` executables matching `glidesh-module-*`
 pub fn discover_external_modules(
     plan_dir: Option<&Path>,
     extra_paths: &[PathBuf],
@@ -23,24 +17,20 @@ pub fn discover_external_modules(
     let mut modules = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    // 1. Plan-local modules directory
     if let Some(dir) = plan_dir {
         let modules_dir = dir.join("modules");
         scan_directory(&modules_dir, &mut modules, &mut seen_names);
     }
 
-    // 2. User-global modules directory
     if let Some(home) = dirs::home_dir() {
         let user_dir = home.join(".glidesh").join("modules");
         scan_directory(&user_dir, &mut modules, &mut seen_names);
     }
 
-    // 3. Extra paths from --module-path
     for dir in extra_paths {
         scan_directory(dir, &mut modules, &mut seen_names);
     }
 
-    // 4. $PATH scan
     scan_path_env(&mut modules, &mut seen_names);
 
     modules
@@ -98,13 +88,9 @@ fn try_parse_module(
 
     let file_name = path.file_name()?.to_string_lossy();
 
-    // Strip .exe suffix on Windows
     let base_name = file_name.strip_suffix(".exe").unwrap_or(&file_name);
-
-    // Verify the executable matches the naming convention
     base_name.strip_prefix(MODULE_PREFIX)?;
 
-    // Probe the module to get the canonical name from its describe response
     match probe_module(path) {
         Ok(info) => {
             if info.name.is_empty() {
@@ -131,11 +117,58 @@ fn try_parse_module(
     }
 }
 
+fn parse_shebang(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line).ok()?;
+
+    let shebang = first_line.strip_prefix("#!")?;
+    let shebang = shebang.trim();
+
+    let interpreter = if let Some(rest) = shebang.strip_prefix("/usr/bin/env ") {
+        rest.split_whitespace().next()?
+    } else {
+        shebang.split_whitespace().next()?
+    };
+
+    let basename = Path::new(interpreter).file_name()?.to_str()?;
+
+    Some(basename.to_string())
+}
+
+pub fn build_tokio_command(info: &ExternalModuleInfo) -> tokio::process::Command {
+    if let Some(ref interp) = info.interpreter {
+        let mut cmd = tokio::process::Command::new(interp);
+        cmd.arg(&info.path);
+        cmd
+    } else {
+        tokio::process::Command::new(&info.path)
+    }
+}
+
+fn build_probe_command(path: &Path, interpreter: Option<&str>) -> std::process::Command {
+    if let Some(interp) = interpreter {
+        let mut cmd = std::process::Command::new(interp);
+        cmd.arg(path);
+        cmd
+    } else {
+        std::process::Command::new(path)
+    }
+}
+
 fn probe_module(path: &Path) -> Result<ExternalModuleInfo, String> {
     use std::io::{BufRead, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    let mut child = Command::new(path)
+    let interpreter = if cfg!(windows) {
+        parse_shebang(path)
+    } else {
+        None
+    };
+
+    let mut child = build_probe_command(path, interpreter.as_deref())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -145,11 +178,9 @@ fn probe_module(path: &Path) -> Result<ExternalModuleInfo, String> {
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
 
-    // Send describe request
     writeln!(stdin, r#"{{"method":"describe"}}"#).map_err(|e| format!("write failed: {}", e))?;
     stdin.flush().map_err(|e| format!("flush failed: {}", e))?;
 
-    // Read response with a short timeout via a thread
     let (tx, rx) = std::sync::mpsc::channel();
     let reader_thread = std::thread::spawn(move || {
         let mut reader = std::io::BufReader::new(stdout);
@@ -166,7 +197,6 @@ fn probe_module(path: &Path) -> Result<ExternalModuleInfo, String> {
         .map_err(|_| "describe timed out".to_string())?
         .map_err(|e| format!("read failed: {}", e))?;
 
-    // Send shutdown and clean up
     let _ = writeln!(stdin, r#"{{"method":"shutdown"}}"#);
     let _ = child.kill();
     let _ = reader_thread.join();
@@ -186,5 +216,6 @@ fn probe_module(path: &Path) -> Result<ExternalModuleInfo, String> {
         name: desc.name,
         path: path.to_path_buf(),
         version: desc.version,
+        interpreter,
     })
 }

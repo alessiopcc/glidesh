@@ -83,9 +83,6 @@ impl ModuleRegistry {
         registry
     }
 
-    /// Create a registry that also discovers external modules from the filesystem.
-    /// Searches `plan_dir/modules/`, `~/.glidesh/modules/`, `$PATH`, and any
-    /// extra directories supplied via `--module-path`.
     pub fn with_external(plan_dir: Option<&Path>, extra_paths: &[std::path::PathBuf]) -> Self {
         let mut registry = Self::new();
 
@@ -119,9 +116,6 @@ impl ModuleRegistry {
         self.modules.insert(module.name().to_string(), module);
     }
 
-    /// Look up a module by name. Names starting with `external.` are resolved
-    /// from the external modules map (with the prefix stripped). All other names
-    /// resolve from the built-in modules map.
     pub fn get(&self, name: &str) -> Option<&dyn Module> {
         if let Some(ext_name) = name.strip_prefix("external.") {
             self.external_modules.get(ext_name).map(|m| m.as_ref())
