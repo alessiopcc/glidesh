@@ -73,7 +73,8 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
 #[cfg(target_os = "linux")]
 fn apply_landlock() {
     use landlock::{
-        ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+        ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+        RulesetCreatedAttr,
     };
 
     let abi = ABI::V5;
@@ -82,14 +83,11 @@ fn apply_landlock() {
     let read_write = AccessFs::from_all(abi);
 
     let result = Ruleset::default()
-        .set_compatibility(landlock::CompatLevel::BestEffort)
+        .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))
-        .and_then(|r| {
-            r.set_compatibility(landlock::CompatLevel::BestEffort)
-                .create()
-        })
-        .and_then(|r| {
-            r.set_compatibility(landlock::CompatLevel::BestEffort)
+        .and_then(|r: Ruleset| r.set_compatibility(CompatLevel::BestEffort).create())
+        .and_then(|r: landlock::RulesetCreated| {
+            r.set_compatibility(CompatLevel::BestEffort)
                 .add_rule(PathBeneath::new(PathFd::new(&temp)?, read_write))?
                 .add_rule(PathBeneath::new(PathFd::new("/usr")?, read_exec))?
                 .add_rule(PathBeneath::new(PathFd::new("/lib")?, read_exec))?
