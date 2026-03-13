@@ -61,15 +61,12 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
     cmd.current_dir(std::env::temp_dir());
 
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                apply_landlock();
-                Ok(())
-            });
-        }
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            apply_landlock();
+            Ok(())
+        });
     }
 }
 
@@ -79,28 +76,29 @@ fn apply_landlock() {
         ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
     };
 
-    let abi = match ABI::new_current() {
-        Ok(abi) => abi,
-        Err(_) => return,
-    };
-
+    let abi = ABI::V5;
     let temp = std::env::temp_dir();
     let read_exec = AccessFs::from_read(abi) | AccessFs::Execute;
     let read_write = AccessFs::from_all(abi);
 
     let result = Ruleset::default()
+        .set_compatibility(landlock::CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))
-        .expect("landlock ruleset creation")
-        .create()
-        .expect("landlock ruleset activation")
-        .add_rule(PathBeneath::new(PathFd::new(&temp).unwrap(), read_write))
-        .and_then(|r| r.add_rule(PathBeneath::new(PathFd::new("/usr").unwrap(), read_exec)))
-        .and_then(|r| r.add_rule(PathBeneath::new(PathFd::new("/lib").unwrap(), read_exec)))
-        .and_then(|r| r.add_rule(PathBeneath::new(PathFd::new("/lib64").unwrap(), read_exec)))
-        .and_then(|r| r.restrict_self());
+        .and_then(|r| {
+            r.set_compatibility(landlock::CompatLevel::BestEffort)
+                .create()
+        })
+        .and_then(|r| {
+            r.set_compatibility(landlock::CompatLevel::BestEffort)
+                .add_rule(PathBeneath::new(PathFd::new(&temp)?, read_write))?
+                .add_rule(PathBeneath::new(PathFd::new("/usr")?, read_exec))?
+                .add_rule(PathBeneath::new(PathFd::new("/lib")?, read_exec))?
+                .add_rule(PathBeneath::new(PathFd::new("/lib64")?, read_exec))?
+                .restrict_self()
+        });
 
     if let Err(e) = result {
-        eprintln!("landlock: failed to apply restrictions: {e}");
+        eprintln!("landlock: {e}");
     }
 }
 
