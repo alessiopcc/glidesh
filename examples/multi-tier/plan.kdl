@@ -1,5 +1,4 @@
 plan "multi-tier" {
-    target "web"
     mode "sync"
 
     include "common/base.kdl"

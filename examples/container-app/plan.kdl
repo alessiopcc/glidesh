@@ -1,5 +1,4 @@
 plan "container-app" {
-    target "app"
     mode "sync"
 
     vars {

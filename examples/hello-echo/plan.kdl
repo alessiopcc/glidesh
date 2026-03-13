@@ -1,5 +1,4 @@
 plan "hello-echo" {
-    target "app"
     mode "sync"
 
     vars {

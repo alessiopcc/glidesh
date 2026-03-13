@@ -14,7 +14,7 @@ This example demonstrates how to use `include` to share common configuration acr
 ```
 multi-tier/
 ├── inventory.kdl       # Web, app, and db groups
-├── plan.kdl            # Main plan (targets web, includes base)
+├── plan.kdl            # Main plan (includes base, installs nginx)
 ├── common/
 │   └── base.kdl        # Shared base configuration
 └── README.md

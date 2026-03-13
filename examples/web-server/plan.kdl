@@ -1,5 +1,4 @@
 plan "web-server" {
-    target "web"
     mode "sync"
 
     vars {

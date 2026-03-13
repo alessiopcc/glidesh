@@ -1,6 +1,4 @@
 plan "user-setup" {
-    target "servers"
-
     vars {
         deploy-shell "/bin/bash"
     }
