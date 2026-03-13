@@ -202,10 +202,7 @@ impl SshSession {
 
         if output.exit_code != 0 {
             let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
-            if combined.contains("no such file")
-                || combined.contains("not found")
-                || combined.contains("cannot open")
-            {
+            if combined.contains("no such file or directory") || combined.contains("cannot open") {
                 return Ok(None);
             }
             return Err(GlideshError::Module {

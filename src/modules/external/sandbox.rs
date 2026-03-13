@@ -44,11 +44,7 @@ fn apply_common_std(cmd: &mut std::process::Command) {
     {
         use std::os::unix::process::CommandExt;
         unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                apply_landlock();
-                Ok(())
-            });
+            cmd.pre_exec(pre_exec_sandbox);
         }
     }
 }
@@ -62,12 +58,21 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
 
     #[cfg(unix)]
     unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            apply_landlock();
-            Ok(())
-        });
+        cmd.pre_exec(pre_exec_sandbox);
     }
+}
+
+/// Pre-exec hook: session isolation + filesystem restriction.
+/// Runs in the child process after fork(), before exec().
+/// Note: only async-signal-safe functions are technically permitted here,
+/// but setsid and landlock syscalls are safe. Avoid heap allocation.
+#[cfg(unix)]
+fn pre_exec_sandbox() -> std::io::Result<()> {
+    if unsafe { libc::setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    apply_landlock();
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

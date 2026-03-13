@@ -57,7 +57,7 @@ fn try_parse_module(
 
     let file_name = path.file_name()?.to_string_lossy();
 
-    let path = match path.canonicalize() {
+    let canonical = match path.canonicalize() {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(
@@ -68,12 +68,11 @@ fn try_parse_module(
             return None;
         }
     };
-    let path = path.as_path();
 
     let base_name = file_name.strip_suffix(".exe").unwrap_or(&file_name);
     base_name.strip_prefix(MODULE_PREFIX)?;
 
-    match probe_module(path) {
+    match probe_module(&canonical) {
         Ok(info) => {
             if info.name.is_empty() {
                 tracing::warn!(

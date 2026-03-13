@@ -5,11 +5,26 @@ mod common;
 use glidesh::modules::external::sandbox::apply_probe_sandbox;
 use std::process::{Command, Stdio};
 
+/// Check if the running kernel supports landlock by attempting to create a minimal ruleset.
+fn landlock_supported() -> bool {
+    use landlock::{ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr};
+    Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(AccessFs::from_read(ABI::V5))
+        .and_then(|r| r.set_compatibility(CompatLevel::HardRequirement).create())
+        .is_ok()
+}
+
 /// Landlock blocks reading files outside /tmp, /usr, /lib, /lib64.
-/// Skips gracefully if kernel doesn't support landlock (< 5.13).
+/// Skips if kernel doesn't support landlock.
 #[test]
 fn test_sandbox_blocks_read_outside_tmpdir() {
     skip_unless_integration!();
+
+    if !landlock_supported() {
+        eprintln!("Skipping: landlock not supported on this kernel");
+        return;
+    }
 
     let sentinel =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".sandbox_test_sentinel");
@@ -27,13 +42,10 @@ fn test_sandbox_blocks_read_outside_tmpdir() {
 
     let _ = std::fs::remove_file(&sentinel);
 
-    if output.status.success() {
-        eprintln!(
-            "Sandboxed process read outside /tmp — landlock not supported on this kernel. \
-             Skipping assertion."
-        );
-        return;
-    }
+    assert!(
+        !output.status.success(),
+        "sandboxed process should NOT be able to read outside /tmp"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -76,6 +88,11 @@ fn test_sandbox_allows_read_inside_tmpdir() {
 fn test_sandbox_blocks_ssh_key_access() {
     skip_unless_integration!();
 
+    if !landlock_supported() {
+        eprintln!("Skipping: landlock not supported on this kernel");
+        return;
+    }
+
     let ssh_key = dirs::home_dir()
         .expect("no home dir")
         .join(".ssh")
@@ -96,10 +113,10 @@ fn test_sandbox_blocks_ssh_key_access() {
         .output()
         .expect("failed to spawn sandboxed process");
 
-    if output.status.success() {
-        eprintln!("Sandboxed process read ~/.ssh/id_rsa — landlock not supported. Skipping.");
-        return;
-    }
+    assert!(
+        !output.status.success(),
+        "sandboxed process should NOT be able to read ~/.ssh/id_rsa"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
