@@ -517,6 +517,23 @@ step "Set MOTD" {
 | Describe response | Must return non-empty `name` |
 | Distribution | Place in `./modules/` (relative to inventory) or `~/.glidesh/modules/` |
 
+## Security: Process Sandbox
+
+glidesh runs every plugin process inside a sandbox:
+
+| Measure | Platform | Effect |
+|---------|----------|--------|
+| **Env scrub** | All | Only `PATH`, `HOME`/`USERPROFILE`, `LANG`, temp dir vars are passed. Secrets are stripped. |
+| **Temp workdir** | All | Plugin CWD is the system temp directory, not the project directory. |
+| **Session isolation** | Unix | `setsid()` — plugin cannot signal glidesh's process group. |
+| **Filesystem restriction** | Linux 5.13+ | [landlock](https://docs.kernel.org/userspace-api/landlock.html) limits access to `/tmp`, `/usr`, `/lib`, `/lib64`. Home dirs, project files, and SSH keys are blocked. |
+
+Runtime (check/apply) processes also receive `GLIDESH_PROTOCOL_VERSION` and `GLIDESH_MODULE_NAME` environment variables.
+
+:::caution[macOS and Windows]
+Landlock filesystem restriction is **only available on Linux 5.13+**. On macOS and Windows, plugins still get environment scrubbing, temp workdir, and session isolation (Unix), but they **can read any file** accessible to the glidesh user. Always review third-party plugins before installing them — especially on platforms without landlock.
+:::
+
 ## Tips
 
 - Use `dry_run` in the check/apply request to avoid side effects during `--dry-run` runs

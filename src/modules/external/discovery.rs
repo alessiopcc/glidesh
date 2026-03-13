@@ -55,6 +55,20 @@ fn try_parse_module(
 
     let file_name = path.file_name()?.to_string_lossy();
 
+    // Resolve to absolute so the path remains valid after sandbox changes CWD
+    let path = match path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "Cannot canonicalize module path '{}': {}",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    };
+    let path = path.as_path();
+
     let base_name = file_name.strip_suffix(".exe").unwrap_or(&file_name);
     base_name.strip_prefix(MODULE_PREFIX)?;
 
@@ -135,7 +149,9 @@ fn probe_module(path: &Path) -> Result<ExternalModuleInfo, String> {
         None
     };
 
-    let mut child = build_probe_command(path, interpreter.as_deref())
+    let mut cmd = build_probe_command(path, interpreter.as_deref());
+    super::sandbox::apply_probe_sandbox(&mut cmd);
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

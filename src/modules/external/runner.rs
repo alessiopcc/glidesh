@@ -24,8 +24,9 @@ impl ExternalModule {
     }
 
     fn spawn_plugin(&self) -> Result<Child, GlideshError> {
-        super::discovery::build_tokio_command(&self.info)
-            .stdin(std::process::Stdio::piped())
+        let mut cmd = super::discovery::build_tokio_command(&self.info);
+        super::sandbox::apply_runtime_sandbox(&mut cmd, &self.info.name);
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

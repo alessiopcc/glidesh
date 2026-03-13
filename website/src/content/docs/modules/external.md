@@ -80,4 +80,17 @@ plan "deploy" {
 }
 ```
 
+## Security: Process Sandbox
+
+External modules run inside a sandbox that restricts what the plugin process can access:
+
+- **Environment scrubbing** (all platforms) — only a minimal allow-list of variables (`PATH`, `HOME`/`USERPROFILE`, `LANG`, temp dir vars) is passed to the plugin. Secrets like `AWS_SECRET_ACCESS_KEY`, `*_TOKEN`, etc. are stripped.
+- **Temp working directory** (all platforms) — plugins run in the system temp directory, not glidesh's working directory.
+- **Session isolation** (Unix) — plugins run in a new process session (`setsid`) so they cannot signal glidesh's process group.
+- **Filesystem restriction** (Linux 5.13+) — [landlock](https://docs.kernel.org/userspace-api/landlock.html) restricts the plugin to `/tmp`, `/usr`, `/lib`, and `/lib64`. Access to home directories, project files, and SSH keys is denied.
+
+:::caution[macOS and Windows]
+On macOS and Windows, the filesystem restriction (landlock) is **not available**. Plugins on these platforms still get environment scrubbing, temp workdir, and session isolation (Unix), but can read any file the glidesh process user can access. Treat third-party plugins as untrusted code and review them before use — especially on platforms without landlock.
+:::
+
 See [Writing Plugins](/advanced/writing-plugins/) for how to build your own external module.
