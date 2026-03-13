@@ -61,15 +61,12 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
     cmd.current_dir(std::env::temp_dir());
 
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                apply_landlock();
-                Ok(())
-            });
-        }
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            apply_landlock();
+            Ok(())
+        });
     }
 }
 
@@ -85,16 +82,33 @@ fn apply_landlock() {
     let read_exec = AccessFs::from_read(abi) | AccessFs::Execute;
     let read_write = AccessFs::from_all(abi);
 
+    let fd_temp = match PathFd::new(&temp) {
+        Ok(fd) => fd,
+        Err(_) => return,
+    };
+    let fd_usr = match PathFd::new("/usr") {
+        Ok(fd) => fd,
+        Err(_) => return,
+    };
+    let fd_lib = match PathFd::new("/lib") {
+        Ok(fd) => fd,
+        Err(_) => return,
+    };
+    let fd_lib64 = match PathFd::new("/lib64") {
+        Ok(fd) => fd,
+        Err(_) => return,
+    };
+
     let result = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))
         .and_then(|r: Ruleset| r.set_compatibility(CompatLevel::BestEffort).create())
         .and_then(|r: landlock::RulesetCreated| {
             r.set_compatibility(CompatLevel::BestEffort)
-                .add_rule(PathBeneath::new(PathFd::new(&temp)?, read_write))?
-                .add_rule(PathBeneath::new(PathFd::new("/usr")?, read_exec))?
-                .add_rule(PathBeneath::new(PathFd::new("/lib")?, read_exec))?
-                .add_rule(PathBeneath::new(PathFd::new("/lib64")?, read_exec))?
+                .add_rule(PathBeneath::new(fd_temp, read_write))?
+                .add_rule(PathBeneath::new(fd_usr, read_exec))?
+                .add_rule(PathBeneath::new(fd_lib, read_exec))?
+                .add_rule(PathBeneath::new(fd_lib64, read_exec))?
                 .restrict_self()
         });
 
