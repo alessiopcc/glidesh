@@ -193,19 +193,32 @@ impl SshSession {
     }
 
     pub async fn checksum_remote(&self, remote_path: &str) -> Result<Option<String>, GlideshError> {
+        let escaped = shell_escape(remote_path);
         let output = self
             .exec(&format!(
-                "sha256sum {} 2>/dev/null || shasum -a 256 {} 2>/dev/null",
-                shell_escape(remote_path),
-                shell_escape(remote_path)
+                "sha256sum {escaped} 2>&1 || shasum -a 256 {escaped} 2>&1",
             ))
             .await?;
 
         if output.exit_code != 0 {
-            return Ok(None);
+            let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+            if combined.contains("no such file")
+                || combined.contains("not found")
+                || combined.contains("cannot open")
+            {
+                return Ok(None);
+            }
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "checksum of '{}' failed (exit {}): {}",
+                    remote_path,
+                    output.exit_code,
+                    output.stdout.trim(),
+                ),
+            });
         }
 
-        // sha256sum output: "<hash>  <filename>"
         Ok(output
             .stdout
             .split_whitespace()
