@@ -192,14 +192,29 @@ fn probe_module(path: &Path) -> Result<ExternalModuleInfo, String> {
         }
     });
 
-    let response = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "describe timed out".to_string())?
-        .map_err(|e| format!("read failed: {}", e))?;
+    let cleanup = |mut stdin: std::process::ChildStdin,
+                   mut child: std::process::Child,
+                   reader_thread: std::thread::JoinHandle<_>| {
+        let _ = writeln!(stdin, r#"{{"method":"shutdown"}}"#);
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader_thread.join();
+    };
 
-    let _ = writeln!(stdin, r#"{{"method":"shutdown"}}"#);
-    let _ = child.kill();
-    let _ = reader_thread.join();
+    let response = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => {
+            cleanup(stdin, child, reader_thread);
+            return Err(format!("read failed: {}", e));
+        }
+        Err(_) => {
+            cleanup(stdin, child, reader_thread);
+            return Err("describe timed out".to_string());
+        }
+    };
+
+    cleanup(stdin, child, reader_thread);
 
     let desc: super::protocol::DescribeResponse =
         serde_json::from_str(&response).map_err(|e| format!("invalid describe response: {}", e))?;

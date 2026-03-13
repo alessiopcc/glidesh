@@ -140,10 +140,14 @@ pub enum SshResponse {
     Download {
         content_base64: String,
         exists: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Checksum {
         hash: String,
         exists: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     SetAttrs {
         ok: bool,

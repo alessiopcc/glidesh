@@ -59,24 +59,20 @@ impl ExternalModule {
         let mut writer = tokio::io::BufWriter::new(stdin);
         let mut reader = BufReader::new(stdout);
 
-        let result = tokio::time::timeout(
-            PLUGIN_TIMEOUT,
-            self.run_method_inner(method, ctx, params, &mut writer, &mut reader),
-        )
+        let result = tokio::time::timeout(PLUGIN_TIMEOUT, async {
+            let inner = self
+                .run_method_inner(method, ctx, params, &mut writer, &mut reader)
+                .await;
+
+            let _ = send_line(&mut writer, &ShutdownRequest::new(), &self.info.name).await;
+            drop(writer);
+
+            inner
+        })
         .await;
 
-        // Send shutdown and clean up
-        let _ = send_line(&mut writer, &ShutdownRequest::new()).await;
         let _ = child.kill().await;
-
-        // Collect stderr for logging
-        if let Some(mut stderr) = child.stderr.take() {
-            let mut stderr_buf = String::new();
-            let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut stderr_buf).await;
-            if !stderr_buf.is_empty() {
-                tracing::debug!("Plugin '{}' stderr: {}", self.info.name, stderr_buf.trim());
-            }
-        }
+        let _ = child.wait().await;
 
         match result {
             Ok(inner) => inner,
@@ -108,9 +104,8 @@ impl ExternalModule {
             dry_run: ctx.dry_run,
         };
 
-        send_line(writer, &request).await?;
+        send_line(writer, &request, &self.info.name).await?;
 
-        // Read lines until we get a terminal response (not an SSH request)
         loop {
             let line = read_line(reader).await.map_err(|e| GlideshError::Module {
                 module: self.info.name.clone(),
@@ -126,7 +121,7 @@ impl ExternalModule {
             match msg {
                 PluginMessage::SshRequest(ssh_req) => {
                     let response = handle_ssh_request(ctx.ssh, ssh_req).await;
-                    send_line(writer, &response).await?;
+                    send_line(writer, &response, &self.info.name).await?;
                 }
                 terminal => return Ok(terminal),
             }
@@ -235,22 +230,30 @@ async fn handle_ssh_request(ssh: &SshSession, req: SshRequest) -> SshResponse {
                 SshResponse::Download {
                     content_base64: base64::engine::general_purpose::STANDARD.encode(&data),
                     exists: true,
+                    error: None,
                 }
             }
-            Err(_) => SshResponse::Download {
+            Err(e) => SshResponse::Download {
                 content_base64: String::new(),
                 exists: false,
+                error: Some(e.to_string()),
             },
         },
         SshRequest::Checksum { path } => match ssh.checksum_remote(&path).await {
-            Ok(Some(hash)) => SshResponse::Checksum { hash, exists: true },
+            Ok(Some(hash)) => SshResponse::Checksum {
+                hash,
+                exists: true,
+                error: None,
+            },
             Ok(None) => SshResponse::Checksum {
                 hash: String::new(),
                 exists: false,
+                error: None,
             },
-            Err(_) => SshResponse::Checksum {
+            Err(e) => SshResponse::Checksum {
                 hash: String::new(),
                 exists: false,
+                error: Some(e.to_string()),
             },
         },
         SshRequest::SetAttrs {
@@ -279,27 +282,28 @@ async fn handle_ssh_request(ssh: &SshSession, req: SshRequest) -> SshResponse {
 async fn send_line<T: serde::Serialize, W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut tokio::io::BufWriter<W>,
     msg: &T,
+    module_name: &str,
 ) -> Result<(), GlideshError> {
     let json = serde_json::to_string(msg).map_err(|e| GlideshError::Module {
-        module: "external".to_string(),
+        module: module_name.to_string(),
         message: format!("Failed to serialize message: {}", e),
     })?;
     writer
         .write_all(json.as_bytes())
         .await
         .map_err(|e| GlideshError::Module {
-            module: "external".to_string(),
+            module: module_name.to_string(),
             message: format!("Failed to write to plugin: {}", e),
         })?;
     writer
         .write_all(b"\n")
         .await
         .map_err(|e| GlideshError::Module {
-            module: "external".to_string(),
+            module: module_name.to_string(),
             message: format!("Failed to write newline to plugin: {}", e),
         })?;
     writer.flush().await.map_err(|e| GlideshError::Module {
-        module: "external".to_string(),
+        module: module_name.to_string(),
         message: format!("Failed to flush plugin stdin: {}", e),
     })?;
     Ok(())
