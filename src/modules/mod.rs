@@ -2,6 +2,7 @@ pub mod container;
 pub mod context;
 pub mod detect;
 pub mod disk;
+pub mod external;
 pub mod file;
 pub mod package;
 pub mod shell;
@@ -13,6 +14,7 @@ use crate::error::GlideshError;
 use async_trait::async_trait;
 use context::ModuleContext;
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -56,6 +58,7 @@ pub trait Module: Send + Sync {
 
 pub struct ModuleRegistry {
     modules: HashMap<String, Box<dyn Module>>,
+    external_modules: HashMap<String, Box<dyn Module>>,
 }
 
 impl Default for ModuleRegistry {
@@ -68,22 +71,62 @@ impl ModuleRegistry {
     pub fn new() -> Self {
         let mut registry = ModuleRegistry {
             modules: HashMap::new(),
+            external_modules: HashMap::new(),
         };
-        registry.register(Box::new(shell::ShellModule));
-        registry.register(Box::new(package::PackageModule));
-        registry.register(Box::new(user::UserModule));
-        registry.register(Box::new(systemd::SystemdModule));
-        registry.register(Box::new(container::ContainerModule));
-        registry.register(Box::new(file::FileModule));
-        registry.register(Box::new(disk::DiskModule));
+        registry.register_builtin(Box::new(shell::ShellModule));
+        registry.register_builtin(Box::new(package::PackageModule));
+        registry.register_builtin(Box::new(user::UserModule));
+        registry.register_builtin(Box::new(systemd::SystemdModule));
+        registry.register_builtin(Box::new(container::ContainerModule));
+        registry.register_builtin(Box::new(file::FileModule));
+        registry.register_builtin(Box::new(disk::DiskModule));
         registry
     }
 
-    pub fn register(&mut self, module: Box<dyn Module>) {
+    /// Create a registry that also discovers external modules from the filesystem.
+    /// Searches `plan_dir/modules/`, `~/.glidesh/modules/`, `$PATH`, and any
+    /// extra directories supplied via `--module-path`.
+    pub fn with_external(plan_dir: Option<&Path>, extra_paths: &[std::path::PathBuf]) -> Self {
+        let mut registry = Self::new();
+
+        let external = external::discovery::discover_external_modules(plan_dir, extra_paths);
+
+        for info in external {
+            if registry.external_modules.contains_key(&info.name) {
+                tracing::debug!(
+                    "Skipping duplicate external module '{}' at '{}'",
+                    info.name,
+                    info.path.display()
+                );
+                continue;
+            }
+            tracing::info!(
+                "Loaded external module '{}' v{} from '{}'",
+                info.name,
+                info.version,
+                info.path.display()
+            );
+            registry.external_modules.insert(
+                info.name.clone(),
+                Box::new(external::runner::ExternalModule::new(info)),
+            );
+        }
+
+        registry
+    }
+
+    fn register_builtin(&mut self, module: Box<dyn Module>) {
         self.modules.insert(module.name().to_string(), module);
     }
 
+    /// Look up a module by name. Names starting with `external.` are resolved
+    /// from the external modules map (with the prefix stripped). All other names
+    /// resolve from the built-in modules map.
     pub fn get(&self, name: &str) -> Option<&dyn Module> {
-        self.modules.get(name).map(|m| m.as_ref())
+        if let Some(ext_name) = name.strip_prefix("external.") {
+            self.external_modules.get(ext_name).map(|m| m.as_ref())
+        } else {
+            self.modules.get(name).map(|m| m.as_ref())
+        }
     }
 }

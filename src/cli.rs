@@ -81,6 +81,10 @@ pub struct RunArgs {
     /// Accept and save new host keys to known_hosts
     #[arg(long)]
     pub accept_new_host_key: bool,
+
+    /// Additional directories to search for external modules
+    #[arg(long = "module-path", value_name = "DIR")]
+    pub module_paths: Vec<std::path::PathBuf>,
 }
 
 #[derive(Parser, Debug)]
