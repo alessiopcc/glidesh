@@ -199,15 +199,27 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
 }
 
 fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
-    let module = node.name().to_string();
+    let node_name = node.name().to_string();
 
-    let resource = node
+    let positional: Vec<&str> = node
         .entries()
         .iter()
-        .find(|e| e.name().is_none())
-        .and_then(|e| e.value().as_string())
-        .unwrap_or("")
-        .to_string();
+        .filter(|e| e.name().is_none())
+        .filter_map(|e| e.value().as_string())
+        .collect();
+
+    let (module, resource) = if node_name == "external" {
+        let mod_name = positional
+            .first()
+            .ok_or_else(|| GlideshError::ConfigParse {
+                message: "external requires a module name argument".into(),
+            })?;
+        let res = positional.get(1).unwrap_or(&"");
+        (format!("external.{}", mod_name), res.to_string())
+    } else {
+        let res = positional.first().unwrap_or(&"");
+        (node_name, res.to_string())
+    };
 
     let mut args = HashMap::new();
     let mut register = None;
@@ -664,5 +676,54 @@ plan "parent" {
         assert!(plan.vars.get("from-child").is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_external_module() {
+        let input = r#"
+plan "test" {
+    step "Configure nginx" {
+        external "acme/nginx-vhost" "mysite" server_name="example.com"
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        let task = &fp.steps()[0].tasks[0];
+        assert_eq!(task.module, "external.acme/nginx-vhost");
+        assert_eq!(task.resource, "mysite");
+        assert_eq!(
+            task.args.get("server_name").unwrap().as_str(),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn test_parse_external_module_no_resource() {
+        let input = r#"
+plan "test" {
+    step "Run plugin" {
+        external "acme/cleanup" timeout=30
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        let task = &fp.steps()[0].tasks[0];
+        assert_eq!(task.module, "external.acme/cleanup");
+        assert_eq!(task.resource, "");
+    }
+
+    #[test]
+    fn test_parse_external_module_missing_name() {
+        let input = r#"
+plan "test" {
+    step "Bad" {
+        external server_name="example.com"
+    }
+}
+"#;
+        let result = parse_plan(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("external requires a module name"));
     }
 }

@@ -1,7 +1,7 @@
 use crate::error::GlideshError;
 use crate::ssh::SshSession;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[allow(dead_code)]
 pub struct OsInfo {
     pub id: String,
@@ -12,7 +12,8 @@ pub struct OsInfo {
     pub container_runtime: Option<ContainerRuntime>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OsFamily {
     Debian,
     RedHat,
@@ -22,7 +23,8 @@ pub enum OsFamily {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PkgManager {
     Apt,
     Dnf,
@@ -32,14 +34,16 @@ pub enum PkgManager {
     Zypper,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InitSystem {
     Systemd,
     OpenRc,
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContainerRuntime {
     Podman,
     Docker,

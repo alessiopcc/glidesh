@@ -52,3 +52,11 @@ A multi-group setup with web, app, and database tiers. Uses plan includes for sh
 **Modules used:** include, package, file, systemd, container, shell
 
 [View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/multi-tier)
+
+## external-module
+
+Use an external plugin to set the system MOTD. Demonstrates the `external` keyword and the JSON-over-stdio plugin protocol with a simple Python module.
+
+**Features used:** external modules, plugin protocol, SSH proxy
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/external-module)

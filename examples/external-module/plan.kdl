@@ -1,0 +1,16 @@
+plan "external-module" {
+    target "web"
+    mode "sync"
+
+    vars {
+        motd-message "Managed by glidesh. Unauthorized access prohibited."
+    }
+
+    step "Set MOTD" {
+        external "example/motd" "${motd-message}"
+    }
+
+    step "Verify MOTD" {
+        shell "cat /etc/motd"
+    }
+}

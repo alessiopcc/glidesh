@@ -32,6 +32,7 @@ export default defineConfig({
 						{ label: 'Overview', slug: 'modules' },
 						{ label: 'container', slug: 'modules/container' },
 						{ label: 'disk', slug: 'modules/disk' },
+						{ label: 'external', slug: 'modules/external' },
 						{ label: 'file', slug: 'modules/file' },
 						{ label: 'package', slug: 'modules/package' },
 						{ label: 'shell', slug: 'modules/shell' },
@@ -44,6 +45,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Loops & Register', slug: 'advanced/loops-register' },
 						{ label: 'Plan Includes', slug: 'advanced/plan-includes' },
+						{ label: 'Writing Plugins', slug: 'advanced/writing-plugins' },
 					],
 				},
 				{ label: 'Examples', slug: 'examples' },

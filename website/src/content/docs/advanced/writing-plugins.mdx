@@ -1,0 +1,561 @@
+---
+title: Writing Plugins
+description: Build custom external modules for glidesh using the JSON-over-stdio protocol.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+External modules are standalone executables that communicate with glidesh via newline-delimited JSON on stdin/stdout. They can be written in any language — scripted or compiled. Plugins never receive SSH credentials — they request operations through glidesh, which proxies them over the existing SSH session.
+
+## Protocol Overview
+
+The protocol has three phases:
+
+1. **Describe** — glidesh probes the plugin during discovery to learn its name and version. This happens once at startup in a short-lived process. The describe handshake is **only used during discovery** — runtime check/apply processes do not receive a describe request.
+2. **Check/Apply** — glidesh spawns a **new** plugin process and sends a task; the plugin may issue SSH requests and returns a result
+3. **Shutdown** — glidesh tells the plugin to exit
+
+All messages are single-line JSON, terminated by a newline.
+
+## 1. Describe Handshake
+
+glidesh sends:
+
+```json
+{"method":"describe"}
+```
+
+Plugin responds:
+
+```json
+{"name":"acme/nginx-vhost","version":"1.0.0","protocol_version":1}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Canonical module name. May contain `/` for owner/name format |
+| `version` | string | Module version (informational) |
+| `protocol_version` | integer | Must be `1` |
+
+The name in the describe response is authoritative — it becomes the name used in plans with `external "acme/nginx-vhost"`.
+
+## 2. Check and Apply
+
+After the handshake, glidesh sends `check` or `apply` requests:
+
+```json
+{
+    "method": "check",
+    "resource_name": "mysite",
+    "args": {
+        "server_name": {"string": "example.com"},
+        "listen": {"integer": 443}
+    },
+    "os_info": {
+        "id": "ubuntu",
+        "version": "22.04",
+        "family": "debian",
+        "pkg_manager": "apt",
+        "init_system": "systemd",
+        "container_runtime": "docker" // may be null if no runtime detected
+    },
+    "vars": {"host.name": "web-1", "host.address": "10.0.0.1"},
+    "dry_run": false
+}
+```
+
+### Check Response
+
+Return one of three statuses:
+
+```json
+{"status":"satisfied"}
+```
+
+```json
+{"status":"pending","plan":"will create /etc/nginx/sites-enabled/mysite"}
+```
+
+```json
+{"status":"unknown","reason":"cannot determine nginx state"}
+```
+
+### Apply Response
+
+```json
+{
+    "changed": true,
+    "output": "created vhost mysite",
+    "stderr": "",
+    "exit_code": 0
+}
+```
+
+### Error Response
+
+If something goes wrong, return an error at any point:
+
+```json
+{"error":"nginx config syntax check failed"}
+```
+
+## 3. SSH Operations
+
+Plugins don't have direct SSH access. Instead, they send SSH operation requests and glidesh responds with results. This proxy loop can repeat as many times as needed during a single check or apply call.
+
+### exec — Run a command
+
+Request:
+```json
+{"ssh":"exec","command":"nginx -t"}
+```
+
+Response:
+```json
+{"ssh_result":"exec","exit_code":0,"stdout":"syntax ok\n","stderr":""}
+```
+
+### upload — Write a file
+
+Request:
+```json
+{"ssh":"upload","path":"/etc/nginx/sites-enabled/mysite","content_base64":"c2VydmVyIHsgLi4uIH0="}
+```
+
+Response:
+```json
+{"ssh_result":"upload","ok":true}
+```
+
+On failure, an `error` field is included:
+```json
+{"ssh_result":"upload","ok":false,"error":"Permission denied"}
+```
+
+### download — Read a file
+
+Request:
+```json
+{"ssh":"download","path":"/etc/nginx/sites-enabled/mysite"}
+```
+
+Response:
+```json
+{"ssh_result":"download","content_base64":"c2VydmVyIHsgLi4uIH0=","exists":true}
+```
+
+When the file doesn't exist or an error occurs, `exists` is `false` and an optional `error` field explains why:
+```json
+{"ssh_result":"download","content_base64":"","exists":false,"error":"No such file"}
+```
+
+### checksum — SHA256 of a remote file
+
+Request:
+```json
+{"ssh":"checksum","path":"/etc/nginx/sites-enabled/mysite"}
+```
+
+Response:
+```json
+{"ssh_result":"checksum","hash":"a1b2c3...","exists":true}
+```
+
+When the file doesn't exist: `{"ssh_result":"checksum","hash":"","exists":false}`. On other failures, an `error` field is included.
+
+### set_attrs — Set file ownership and permissions
+
+Request:
+```json
+{"ssh":"set_attrs","path":"/etc/nginx/sites-enabled/mysite","owner":"root","group":"root","mode":"0644"}
+```
+
+Response:
+```json
+{"ssh_result":"set_attrs","ok":true}
+```
+
+On failure: `{"ssh_result":"set_attrs","ok":false,"error":"Permission denied"}`.
+
+All fields in `set_attrs` except `path` are optional — only provided fields are changed.
+
+:::note[Error field]
+All SSH proxy responses except `exec` may include an optional `error` string field on failure. Plugins should check `ok`/`exists` first, then inspect `error` for diagnostics.
+:::
+
+## 4. Shutdown
+
+glidesh sends a shutdown request when it no longer needs the plugin:
+
+```json
+{"method":"shutdown"}
+```
+
+The plugin should exit cleanly.
+
+## Complete Example: `example/motd` Plugin
+
+All four implementations below do the same thing — set `/etc/motd` on the target host. The plugin:
+
+1. **describe** — reports itself as `example/motd` with protocol version 1
+2. **check** — downloads `/etc/motd` via SSH proxy and compares to the desired content
+3. **apply** — uploads the new content via SSH proxy
+4. **shutdown** — exits cleanly
+
+Save the file as `glidesh-module-example-motd` (compiled languages produce a binary with this name), place it in one of the [discovery paths](/modules/external/#discovery), and use it in a plan:
+
+```kdl
+step "Set MOTD" {
+    external "example/motd" "Managed by glidesh."
+}
+```
+
+<Tabs>
+  <TabItem label="Bash">
+    ```bash
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    MOTD_PATH="/etc/motd"
+
+    while IFS= read -r line; do
+        method=$(echo "$line" | jq -r '.method // empty')
+
+        case "$method" in
+            describe)
+                echo '{"name":"example/motd","version":"1.0.0","protocol_version":1}'
+                ;;
+            check)
+                resource=$(echo "$line" | jq -r '.resource_name')
+                desired="$resource"$'\n'
+
+                echo "{\"ssh\":\"download\",\"path\":\"$MOTD_PATH\"}"
+                IFS= read -r result
+
+                exists=$(echo "$result" | jq -r '.exists')
+                if [ "$exists" = "false" ]; then
+                    echo "{\"status\":\"pending\",\"plan\":\"will create $MOTD_PATH\"}"
+                else
+                    current=$(echo "$result" | jq -r '.content_base64' | base64 -d)
+                    if [ "$current" = "$desired" ]; then
+                        echo '{"status":"satisfied"}'
+                    else
+                        echo "{\"status\":\"pending\",\"plan\":\"will update $MOTD_PATH\"}"
+                    fi
+                fi
+                ;;
+            apply)
+                resource=$(echo "$line" | jq -r '.resource_name')
+                content=$(printf '%s\n' "$resource" | base64 -w0)
+
+                echo "{\"ssh\":\"upload\",\"path\":\"$MOTD_PATH\",\"content_base64\":\"$content\"}"
+                IFS= read -r _result
+
+                echo "{\"changed\":true,\"output\":\"set $MOTD_PATH\",\"stderr\":\"\",\"exit_code\":0}"
+                ;;
+            shutdown)
+                exit 0
+                ;;
+        esac
+    done
+    ```
+
+    Requires `jq` and `base64` on the machine running glidesh.
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    #!/usr/bin/env python3
+    import json
+    import sys
+    import base64
+
+    MOTD_PATH = "/etc/motd"
+
+    def read_msg():
+        line = sys.stdin.readline()
+        if not line:
+            sys.exit(0)
+        return json.loads(line)
+
+    def send_msg(msg):
+        print(json.dumps(msg), flush=True)
+
+    def ssh_download(path):
+        send_msg({"ssh": "download", "path": path})
+        return read_msg()
+
+    def ssh_upload(path, content):
+        encoded = base64.b64encode(content.encode()).decode()
+        send_msg({"ssh": "upload", "path": path, "content_base64": encoded})
+        return read_msg()
+
+    while True:
+        msg = read_msg()
+        method = msg.get("method")
+
+        if method == "describe":
+            send_msg({
+                "name": "example/motd",
+                "version": "1.0.0",
+                "protocol_version": 1,
+            })
+
+        elif method == "check":
+            desired = msg["resource_name"] + "\n"
+            result = ssh_download(MOTD_PATH)
+
+            if not result.get("exists"):
+                send_msg({"status": "pending", "plan": f"will create {MOTD_PATH}"})
+            else:
+                current = base64.b64decode(result["content_base64"]).decode()
+                if current == desired:
+                    send_msg({"status": "satisfied"})
+                else:
+                    send_msg({"status": "pending", "plan": f"will update {MOTD_PATH}"})
+
+        elif method == "apply":
+            desired = msg["resource_name"] + "\n"
+            ssh_upload(MOTD_PATH, desired)
+            send_msg({
+                "changed": True,
+                "output": f"set {MOTD_PATH}",
+                "stderr": "",
+                "exit_code": 0,
+            })
+
+        elif method == "shutdown":
+            sys.exit(0)
+    ```
+
+    Requires Python 3 on the machine running glidesh.
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    package main
+
+    import (
+    	"bufio"
+    	"encoding/base64"
+    	"encoding/json"
+    	"fmt"
+    	"os"
+    )
+
+    const motdPath = "/etc/motd"
+
+    var (
+    	scanner = bufio.NewScanner(os.Stdin)
+    )
+
+    func readMsg(out any) {
+    	scanner.Scan()
+    	json.Unmarshal(scanner.Bytes(), out)
+    }
+
+    func sendMsg(msg any) {
+    	data, _ := json.Marshal(msg)
+    	fmt.Println(string(data))
+    }
+
+    func sshDownload(path string) map[string]any {
+    	sendMsg(map[string]any{"ssh": "download", "path": path})
+    	var result map[string]any
+    	readMsg(&result)
+    	return result
+    }
+
+    func sshUpload(path, content string) {
+    	encoded := base64.StdEncoding.EncodeToString([]byte(content))
+    	sendMsg(map[string]any{
+    		"ssh":            "upload",
+    		"path":           path,
+    		"content_base64": encoded,
+    	})
+    	var result map[string]any
+    	readMsg(&result)
+    }
+
+    func main() {
+    	for scanner.Scan() {
+    		var msg map[string]any
+    		json.Unmarshal(scanner.Bytes(), &msg)
+
+    		switch msg["method"] {
+    		case "describe":
+    			sendMsg(map[string]any{
+    				"name":             "example/motd",
+    				"version":          "1.0.0",
+    				"protocol_version": 1,
+    			})
+
+    		case "check":
+    			resource := msg["resource_name"].(string)
+    			desired := resource + "\n"
+    			result := sshDownload(motdPath)
+
+    			if exists, _ := result["exists"].(bool); !exists {
+    				sendMsg(map[string]string{
+    					"status": "pending",
+    					"plan":   fmt.Sprintf("will create %s", motdPath),
+    				})
+    			} else {
+    				encoded := result["content_base64"].(string)
+    				current, _ := base64.StdEncoding.DecodeString(encoded)
+    				if string(current) == desired {
+    					sendMsg(map[string]string{"status": "satisfied"})
+    				} else {
+    					sendMsg(map[string]string{
+    						"status": "pending",
+    						"plan":   fmt.Sprintf("will update %s", motdPath),
+    					})
+    				}
+    			}
+
+    		case "apply":
+    			resource := msg["resource_name"].(string)
+    			sshUpload(motdPath, resource+"\n")
+    			sendMsg(map[string]any{
+    				"changed":   true,
+    				"output":    fmt.Sprintf("set %s", motdPath),
+    				"stderr":    "",
+    				"exit_code": 0,
+    			})
+
+    		case "shutdown":
+    			os.Exit(0)
+    		}
+    	}
+    }
+    ```
+
+    Build with `go build -o glidesh-module-example-motd`.
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use serde::{Deserialize, Serialize};
+    use serde_json::{json, Value};
+    use std::io::{self, BufRead, Write};
+
+    const MOTD_PATH: &str = "/etc/motd";
+
+    fn read_msg() -> Value {
+        let mut line = String::new();
+        io::stdin().lock().read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn send_msg(msg: &Value) {
+        let mut stdout = io::stdout().lock();
+        serde_json::to_writer(&mut stdout, msg).unwrap();
+        writeln!(stdout).unwrap();
+        stdout.flush().unwrap();
+    }
+
+    fn ssh_download(path: &str) -> Value {
+        send_msg(&json!({"ssh": "download", "path": path}));
+        read_msg()
+    }
+
+    fn ssh_upload(path: &str, content: &str) {
+        let encoded = B64.encode(content.as_bytes());
+        send_msg(&json!({
+            "ssh": "upload",
+            "path": path,
+            "content_base64": encoded,
+        }));
+        let _ = read_msg();
+    }
+
+    fn main() {
+        let stdin = io::stdin().lock();
+        for line in stdin.lines() {
+            let line = line.unwrap();
+            let msg: Value = serde_json::from_str(&line).unwrap();
+
+            match msg["method"].as_str() {
+                Some("describe") => {
+                    send_msg(&json!({
+                        "name": "example/motd",
+                        "version": "1.0.0",
+                        "protocol_version": 1,
+                    }));
+                }
+                Some("check") => {
+                    let resource = msg["resource_name"].as_str().unwrap();
+                    let desired = format!("{resource}\n");
+                    let result = ssh_download(MOTD_PATH);
+
+                    if result["exists"].as_bool() != Some(true) {
+                        send_msg(&json!({
+                            "status": "pending",
+                            "plan": format!("will create {MOTD_PATH}"),
+                        }));
+                    } else {
+                        let encoded = result["content_base64"].as_str().unwrap();
+                        let current = B64.decode(encoded).unwrap();
+                        if current == desired.as_bytes() {
+                            send_msg(&json!({"status": "satisfied"}));
+                        } else {
+                            send_msg(&json!({
+                                "status": "pending",
+                                "plan": format!("will update {MOTD_PATH}"),
+                            }));
+                        }
+                    }
+                }
+                Some("apply") => {
+                    let resource = msg["resource_name"].as_str().unwrap();
+                    ssh_upload(MOTD_PATH, &format!("{resource}\n"));
+                    send_msg(&json!({
+                        "changed": true,
+                        "output": format!("set {MOTD_PATH}"),
+                        "stderr": "",
+                        "exit_code": 0,
+                    }));
+                }
+                Some("shutdown") => std::process::exit(0),
+                _ => {}
+            }
+        }
+    }
+    ```
+
+    Add `serde`, `serde_json`, and `base64` to your `Cargo.toml`. Build with `cargo build --release` and rename the binary to `glidesh-module-example-motd`.
+  </TabItem>
+</Tabs>
+
+## Packaging Conventions
+
+| Convention | Details |
+|-----------|---------|
+| Executable prefix | `glidesh-module-` (required for discovery) |
+| Name format | `owner/name` recommended for distribution |
+| Protocol version | Must be `1` |
+| Describe response | Must return non-empty `name` |
+| Distribution | Place in `./modules/` (relative to inventory) or `~/.glidesh/modules/` |
+
+## Security: Process Sandbox
+
+glidesh runs every plugin process inside a sandbox:
+
+| Measure | Platform | Effect |
+|---------|----------|--------|
+| **Env scrub** | All | Only `PATH`, `HOME`/`USERPROFILE`, `LANG`, temp dir vars are passed. Secrets are stripped. |
+| **Temp workdir** | All | Plugin CWD is the system temp directory, not the project directory. |
+| **Session isolation** | Unix | `setsid()` — plugin cannot signal glidesh's process group. |
+| **Filesystem restriction** | Linux 5.13+ | [landlock](https://docs.kernel.org/userspace-api/landlock.html) limits access to `/tmp`, `/usr`, `/lib`, `/lib64`. Home dirs, project files, and SSH keys are blocked. |
+
+Runtime (check/apply) processes also receive `GLIDESH_PROTOCOL_VERSION` and `GLIDESH_MODULE_NAME` environment variables.
+
+:::caution[macOS and Windows]
+Landlock filesystem restriction is **only available on Linux 5.13+**. On macOS and Windows, plugins still get environment scrubbing, temp workdir, and session isolation (Unix), but they **can read any file** accessible to the glidesh user. Always review third-party plugins before installing them — especially on platforms without landlock.
+:::
+
+## Tips
+
+- Use `dry_run` in the check/apply request to avoid side effects during `--dry-run` runs
+- The `os_info` field tells you the target OS, package manager, and init system — use it to adapt behavior
+- Template variables from the plan are available in `vars` — the plugin receives them already interpolated
+- Keep plugins stateless between check and apply — glidesh may call them in any order
+- Return descriptive `plan` messages in `Pending` responses — they appear in dry-run output

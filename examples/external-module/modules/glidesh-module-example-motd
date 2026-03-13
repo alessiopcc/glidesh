@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""
+glidesh external module: example/motd
+
+Sets /etc/motd to the resource_name value.
+Demonstrates the JSON-over-stdio plugin protocol with SSH proxy operations.
+"""
+import json
+import sys
+import base64
+
+
+def read_msg():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line)
+
+
+def send_msg(msg):
+    print(json.dumps(msg), flush=True)
+
+
+def ssh_exec(command):
+    send_msg({"ssh": "exec", "command": command})
+    return read_msg()
+
+
+def ssh_download(path):
+    send_msg({"ssh": "download", "path": path})
+    return read_msg()
+
+
+def ssh_upload(path, content):
+    encoded = base64.b64encode(content.encode()).decode()
+    send_msg({"ssh": "upload", "path": path, "content_base64": encoded})
+    return read_msg()
+
+
+MOTD_PATH = "/etc/motd"
+
+
+def handle_describe():
+    send_msg({
+        "name": "example/motd",
+        "version": "1.0.0",
+        "protocol_version": 1,
+    })
+
+
+def handle_check(msg):
+    desired = msg["resource_name"] + "\n"
+    result = ssh_download(MOTD_PATH)
+
+    if not result.get("exists"):
+        send_msg({"status": "pending", "plan": f"will create {MOTD_PATH}"})
+        return
+
+    current = base64.b64decode(result["content_base64"]).decode()
+    if current == desired:
+        send_msg({"status": "satisfied"})
+    else:
+        send_msg({"status": "pending", "plan": f"will update {MOTD_PATH}"})
+
+
+def handle_apply(msg):
+    desired = msg["resource_name"] + "\n"
+    ssh_upload(MOTD_PATH, desired)
+    send_msg({
+        "changed": True,
+        "output": f"set {MOTD_PATH}",
+        "stderr": "",
+        "exit_code": 0,
+    })
+
+
+while True:
+    msg = read_msg()
+    method = msg.get("method")
+
+    if method == "describe":
+        handle_describe()
+    elif method == "check":
+        handle_check(msg)
+    elif method == "apply":
+        handle_apply(msg)
+    elif method == "shutdown":
+        sys.exit(0)

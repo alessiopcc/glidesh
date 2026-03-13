@@ -189,7 +189,8 @@ pub struct TaskDef {
     pub register: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ParamValue {
     String(String),
     Integer(i64),
