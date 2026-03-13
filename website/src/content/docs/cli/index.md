@@ -27,7 +27,6 @@ glidesh run [OPTIONS]
 | `--no-tui` | — | Disable TUI, use plain text output | `false` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
-| `--module-path <DIR>` | — | Additional directories to search for [external modules](/modules/external/) | — |
 
 ### Ad-hoc mode
 

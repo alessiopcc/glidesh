@@ -271,15 +271,12 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
     let key = load_ssh_key(&args, &all_targets)?;
-    let plan_dir = args
-        .plan
-        .as_ref()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf());
-    let registry = Arc::new(ModuleRegistry::with_external(
-        plan_dir.as_deref(),
-        &args.module_paths,
-    ));
+    let registry = Arc::new(ModuleRegistry::with_external(Some(inv_base_dir)));
+
+    for gp in &group_plans {
+        registry.validate_plan(&gp.plan)?;
+    }
+
     let run_name = run_name_parts.join("+");
 
     tracing::info!(

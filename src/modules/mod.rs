@@ -83,10 +83,10 @@ impl ModuleRegistry {
         registry
     }
 
-    pub fn with_external(plan_dir: Option<&Path>, extra_paths: &[std::path::PathBuf]) -> Self {
+    pub fn with_external(inventory_dir: Option<&Path>) -> Self {
         let mut registry = Self::new();
 
-        let external = external::discovery::discover_external_modules(plan_dir, extra_paths);
+        let external = external::discovery::discover_external_modules(inventory_dir);
 
         for info in external {
             if registry.external_modules.contains_key(&info.name) {
@@ -121,6 +121,28 @@ impl ModuleRegistry {
             self.external_modules.get(ext_name).map(|m| m.as_ref())
         } else {
             self.modules.get(name).map(|m| m.as_ref())
+        }
+    }
+
+    pub fn validate_plan(
+        &self,
+        plan: &crate::config::types::Plan,
+    ) -> Result<(), crate::error::GlideshError> {
+        let mut missing = Vec::new();
+        for step in plan.steps() {
+            for task in &step.tasks {
+                if self.get(&task.module).is_none() {
+                    missing.push(task.module.clone());
+                }
+            }
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            missing.dedup();
+            Err(crate::error::GlideshError::ConfigParse {
+                message: format!("Unknown module(s): {}", missing.join(", ")),
+            })
         }
     }
 }

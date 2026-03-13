@@ -10,14 +10,11 @@ pub struct ExternalModuleInfo {
     pub interpreter: Option<String>,
 }
 
-pub fn discover_external_modules(
-    plan_dir: Option<&Path>,
-    extra_paths: &[PathBuf],
-) -> Vec<ExternalModuleInfo> {
+pub fn discover_external_modules(inventory_dir: Option<&Path>) -> Vec<ExternalModuleInfo> {
     let mut modules = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    if let Some(dir) = plan_dir {
+    if let Some(dir) = inventory_dir {
         let modules_dir = dir.join("modules");
         scan_directory(&modules_dir, &mut modules, &mut seen_names);
     }
@@ -26,12 +23,6 @@ pub fn discover_external_modules(
         let user_dir = home.join(".glidesh").join("modules");
         scan_directory(&user_dir, &mut modules, &mut seen_names);
     }
-
-    for dir in extra_paths {
-        scan_directory(dir, &mut modules, &mut seen_names);
-    }
-
-    scan_path_env(&mut modules, &mut seen_names);
 
     modules
 }
@@ -50,30 +41,6 @@ fn scan_directory(
         let path = entry.path();
         if let Some(info) = try_parse_module(&path, seen) {
             modules.push(info);
-        }
-    }
-}
-
-fn scan_path_env(
-    modules: &mut Vec<ExternalModuleInfo>,
-    seen: &mut std::collections::HashSet<String>,
-) {
-    let path_var = match std::env::var("PATH") {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    for dir in std::env::split_paths(&path_var) {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(info) = try_parse_module(&path, seen) {
-                modules.push(info);
-            }
         }
     }
 }

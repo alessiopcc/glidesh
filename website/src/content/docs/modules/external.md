@@ -37,10 +37,8 @@ The canonical name comes from the module's `describe` response, not its filename
 
 glidesh searches for external modules in this order (first match per name wins):
 
-1. `./modules/` relative to the plan file
+1. `./modules/` relative to the inventory file
 2. `~/.glidesh/modules/`
-3. Directories specified via `--module-path`
-4. `$PATH` executables named `glidesh-module-*`
 
 Executables must start with the `glidesh-module-` prefix and respond to the describe handshake. The filename doesn't need to encode `/` characters — `glidesh-module-acme-nginx-vhost` is fine as long as the describe response returns the correct name.
 
@@ -64,8 +62,6 @@ External modules live in a completely separate namespace from built-ins. An exte
 
 ```kdl
 plan "deploy" {
-    target "web"
-
     step "Install base" {
         package "nginx" state="present"
     }
