@@ -61,12 +61,15 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
     cmd.current_dir(std::env::temp_dir());
 
     #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            apply_landlock();
-            Ok(())
-        });
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                apply_landlock();
+                Ok(())
+            });
+        }
     }
 }
 
