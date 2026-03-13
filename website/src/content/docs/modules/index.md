@@ -24,6 +24,8 @@ Because modules check before acting, plans are safe to run repeatedly. If a pack
 
 ## Available Modules
 
+### Built-in
+
 | Module | Description |
 |--------|-------------|
 | [shell](/modules/shell/) | Run arbitrary shell commands |
@@ -33,3 +35,15 @@ Because modules check before acting, plans are safe to run repeatedly. If a pack
 | [container](/modules/container/) | Manage containers (Docker/Podman) |
 | [file](/modules/file/) | Transfer files, templates, and fetch |
 | [disk](/modules/disk/) | Format and mount block devices |
+
+### External
+
+Community and custom modules can extend glidesh via the [external module](/modules/external/) plugin system. External modules are standalone executables that communicate over a JSON-over-stdio protocol. They use the `external` keyword in plans:
+
+```kdl
+step "Configure nginx" {
+    external "acme/nginx-vhost" "mysite" server_name="example.com"
+}
+```
+
+See [Writing Plugins](/advanced/writing-plugins/) for how to build your own.
