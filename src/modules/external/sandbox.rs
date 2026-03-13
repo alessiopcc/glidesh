@@ -20,12 +20,10 @@ fn minimal_env() -> Vec<(String, String)> {
     env
 }
 
-/// Sandbox a std::process::Command for the describe probe (discovery phase).
 pub fn apply_probe_sandbox(cmd: &mut std::process::Command) {
     apply_common_std(cmd);
 }
 
-/// Sandbox a tokio::process::Command for check/apply runtime.
 pub fn apply_runtime_sandbox(cmd: &mut tokio::process::Command, module_name: &str) {
     apply_common_tokio(cmd);
     cmd.env(
@@ -47,7 +45,6 @@ fn apply_common_std(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                // New session so plugin can't signal glidesh's process group
                 libc::setsid();
                 apply_landlock();
                 Ok(())
@@ -76,8 +73,6 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Apply landlock filesystem restrictions in the child process (Linux 5.13+).
-/// Best-effort: silently continues if kernel doesn't support landlock.
 #[cfg(target_os = "linux")]
 fn apply_landlock() {
     use landlock::{
@@ -105,7 +100,6 @@ fn apply_landlock() {
         .and_then(|r| r.restrict_self());
 
     if let Err(e) = result {
-        // Best-effort: log but don't fail
         eprintln!("landlock: failed to apply restrictions: {e}");
     }
 }
@@ -125,7 +119,6 @@ mod tests {
     fn minimal_env_contains_path() {
         let env = minimal_env();
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        // PATH should always be present (it's set on virtually all systems)
         assert!(keys.contains(&"PATH"), "minimal_env must include PATH");
     }
 
@@ -138,7 +131,6 @@ mod tests {
 
     #[test]
     fn minimal_env_excludes_secrets() {
-        // Temporarily set a secret-like var and verify it's excluded
         unsafe { std::env::set_var("AWS_SECRET_ACCESS_KEY", "hunter2") };
         let env = minimal_env();
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
@@ -153,7 +145,5 @@ mod tests {
     fn probe_sandbox_sets_env_clear() {
         let mut cmd = std::process::Command::new("echo");
         apply_probe_sandbox(&mut cmd);
-        // We can't directly inspect env_clear, but we can verify the command builds
-        // without panicking — the real test is the integration behavior
     }
 }

@@ -11,8 +11,8 @@ External modules are standalone executables that communicate with glidesh via ne
 
 The protocol has three phases:
 
-1. **Describe** — glidesh probes the plugin during discovery to learn its name and version. This happens once at startup in a short-lived process — not during task execution.
-2. **Check/Apply** — glidesh spawns a new plugin process and sends a task; the plugin may issue SSH requests and returns a result
+1. **Describe** — glidesh probes the plugin during discovery to learn its name and version. This happens once at startup in a short-lived process. The describe handshake is **only used during discovery** — runtime check/apply processes do not receive a describe request.
+2. **Check/Apply** — glidesh spawns a **new** plugin process and sends a task; the plugin may issue SSH requests and returns a result
 3. **Shutdown** — glidesh tells the plugin to exit
 
 All messages are single-line JSON, terminated by a newline.
@@ -57,7 +57,7 @@ After the handshake, glidesh sends `check` or `apply` requests:
         "family": "debian",
         "pkg_manager": "apt",
         "init_system": "systemd",
-        "container_runtime": "docker"
+        "container_runtime": "docker" // may be null if no runtime detected
     },
     "vars": {"host.name": "web-1", "host.address": "10.0.0.1"},
     "dry_run": false
@@ -127,6 +127,11 @@ Response:
 {"ssh_result":"upload","ok":true}
 ```
 
+On failure, an `error` field is included:
+```json
+{"ssh_result":"upload","ok":false,"error":"Permission denied"}
+```
+
 ### download — Read a file
 
 Request:
@@ -137,6 +142,11 @@ Request:
 Response:
 ```json
 {"ssh_result":"download","content_base64":"c2VydmVyIHsgLi4uIH0=","exists":true}
+```
+
+When the file doesn't exist or an error occurs, `exists` is `false` and an optional `error` field explains why:
+```json
+{"ssh_result":"download","content_base64":"","exists":false,"error":"No such file"}
 ```
 
 ### checksum — SHA256 of a remote file
@@ -151,6 +161,8 @@ Response:
 {"ssh_result":"checksum","hash":"a1b2c3...","exists":true}
 ```
 
+When the file doesn't exist: `{"ssh_result":"checksum","hash":"","exists":false}`. On other failures, an `error` field is included.
+
 ### set_attrs — Set file ownership and permissions
 
 Request:
@@ -163,7 +175,13 @@ Response:
 {"ssh_result":"set_attrs","ok":true}
 ```
 
+On failure: `{"ssh_result":"set_attrs","ok":false,"error":"Permission denied"}`.
+
 All fields in `set_attrs` except `path` are optional — only provided fields are changed.
+
+:::note[Error field]
+All SSH proxy responses except `exec` may include an optional `error` string field on failure. Plugins should check `ok`/`exists` first, then inspect `error` for diagnostics.
+:::
 
 ## 4. Shutdown
 

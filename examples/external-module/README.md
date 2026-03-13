@@ -21,7 +21,7 @@ This example demonstrates the external module plugin system: the `external` keyw
 glidesh run -i examples/external-module/inventory.kdl -p examples/external-module/plan.kdl
 ```
 
-The plugin is auto-discovered from the `modules/` directory next to the plan file.
+The plugin is auto-discovered from the `modules/` directory next to the inventory file.
 
 ## How the Plugin Works
 

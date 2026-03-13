@@ -13,6 +13,7 @@ use tokio::process::Child;
 use super::discovery::ExternalModuleInfo;
 
 const PLUGIN_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_LINE_LENGTH: usize = 10 * 1024 * 1024; // 10 MiB
 
 pub struct ExternalModule {
     info: ExternalModuleInfo,
@@ -28,16 +29,33 @@ impl ExternalModule {
         super::sandbox::apply_runtime_sandbox(&mut cmd, &self.info.name);
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| GlideshError::Module {
-                module: self.info.name.clone(),
-                message: format!(
-                    "Failed to spawn plugin '{}': {}",
-                    self.info.path.display(),
-                    e
-                ),
-            })
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| GlideshError::Module {
+            module: self.info.name.clone(),
+            message: format!(
+                "Failed to spawn plugin '{}': {}",
+                self.info.path.display(),
+                e
+            ),
+        })?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let name = self.info.name.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr);
+                let mut buf = String::new();
+                while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
+                    let line = buf.trim_end();
+                    if !line.is_empty() {
+                        tracing::debug!(plugin = %name, "stderr: {}", line);
+                    }
+                    buf.clear();
+                }
+            });
+        }
+
+        Ok(child)
     }
 
     async fn run_method(
@@ -68,19 +86,23 @@ impl ExternalModule {
             let _ = send_line(&mut writer, &ShutdownRequest::new(), &self.info.name).await;
             drop(writer);
 
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+
             inner
         })
         .await;
 
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(GlideshError::Module {
-                module: self.info.name.clone(),
-                message: "Plugin timed out".to_string(),
-            }),
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                Err(GlideshError::Module {
+                    module: self.info.name.clone(),
+                    message: "Plugin timed out".to_string(),
+                })
+            }
         }
     }
 
@@ -313,15 +335,39 @@ async fn send_line<T: serde::Serialize, W: tokio::io::AsyncWrite + Unpin>(
 async fn read_line<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> std::io::Result<String> {
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).await?;
-    if n == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "Plugin process closed stdout",
-        ));
+    let mut line = Vec::new();
+    loop {
+        let byte_count = {
+            let buf = reader.fill_buf().await?;
+            if buf.is_empty() {
+                if line.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Plugin process closed stdout",
+                    ));
+                }
+                break;
+            }
+            if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                line.extend_from_slice(&buf[..=pos]);
+                pos + 1
+            } else {
+                line.extend_from_slice(buf);
+                buf.len()
+            }
+        };
+        reader.consume(byte_count);
+        if line.last() == Some(&b'\n') {
+            break;
+        }
+        if line.len() > MAX_LINE_LENGTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Plugin output line exceeds {} bytes limit", MAX_LINE_LENGTH),
+            ));
+        }
     }
-    Ok(line)
+    String::from_utf8(line).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 #[cfg(test)]

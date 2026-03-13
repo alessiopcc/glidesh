@@ -37,9 +37,11 @@ fn scan_directory(
         Err(_) => return,
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if let Some(info) = try_parse_module(&path, seen) {
+    let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+
+    for path in &paths {
+        if let Some(info) = try_parse_module(path, seen) {
             modules.push(info);
         }
     }
@@ -55,7 +57,6 @@ fn try_parse_module(
 
     let file_name = path.file_name()?.to_string_lossy();
 
-    // Resolve to absolute so the path remains valid after sandbox changes CWD
     let path = match path.canonicalize() {
         Ok(p) => p,
         Err(e) => {

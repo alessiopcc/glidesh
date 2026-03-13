@@ -139,9 +139,20 @@ impl ModuleRegistry {
         if missing.is_empty() {
             Ok(())
         } else {
+            missing.sort();
             missing.dedup();
+            let display: Vec<String> = missing
+                .into_iter()
+                .map(|m| {
+                    if let Some(name) = m.strip_prefix("external.") {
+                        format!("external \"{name}\"")
+                    } else {
+                        m
+                    }
+                })
+                .collect();
             Err(crate::error::GlideshError::ConfigParse {
-                message: format!("Unknown module(s): {}", missing.join(", ")),
+                message: format!("Unknown module(s): {}", display.join(", ")),
             })
         }
     }
