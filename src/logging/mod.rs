@@ -139,9 +139,6 @@ impl RunLogger {
                     ),
                 );
             }
-            ExecutorEvent::OutputLine { host, line } => {
-                self.log_line(host, &format!("[OUTPUT] {}", line));
-            }
             ExecutorEvent::NodeComplete {
                 host,
                 success,

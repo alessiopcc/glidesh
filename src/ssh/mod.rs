@@ -1,7 +1,5 @@
 pub mod connection;
 pub mod handler;
-pub mod pool;
-
 pub use connection::SshSession;
 
 /// Controls SSH host key verification behavior.

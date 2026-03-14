@@ -289,11 +289,6 @@ impl SshSession {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
     pub async fn close(self) -> Result<(), GlideshError> {
         self.handle
             .disconnect(russh::Disconnect::ByApplication, "session closed", "en")

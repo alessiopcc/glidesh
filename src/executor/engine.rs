@@ -81,9 +81,7 @@ impl Engine {
 }
 
 /// A group-plan pair for multi-plan execution.
-#[allow(dead_code)]
 pub struct GroupPlan {
-    pub group_name: String,
     pub plan: Arc<Plan>,
     pub targets: Vec<ResolvedHost>,
 }

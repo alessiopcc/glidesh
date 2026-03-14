@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum ModuleStatus {
     Satisfied,
     Pending { plan: String },
@@ -25,7 +24,6 @@ pub enum ModuleStatus {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ModuleResult {
     pub changed: bool,
     pub output: String,

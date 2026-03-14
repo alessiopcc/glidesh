@@ -152,7 +152,6 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         );
 
         group_plans.push(executor::GroupPlan {
-            group_name: String::new(),
             plan: Arc::new(plan),
             targets,
         });
@@ -252,7 +251,6 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             );
 
             group_plans.push(executor::GroupPlan {
-                group_name: group_name.clone(),
                 plan: Arc::new(plan),
                 targets: filtered_targets,
             });
@@ -368,9 +366,6 @@ fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<St
                 resource,
                 error
             );
-        }
-        ExecutorEvent::OutputLine { host, line } => {
-            println!("[{}]   > {}", display_id(host, display_ids), line)
         }
         ExecutorEvent::NodeComplete {
             host,

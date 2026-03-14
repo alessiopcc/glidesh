@@ -25,14 +25,17 @@ impl NodeRunner {
     pub async fn run(self) -> NodeResult {
         match self.run_inner().await {
             Ok(result) => result,
-            Err(e) => NodeResult {
-                host: self.host.name.clone(),
-                success: false,
-                steps_completed: 0,
-                total_changed: 0,
-                failed_step: None,
-                error: Some(e.to_string()),
-            },
+            Err(_) => {
+                let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+                    host: self.host.name.clone(),
+                    success: false,
+                    changed: 0,
+                });
+                NodeResult {
+                    success: false,
+                    total_changed: 0,
+                }
+            }
         }
     }
 
@@ -75,7 +78,6 @@ impl NodeRunner {
 
         let steps = self.plan.steps();
         let total_steps = steps.len();
-        let mut steps_completed = 0;
         let mut total_changed = 0;
 
         for (step_idx, step) in steps.iter().enumerate() {
@@ -88,18 +90,15 @@ impl NodeRunner {
 
             match &step.loop_source {
                 None => {
-                    if let Err((step_name, error)) = self
+                    if self
                         .run_step_tasks(step, &mut vars, &session, &os_info, &mut total_changed)
                         .await
+                        .is_err()
                     {
                         let _ = session.close().await;
                         return Ok(NodeResult {
-                            host: self.host.name.clone(),
                             success: false,
-                            steps_completed,
                             total_changed,
-                            failed_step: Some(step_name),
-                            error: Some(error),
                         });
                     }
                 }
@@ -125,27 +124,22 @@ impl NodeRunner {
 
                     for item in &items {
                         vars.insert("item".to_string(), item.clone());
-                        if let Err((step_name, error)) = self
+                        if self
                             .run_step_tasks(step, &mut vars, &session, &os_info, &mut total_changed)
                             .await
+                            .is_err()
                         {
                             vars.remove("item");
                             let _ = session.close().await;
                             return Ok(NodeResult {
-                                host: self.host.name.clone(),
                                 success: false,
-                                steps_completed,
                                 total_changed,
-                                failed_step: Some(step_name),
-                                error: Some(error),
                             });
                         }
                     }
                     vars.remove("item");
                 }
             }
-
-            steps_completed += 1;
         }
 
         let _ = session.close().await;
@@ -157,12 +151,8 @@ impl NodeRunner {
         });
 
         Ok(NodeResult {
-            host: self.host.name.clone(),
             success: true,
-            steps_completed,
             total_changed,
-            failed_step: None,
-            error: None,
         })
     }
 

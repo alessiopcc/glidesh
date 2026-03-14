@@ -1,14 +1,9 @@
 use glidesh::modules::detect::OsInfo;
 use serde::Serialize;
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct NodeResult {
-    pub host: String,
     pub success: bool,
-    pub steps_completed: usize,
     pub total_changed: usize,
-    pub failed_step: Option<String>,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -21,7 +16,6 @@ pub struct RunSummary {
 
 /// Events emitted by the executor for TUI/logging consumption.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum ExecutorEvent {
     NodeConnecting {
         host: String,
@@ -56,10 +50,6 @@ pub enum ExecutorEvent {
         module: String,
         resource: String,
         error: String,
-    },
-    OutputLine {
-        host: String,
-        line: String,
     },
     NodeComplete {
         host: String,

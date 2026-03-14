@@ -2,7 +2,6 @@ use crate::error::GlideshError;
 use crate::ssh::SshSession;
 
 #[derive(Debug, Clone, serde::Serialize)]
-#[allow(dead_code)]
 pub struct OsInfo {
     pub id: String,
     pub version: String,

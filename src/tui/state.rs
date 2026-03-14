@@ -209,9 +209,6 @@ impl TuiState {
                     format!("  FAILED {} '{}': {}", module, resource, error),
                 );
             }
-            ExecutorEvent::OutputLine { host, line } => {
-                self.push_node_log(host, format!("  > {}", line));
-            }
             ExecutorEvent::NodeComplete {
                 host,
                 success,
