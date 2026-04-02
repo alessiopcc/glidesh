@@ -60,6 +60,26 @@ impl Module for ContainerModule {
                             });
                         }
                     }
+
+                    if let Some(desired_cmd) = params.args.get("command").and_then(|v| v.as_str()) {
+                        let cmd_output = ctx
+                            .ssh
+                            .exec(&format!(
+                                "{} inspect --format '{{{{.Config.Cmd}}}}' {} 2>/dev/null",
+                                runtime, container_name
+                            ))
+                            .await?;
+                        let current_cmd = cmd_output.stdout.trim();
+                        if !current_cmd.contains(desired_cmd) {
+                            return Ok(ModuleStatus::Pending {
+                                plan: format!(
+                                    "Recreate container {} (command changed)",
+                                    container_name
+                                ),
+                            });
+                        }
+                    }
+
                     Ok(ModuleStatus::Satisfied)
                 } else {
                     Ok(ModuleStatus::Pending {
@@ -245,17 +265,6 @@ impl ContainerModule {
         runtime: &str,
     ) -> Result<ModuleResult, GlideshError> {
         let container_name = &params.resource_name;
-        let raw_image = params
-            .args
-            .get("image")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| GlideshError::Module {
-                module: "container".to_string(),
-                message: "Container module requires 'image' parameter".to_string(),
-            })?;
-
-        // Podman doesn't default to Docker Hub for short names — qualify them.
-        let image = qualify_image(raw_image, runtime);
 
         let _ = ctx
             .ssh
@@ -265,31 +274,7 @@ impl ContainerModule {
             ))
             .await;
 
-        let mut cmd = format!("{} run -d --name {}", runtime, container_name);
-
-        if let Some(restart) = params.args.get("restart").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --restart={}", restart));
-        }
-
-        if let Some(ports) = params.args.get("ports").and_then(|v| v.as_list()) {
-            for port in ports {
-                cmd.push_str(&format!(" -p '{}'", port));
-            }
-        }
-
-        if let Some(env) = params.args.get("environment").and_then(|v| v.as_map()) {
-            for (key, value) in env {
-                cmd.push_str(&format!(" -e '{}={}'", key, value));
-            }
-        }
-
-        if let Some(volumes) = params.args.get("volumes").and_then(|v| v.as_list()) {
-            for vol in volumes {
-                cmd.push_str(&format!(" -v '{}'", vol));
-            }
-        }
-
-        cmd.push_str(&format!(" '{}'", image));
+        let cmd = build_run_command(runtime, container_name, params)?;
 
         let output = ctx.ssh.exec(&cmd).await?;
 
@@ -395,5 +380,160 @@ fn runtime_packages(pkg: &PkgManager, runtime: &str) -> Vec<String> {
             // RPM-based and SUSE
             _ => vec!["docker-ce".to_string()],
         },
+    }
+}
+
+/// Build the `<runtime> run` command string from parameters (extracted for testability).
+fn build_run_command(
+    runtime: &str,
+    container_name: &str,
+    params: &ModuleParams,
+) -> Result<String, GlideshError> {
+    let raw_image = params
+        .args
+        .get("image")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| GlideshError::Module {
+            module: "container".to_string(),
+            message: "Container module requires 'image' parameter".to_string(),
+        })?;
+
+    let image = qualify_image(raw_image, runtime);
+    let mut cmd = format!("{} run -d --name {}", runtime, container_name);
+
+    if let Some(restart) = params.args.get("restart").and_then(|v| v.as_str()) {
+        cmd.push_str(&format!(" --restart={}", restart));
+    }
+
+    if let Some(ports) = params.args.get("ports").and_then(|v| v.as_list()) {
+        for port in ports {
+            cmd.push_str(&format!(" -p '{}'", port));
+        }
+    }
+
+    if let Some(env) = params.args.get("environment").and_then(|v| v.as_map()) {
+        for (key, value) in env {
+            cmd.push_str(&format!(" -e '{}={}'", key, value));
+        }
+    }
+
+    if let Some(volumes) = params.args.get("volumes").and_then(|v| v.as_list()) {
+        for vol in volumes {
+            cmd.push_str(&format!(" -v '{}'", vol));
+        }
+    }
+
+    cmd.push_str(&format!(" '{}'", image));
+
+    if let Some(command) = params.args.get("command").and_then(|v| v.as_str()) {
+        cmd.push_str(&format!(" {}", command));
+    }
+
+    Ok(cmd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::ParamValue;
+    use crate::modules::ModuleParams;
+
+    fn make_params(args: Vec<(&str, ParamValue)>) -> ModuleParams {
+        ModuleParams {
+            resource_name: "testcontainer".to_string(),
+            args: args
+                .into_iter()
+                .map(|(k, v): (&str, ParamValue)| (k.to_string(), v))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_build_run_command_basic() {
+        let params = make_params(vec![("image", ParamValue::String("nginx:latest".into()))]);
+        let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
+        assert_eq!(cmd, "docker run -d --name testcontainer 'nginx:latest'");
+    }
+
+    #[test]
+    fn test_build_run_command_with_command() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("python:3.12".into())),
+            (
+                "command",
+                ParamValue::String("python -m http.server 8000".into()),
+            ),
+        ]);
+        let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
+        assert_eq!(
+            cmd,
+            "docker run -d --name testcontainer 'python:3.12' python -m http.server 8000"
+        );
+    }
+
+    #[test]
+    fn test_build_run_command_with_all_options_and_command() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("myapp:v1".into())),
+            ("restart", ParamValue::String("always".into())),
+            (
+                "ports",
+                ParamValue::List(vec!["8080:80".into(), "8443:443".into()]),
+            ),
+            ("volumes", ParamValue::List(vec!["/data:/app/data".into()])),
+            (
+                "command",
+                ParamValue::String("./start.sh --config /etc/app.conf".into()),
+            ),
+        ]);
+        let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
+        assert!(cmd.starts_with("docker run -d --name testcontainer"));
+        assert!(cmd.contains("--restart=always"));
+        assert!(cmd.contains("-p '8080:80'"));
+        assert!(cmd.contains("-p '8443:443'"));
+        assert!(cmd.contains("-v '/data:/app/data'"));
+        assert!(cmd.ends_with("'myapp:v1' ./start.sh --config /etc/app.conf"));
+    }
+
+    #[test]
+    fn test_build_run_command_no_image_error() {
+        let params = make_params(vec![]);
+        let result = build_run_command("docker", "testcontainer", &params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_run_command_podman_qualifies_image() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("nginx:latest".into())),
+            (
+                "command",
+                ParamValue::String("nginx -g 'daemon off;'".into()),
+            ),
+        ]);
+        let cmd = build_run_command("podman", "testcontainer", &params).unwrap();
+        assert!(cmd.contains("'docker.io/nginx:latest'"));
+        assert!(cmd.ends_with("nginx -g 'daemon off;'"));
+    }
+
+    #[test]
+    fn test_qualify_image_docker_noop() {
+        assert_eq!(qualify_image("nginx:latest", "docker"), "nginx:latest");
+    }
+
+    #[test]
+    fn test_qualify_image_podman_short_name() {
+        assert_eq!(
+            qualify_image("nginx:latest", "podman"),
+            "docker.io/nginx:latest"
+        );
+    }
+
+    #[test]
+    fn test_qualify_image_podman_already_qualified() {
+        assert_eq!(
+            qualify_image("ghcr.io/org/app:v1", "podman"),
+            "ghcr.io/org/app:v1"
+        );
     }
 }
