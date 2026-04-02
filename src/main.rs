@@ -129,6 +129,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                 user,
                 port: args.port,
                 vars: plan.vars.clone(),
+                jump: None,
             }]
         } else if let Some(ref inventory) = inventory {
             let target_filter = args.target.as_deref();

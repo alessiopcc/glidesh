@@ -44,14 +44,29 @@ impl NodeRunner {
             host: self.host.name.clone(),
         });
 
-        let session = SshSession::connect(
-            &self.host.address,
-            self.host.port,
-            &self.host.user,
-            &self.key,
-            self.host_key_policy,
-        )
-        .await
+        let session = match &self.host.jump {
+            Some(jump) => {
+                SshSession::connect_via_jump(
+                    &self.host.address,
+                    self.host.port,
+                    &self.host.user,
+                    &self.key,
+                    self.host_key_policy,
+                    jump,
+                )
+                .await
+            }
+            None => {
+                SshSession::connect(
+                    &self.host.address,
+                    self.host.port,
+                    &self.host.user,
+                    &self.key,
+                    self.host_key_policy,
+                )
+                .await
+            }
+        }
         .inspect_err(|e| {
             let _ = self.event_tx.send(ExecutorEvent::NodeAuthFailed {
                 host: self.host.name.clone(),

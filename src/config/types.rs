@@ -1,6 +1,20 @@
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
+pub struct JumpHost {
+    pub address: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedJumpHost {
+    pub address: String,
+    pub user: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone)]
 pub struct Host {
     pub name: String,
     pub address: String,
@@ -8,6 +22,7 @@ pub struct Host {
     pub port: Option<u16>,
     pub vars: HashMap<String, String>,
     pub plan: Option<String>,
+    pub jump: Option<JumpHost>,
 }
 
 #[derive(Debug, Clone)]
@@ -16,6 +31,7 @@ pub struct Group {
     pub hosts: Vec<Host>,
     pub vars: HashMap<String, String>,
     pub plan: Option<String>,
+    pub jump: Option<JumpHost>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,11 +51,11 @@ impl Inventory {
             None => {
                 for group in &self.groups {
                     for host in &group.hosts {
-                        hosts.push(self.resolve_host(host, Some(&group.vars)));
+                        hosts.push(self.resolve_host(host, Some(&group.vars), group.jump.as_ref()));
                     }
                 }
                 for host in &self.ungrouped_hosts {
-                    hosts.push(self.resolve_host(host, None));
+                    hosts.push(self.resolve_host(host, None, None));
                 }
             }
             Some(target) => {
@@ -47,7 +63,11 @@ impl Inventory {
                 for group in &self.groups {
                     if group.name == target {
                         for host in &group.hosts {
-                            hosts.push(self.resolve_host(host, Some(&group.vars)));
+                            hosts.push(self.resolve_host(
+                                host,
+                                Some(&group.vars),
+                                group.jump.as_ref(),
+                            ));
                         }
                         return hosts;
                     }
@@ -56,14 +76,18 @@ impl Inventory {
                 for group in &self.groups {
                     for host in &group.hosts {
                         if host.name == target {
-                            hosts.push(self.resolve_host(host, Some(&group.vars)));
+                            hosts.push(self.resolve_host(
+                                host,
+                                Some(&group.vars),
+                                group.jump.as_ref(),
+                            ));
                             return hosts;
                         }
                     }
                 }
                 for host in &self.ungrouped_hosts {
                     if host.name == target {
-                        hosts.push(self.resolve_host(host, None));
+                        hosts.push(self.resolve_host(host, None, None));
                         return hosts;
                     }
                 }
@@ -83,7 +107,7 @@ impl Inventory {
                 let hosts: Vec<ResolvedHost> = group
                     .hosts
                     .iter()
-                    .map(|h| self.resolve_host(h, Some(&group.vars)))
+                    .map(|h| self.resolve_host(h, Some(&group.vars), group.jump.as_ref()))
                     .collect();
                 if !hosts.is_empty() {
                     result.push((group.name.clone(), plan_path.clone(), hosts));
@@ -92,7 +116,7 @@ impl Inventory {
         }
         for host in &self.ungrouped_hosts {
             if let Some(ref plan_path) = host.plan {
-                let resolved = self.resolve_host(host, None);
+                let resolved = self.resolve_host(host, None, None);
                 result.push((String::new(), plan_path.clone(), vec![resolved]));
             }
         }
@@ -103,6 +127,7 @@ impl Inventory {
         &self,
         host: &Host,
         group_vars: Option<&HashMap<String, String>>,
+        group_jump: Option<&JumpHost>,
     ) -> ResolvedHost {
         // Merge vars: global -> group -> host (most specific wins)
         let mut vars = self.global_vars.clone();
@@ -111,16 +136,27 @@ impl Inventory {
         }
         vars.extend(host.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
+        let user = host
+            .user
+            .clone()
+            .or_else(|| vars.get("deploy-user").cloned())
+            .unwrap_or_else(|| "root".to_string());
+
+        // Jump host: host-level overrides group-level
+        let jump_source = host.jump.as_ref().or(group_jump);
+        let jump = jump_source.map(|j| ResolvedJumpHost {
+            address: j.address.clone(),
+            user: j.user.clone().unwrap_or_else(|| user.clone()),
+            port: j.port.unwrap_or(22),
+        });
+
         ResolvedHost {
             name: host.name.clone(),
             address: host.address.clone(),
-            user: host
-                .user
-                .clone()
-                .or_else(|| vars.get("deploy-user").cloned())
-                .unwrap_or_else(|| "root".to_string()),
+            user,
             port: host.port.unwrap_or(22),
             vars,
+            jump,
         }
     }
 }
@@ -132,6 +168,7 @@ pub struct ResolvedHost {
     pub user: String,
     pub port: u16,
     pub vars: HashMap<String, String>,
+    pub jump: Option<ResolvedJumpHost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

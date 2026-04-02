@@ -1,4 +1,4 @@
-use crate::config::types::{Group, Host, Inventory};
+use crate::config::types::{Group, Host, Inventory, JumpHost};
 use crate::error::GlideshError;
 use std::collections::HashMap;
 
@@ -132,6 +132,7 @@ fn parse_group(node: &kdl::KdlNode) -> Result<Group, GlideshError> {
 
     let mut hosts = Vec::new();
     let mut vars = HashMap::new();
+    let mut jump = None;
 
     if let Some(children) = node.children() {
         for child in children.nodes() {
@@ -141,6 +142,9 @@ fn parse_group(node: &kdl::KdlNode) -> Result<Group, GlideshError> {
                     if let Some(vc) = child.children() {
                         vars = parse_vars_block(vc)?;
                     }
+                }
+                "jump" => {
+                    jump = Some(parse_jump(child)?);
                 }
                 other => {
                     return Err(GlideshError::ConfigParse {
@@ -156,6 +160,7 @@ fn parse_group(node: &kdl::KdlNode) -> Result<Group, GlideshError> {
         hosts,
         vars,
         plan,
+        jump,
     })
 }
 
@@ -201,6 +206,22 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         .and_then(|e| e.value().as_string())
         .map(|s| s.to_string());
 
+    let mut jump = None;
+    if let Some(children) = node.children() {
+        for child in children.nodes() {
+            match child.name().to_string().as_str() {
+                "jump" => {
+                    jump = Some(parse_jump(child)?);
+                }
+                other => {
+                    return Err(GlideshError::ConfigParse {
+                        message: format!("Unknown node in host '{}': '{}'", name, other),
+                    });
+                }
+            }
+        }
+    }
+
     Ok(Host {
         name,
         address,
@@ -208,6 +229,39 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         port,
         vars: HashMap::new(),
         plan,
+        jump,
+    })
+}
+
+fn parse_jump(node: &kdl::KdlNode) -> Result<JumpHost, GlideshError> {
+    let address = node
+        .entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .and_then(|e| e.value().as_string())
+        .ok_or_else(|| GlideshError::ConfigParse {
+            message: "Jump node requires an address argument".to_string(),
+        })?
+        .to_string();
+
+    let user = node
+        .entries()
+        .iter()
+        .find(|e| e.name().map(|n| n.to_string()).as_deref() == Some("user"))
+        .and_then(|e| e.value().as_string())
+        .map(|s| s.to_string());
+
+    let port = node
+        .entries()
+        .iter()
+        .find(|e| e.name().map(|n| n.to_string()).as_deref() == Some("port"))
+        .and_then(|e| e.value().as_integer())
+        .map(|p| p as u16);
+
+    Ok(JumpHost {
+        address,
+        user,
+        port,
     })
 }
 
@@ -359,5 +413,105 @@ group "web" {
         let resolved = inv.resolve_targets(Some("web"));
         assert_eq!(resolved[0].user, "global-user");
         assert_eq!(resolved[0].vars.get("http-port").unwrap(), "8080");
+    }
+
+    #[test]
+    fn test_jump_host_group_level() {
+        let input = r#"
+group "web" {
+    jump "bastion.example.com" user="admin" port=2222
+    host "web-1" "10.0.0.1" user="deploy"
+    host "web-2" "10.0.0.2"
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let jump = inv.groups[0].jump.as_ref().unwrap();
+        assert_eq!(jump.address, "bastion.example.com");
+        assert_eq!(jump.user.as_deref(), Some("admin"));
+        assert_eq!(jump.port, Some(2222));
+
+        let resolved = inv.resolve_targets(Some("web"));
+        // Both hosts inherit the group jump
+        let j1 = resolved[0].jump.as_ref().unwrap();
+        assert_eq!(j1.address, "bastion.example.com");
+        assert_eq!(j1.user, "admin");
+        assert_eq!(j1.port, 2222);
+
+        let j2 = resolved[1].jump.as_ref().unwrap();
+        assert_eq!(j2.address, "bastion.example.com");
+        assert_eq!(j2.user, "admin");
+        assert_eq!(j2.port, 2222);
+    }
+
+    #[test]
+    fn test_jump_host_per_host_override() {
+        let input = r#"
+group "web" {
+    jump "group-bastion.example.com" user="groupuser"
+    host "web-1" "10.0.0.1" user="deploy"
+    host "web-2" "10.0.0.2" user="deploy" {
+        jump "host-bastion.example.com" user="hostuser" port=3333
+    }
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let resolved = inv.resolve_targets(Some("web"));
+
+        // web-1 inherits group jump
+        let j1 = resolved[0].jump.as_ref().unwrap();
+        assert_eq!(j1.address, "group-bastion.example.com");
+        assert_eq!(j1.user, "groupuser");
+        assert_eq!(j1.port, 22); // default
+
+        // web-2 overrides with its own jump
+        let j2 = resolved[1].jump.as_ref().unwrap();
+        assert_eq!(j2.address, "host-bastion.example.com");
+        assert_eq!(j2.user, "hostuser");
+        assert_eq!(j2.port, 3333);
+    }
+
+    #[test]
+    fn test_jump_host_inherits_user() {
+        let input = r#"
+group "web" {
+    jump "bastion.example.com"
+    host "web-1" "10.0.0.1" user="deploy"
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let resolved = inv.resolve_targets(Some("web"));
+        let j = resolved[0].jump.as_ref().unwrap();
+        // jump user inherits from target host user
+        assert_eq!(j.user, "deploy");
+        assert_eq!(j.port, 22);
+    }
+
+    #[test]
+    fn test_jump_host_ungrouped() {
+        let input = r#"
+host "standalone" "10.0.0.3" user="admin" {
+    jump "bastion.example.com" port=2222
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let resolved = inv.resolve_targets(Some("standalone"));
+        let j = resolved[0].jump.as_ref().unwrap();
+        assert_eq!(j.address, "bastion.example.com");
+        assert_eq!(j.user, "admin"); // inherited from host
+        assert_eq!(j.port, 2222);
+    }
+
+    #[test]
+    fn test_no_jump_host() {
+        let input = r#"
+group "web" {
+    host "web-1" "10.0.0.1"
+}
+host "standalone" "10.0.0.2"
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let resolved = inv.resolve_targets(None);
+        assert!(resolved[0].jump.is_none());
+        assert!(resolved[1].jump.is_none());
     }
 }
