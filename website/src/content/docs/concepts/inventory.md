@@ -47,6 +47,33 @@ Optional properties:
 
 A `group` node collects hosts under a name that can be targeted in plans or via `--target` on the CLI. Groups can define their own `vars` block.
 
+## Jump Hosts
+
+A `jump` node configures an SSH bastion (jump host) that glidesh connects through before reaching the target. Jump hosts can be set at group level (inherited by all hosts) or per-host.
+
+```kdl
+group "internal" {
+    jump "bastion.example.com" user="jumpuser" port=2222
+
+    host "app-1" "10.0.1.10" user="deploy"
+    host "app-2" "10.0.1.11" user="deploy"
+
+    host "app-3" "10.0.1.12" user="deploy" {
+        jump "bastion-us.example.com"
+    }
+}
+
+host "db-backup" "10.0.2.50" user="root" {
+    jump "bastion.example.com"
+}
+```
+
+Optional properties on `jump`:
+- `user` — SSH username for the bastion (defaults to the target host's user)
+- `port` — SSH port on the bastion (default: 22)
+
+**Resolution order:** a host-level `jump` overrides the group-level `jump`. If no `user` is set on the jump node, it inherits the resolved user of the target host.
+
 ## Variables
 
 Variables are defined in `vars` blocks and follow a scoping hierarchy:

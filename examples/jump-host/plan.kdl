@@ -1,0 +1,11 @@
+plan "jump-host-demo" {
+    mode "sync"
+
+    step "Verify connectivity" {
+        shell "hostname && echo 'Reached via jump host'"
+    }
+
+    step "Check uptime" {
+        shell "uptime"
+    }
+}

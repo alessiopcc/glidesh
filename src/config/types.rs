@@ -142,7 +142,6 @@ impl Inventory {
             .or_else(|| vars.get("deploy-user").cloned())
             .unwrap_or_else(|| "root".to_string());
 
-        // Jump host: host-level overrides group-level
         let jump_source = host.jump.as_ref().or(group_jump);
         let jump = jump_source.map(|j| ResolvedJumpHost {
             address: j.address.clone(),

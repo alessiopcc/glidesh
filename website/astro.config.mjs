@@ -43,6 +43,7 @@ export default defineConfig({
 				{
 					label: 'Advanced',
 					items: [
+						{ label: 'Jump Hosts', slug: 'advanced/jump-hosts' },
 						{ label: 'Loops & Register', slug: 'advanced/loops-register' },
 						{ label: 'Plan Includes', slug: 'advanced/plan-includes' },
 						{ label: 'Writing Plugins', slug: 'advanced/writing-plugins' },

@@ -60,3 +60,11 @@ Use an external plugin to set the system MOTD. Demonstrates the `external` keywo
 **Features used:** external modules, plugin protocol, SSH proxy
 
 [View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/external-module)
+
+## jump-host
+
+Connect to internal hosts through an SSH bastion (jump host). Demonstrates group-level and per-host jump host configuration with user/port inheritance.
+
+**Features used:** jump hosts, SSH tunneling
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/jump-host)

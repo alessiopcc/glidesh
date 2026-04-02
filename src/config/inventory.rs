@@ -431,7 +431,6 @@ group "web" {
         assert_eq!(jump.port, Some(2222));
 
         let resolved = inv.resolve_targets(Some("web"));
-        // Both hosts inherit the group jump
         let j1 = resolved[0].jump.as_ref().unwrap();
         assert_eq!(j1.address, "bastion.example.com");
         assert_eq!(j1.user, "admin");

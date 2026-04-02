@@ -1,0 +1,18 @@
+vars {
+    deploy-user "deploy"
+}
+
+group "internal" {
+    jump "bastion.example.com" user="jumpuser" port=22
+
+    host "app-1" "10.0.1.10" user="deploy"
+    host "app-2" "10.0.1.11" user="deploy"
+
+    host "app-3" "10.0.1.12" user="deploy" {
+        jump "bastion-us.example.com" user="admin" port=2222
+    }
+}
+
+host "db-backup" "10.0.2.50" user="root" {
+    jump "bastion.example.com"
+}
