@@ -5,7 +5,7 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
 	integrations: [
 		starlight({
-			title: 'glidesh v0.2.0',
+			title: 'glidesh v0.3.0',
 			logo: {
 				dark: './public/logo-white.webp',
 				light: './public/logo-black.webp',
