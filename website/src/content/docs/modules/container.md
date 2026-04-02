@@ -14,6 +14,7 @@ container "myapp" {
     runtime "podman"
     install-runtime #true
     restart "always"
+    command "nginx -g 'daemon off;'"
     ports {
         - "8080:80"
         - "8443:443"
@@ -38,13 +39,14 @@ container "myapp" {
 | `runtime` | string | `"docker"` or `"podman"` (default: auto-detect) |
 | `install-runtime` | boolean | Auto-install the runtime if not found |
 | `restart` | string | Restart policy: `"always"`, `"on-failure"`, `"no"` |
+| `command` | string | Custom command to run in the container (overrides image default) |
 | `ports` | list | Port mappings (`host:container`) |
 | `environment` | map | Environment variables |
 | `volumes` | list | Volume mounts (`host:container`) |
 
 ## Idempotency
 
-The module checks if a container with the given name exists and is in the desired state. For `running`, it also verifies the image matches. If a container exists with a different image, it is replaced.
+The module checks if a container with the given name exists and is in the desired state. For `running`, it also verifies the image and command match. If a container exists with a different image or command, it is replaced.
 
 ## Example
 

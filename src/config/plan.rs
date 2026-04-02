@@ -396,6 +396,37 @@ plan "containers" {
     }
 
     #[test]
+    fn test_parse_container_with_command() {
+        let input = r#"
+plan "containers" {
+    step "Deploy app" {
+        container "myapp" {
+            image "python:3.12-slim"
+            command "python -m http.server 8000"
+            ports {
+                - "8000:8000"
+            }
+        }
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        let task = &fp.steps()[0].tasks[0];
+        assert_eq!(task.module, "container");
+        assert_eq!(task.resource, "myapp");
+        assert_eq!(
+            task.args.get("image").unwrap().as_str(),
+            Some("python:3.12-slim")
+        );
+        assert_eq!(
+            task.args.get("command").unwrap().as_str(),
+            Some("python -m http.server 8000")
+        );
+        let ports = task.args.get("ports").unwrap().as_list().unwrap();
+        assert_eq!(ports, &["8000:8000"]);
+    }
+
+    #[test]
     fn test_parse_register() {
         let input = r#"
 plan "test" {
