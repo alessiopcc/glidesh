@@ -1,3 +1,4 @@
+use crate::config::types::ResolvedJumpHost;
 use crate::error::GlideshError;
 use crate::ssh::HostKeyPolicy;
 use crate::ssh::handler::SshHandler;
@@ -17,6 +18,8 @@ pub struct CommandOutput {
 pub struct SshSession {
     handle: client::Handle<SshHandler>,
     host: String,
+    /// Hold the jump host handle alive for the lifetime of the tunneled session.
+    _jump_handle: Option<client::Handle<SshHandler>>,
 }
 
 impl SshSession {
@@ -64,6 +67,116 @@ impl SshSession {
         Ok(SshSession {
             handle,
             host: host.to_string(),
+            _jump_handle: None,
+        })
+    }
+
+    /// Connect to a target host through a jump (bastion) host.
+    ///
+    /// 1. Establishes an SSH session to the jump host
+    /// 2. Opens a direct-tcpip channel through the jump host to the target
+    /// 3. Runs the SSH protocol over that channel to authenticate with the target
+    pub async fn connect_via_jump(
+        host: &str,
+        port: u16,
+        user: &str,
+        key: &PrivateKeyWithHashAlg,
+        host_key_policy: HostKeyPolicy,
+        jump: &ResolvedJumpHost,
+    ) -> Result<Self, GlideshError> {
+        // Connect and authenticate to the jump host
+        let jump_config = Arc::new(client::Config::default());
+        let jump_handler = SshHandler {
+            host: jump.address.clone(),
+            port: jump.port,
+            host_key_policy,
+        };
+
+        tracing::debug!("Connecting to jump host {}:{}", jump.address, jump.port);
+        let mut jump_handle = client::connect(
+            jump_config,
+            (jump.address.as_str(), jump.port),
+            jump_handler,
+        )
+        .await
+        .map_err(|e| GlideshError::SshConnection {
+            message: format!(
+                "Failed to connect to jump host {}:{}: {}",
+                jump.address, jump.port, e
+            ),
+        })?;
+
+        tracing::debug!("Jump host TCP connected, authenticating as '{}'", jump.user);
+        let jump_auth = jump_handle
+            .authenticate_publickey(&jump.user, key.clone())
+            .await
+            .map_err(|e| GlideshError::SshAuth {
+                host: jump.address.clone(),
+                user: jump.user.clone(),
+                message: format!("Jump host auth failed: {}", e),
+            })?;
+
+        if !jump_auth {
+            return Err(GlideshError::SshAuth {
+                host: jump.address.clone(),
+                user: jump.user.clone(),
+                message: "Jump host authentication rejected by server".to_string(),
+            });
+        }
+
+        // Open a tunnel through the jump host to the target
+        tracing::debug!("Opening tunnel through jump host to {}:{}", host, port);
+        let channel = jump_handle
+            .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| GlideshError::SshConnection {
+                message: format!(
+                    "Failed to open tunnel through {} to {}:{}: {}",
+                    jump.address, host, port, e
+                ),
+            })?;
+
+        let stream = channel.into_stream();
+
+        // Run SSH over the tunneled channel
+        let target_config = Arc::new(client::Config::default());
+        let target_handler = SshHandler {
+            host: host.to_string(),
+            port,
+            host_key_policy,
+        };
+
+        let mut handle = client::connect_stream(target_config, stream, target_handler)
+            .await
+            .map_err(|e| GlideshError::SshConnection {
+                message: format!(
+                    "Failed SSH handshake through tunnel to {}:{}: {}",
+                    host, port, e
+                ),
+            })?;
+
+        tracing::debug!("Tunnel established, authenticating as '{}' on target", user);
+        let auth_result = handle
+            .authenticate_publickey(user, key.clone())
+            .await
+            .map_err(|e| GlideshError::SshAuth {
+                host: host.to_string(),
+                user: user.to_string(),
+                message: e.to_string(),
+            })?;
+
+        if !auth_result {
+            return Err(GlideshError::SshAuth {
+                host: host.to_string(),
+                user: user.to_string(),
+                message: "Authentication rejected by target server (via jump host)".to_string(),
+            });
+        }
+
+        Ok(SshSession {
+            handle,
+            host: host.to_string(),
+            _jump_handle: Some(jump_handle),
         })
     }
 
@@ -296,6 +409,19 @@ impl SshSession {
             .map_err(|e| GlideshError::SshConnection {
                 message: format!("Error closing connection to {}: {}", self.host, e),
             })?;
+
+        if let Some(jump_handle) = self._jump_handle {
+            jump_handle
+                .disconnect(russh::Disconnect::ByApplication, "session closed", "en")
+                .await
+                .map_err(|e| GlideshError::SshConnection {
+                    message: format!(
+                        "Error closing jump host connection for {}: {}",
+                        self.host, e
+                    ),
+                })?;
+        }
+
         Ok(())
     }
 }
