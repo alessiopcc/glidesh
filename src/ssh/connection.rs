@@ -409,6 +409,19 @@ impl SshSession {
             .map_err(|e| GlideshError::SshConnection {
                 message: format!("Error closing connection to {}: {}", self.host, e),
             })?;
+
+        if let Some(jump_handle) = self._jump_handle {
+            jump_handle
+                .disconnect(russh::Disconnect::ByApplication, "session closed", "en")
+                .await
+                .map_err(|e| GlideshError::SshConnection {
+                    message: format!(
+                        "Error closing jump host connection for {}: {}",
+                        self.host, e
+                    ),
+                })?;
+        }
+
         Ok(())
     }
 }

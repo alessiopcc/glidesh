@@ -251,12 +251,24 @@ fn parse_jump(node: &kdl::KdlNode) -> Result<JumpHost, GlideshError> {
         .and_then(|e| e.value().as_string())
         .map(|s| s.to_string());
 
-    let port = node
+    let raw_port = node
         .entries()
         .iter()
         .find(|e| e.name().map(|n| n.to_string()).as_deref() == Some("port"))
-        .and_then(|e| e.value().as_integer())
-        .map(|p| p as u16);
+        .and_then(|e| e.value().as_integer());
+
+    let port = match raw_port {
+        Some(p) if (1..=65535).contains(&p) => Some(p as u16),
+        Some(p) => {
+            return Err(GlideshError::ConfigParse {
+                message: format!(
+                    "Invalid port {} in jump node; expected a value between 1 and 65535",
+                    p
+                ),
+            });
+        }
+        None => None,
+    };
 
     Ok(JumpHost {
         address,
