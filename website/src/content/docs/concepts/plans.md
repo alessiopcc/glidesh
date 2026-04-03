@@ -40,7 +40,43 @@ plan "deploy-app" {
 ## Top-Level Properties
 
 - **mode** — `"sync"` (default) or `"async"` (can be overridden with `--mode` on CLI)
-- **vars** — plan-scoped variables, merged with inventory vars
+- **vars** — plan-scoped variables, merged with inventory vars (supports both scalar and [structured variables](/concepts/variables/#structured-variables))
+- **vars-file** — load variables from an external KDL file (see below)
+
+## External Vars Files
+
+Use `vars-file` to load variables from a separate KDL file. This keeps large or reusable variable sets organized:
+
+```kdl
+plan "setup-proxy" {
+    vars {
+        domain "example.com"
+    }
+
+    // Load additional vars (scalar + structured) from an external file
+    vars-file "keys.kdl"
+
+    step "Deploy config" {
+        file "/etc/proxy/config.conf" src="templates/config.conf" template=#true
+    }
+}
+```
+
+The external file contains raw var nodes — no `vars` wrapper needed:
+
+```kdl
+// keys.kdl
+region "us-east-1"
+
+api-keys {
+    - name="alice" key="sk-aaa"
+    - name="bob" key="sk-bbb"
+}
+```
+
+Both scalar and [structured variables](/concepts/variables/#structured-variables) are supported. Inline `vars` take precedence over `vars-file` when the same key is defined in both.
+
+Paths are resolved relative to the plan file's directory. You can use multiple `vars-file` directives.
 
 ## Steps
 

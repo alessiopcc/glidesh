@@ -1,6 +1,6 @@
 ---
 title: Variables
-description: Variable interpolation, merge order, and built-in host variables.
+description: Variable interpolation, merge order, structured vars, and inventory references.
 ---
 
 glidesh supports variable interpolation using `${var-name}` syntax. Variables can be defined in inventory files and plans, and are available in all module parameters and templates.
@@ -43,6 +43,34 @@ plan "deploy" {
 }
 ```
 
+### From external files
+
+Use `vars-file` to load variables from a separate KDL file for better organization:
+
+```kdl
+plan "setup" {
+    vars-file "keys.kdl"
+
+    step "Deploy" {
+        file "/etc/app/config" src="templates/config" template=#true
+    }
+}
+```
+
+The external file contains raw var nodes (no wrapper):
+
+```kdl
+// keys.kdl
+region "us-east-1"
+
+api-keys {
+    - name="alice" key="sk-aaa"
+    - name="bob" key="sk-bbb"
+}
+```
+
+Inline `vars` take precedence over `vars-file` when the same key appears in both. See [External Vars Files](/concepts/plans/#external-vars-files) for details.
+
 ## Merge Order
 
 When the same variable is defined at multiple levels, the most specific value wins:
@@ -79,8 +107,70 @@ step "Fetch backup" {
 }
 ```
 
+## Inventory References
+
+You can reference any host from the inventory in templates using the `@inventory` prefix. This is useful when a template on one host needs the address or port of another host.
+
+| Variable | Description |
+|---|---|
+| `${@inventory.<host>.address}` | Address of the named host |
+| `${@inventory.<host>.user}` | SSH user of the named host |
+| `${@inventory.<host>.port}` | SSH port of the named host |
+| `${@inventory.<host>.vars.<key>}` | A host-level variable |
+
+Host names are unique across the entire inventory, so the lookup is unambiguous regardless of which group the host belongs to.
+
+### Example
+
+Given this inventory:
+
+```kdl
+group "services" {
+    host "caddy" "10.0.1.1" user="deploy"
+    host "bifrost" "10.0.1.5" user="app" {
+        vars {
+            api-port "8080"
+        }
+    }
+}
+```
+
+A template file deployed to the `caddy` host can reference `bifrost`:
+
+```
+reverse_proxy ${@inventory.bifrost.address}:${@inventory.bifrost.vars.api-port}
+```
+
+This renders to:
+
+```
+reverse_proxy 10.0.1.5:8080
+```
+
+## Structured Variables
+
+Variables can also be lists of named fields, used for [template loops](/advanced/loops-register/#template-loops). Define them in a `vars` block using `-` nodes with named properties:
+
+```kdl
+plan "setup" {
+    vars {
+        // Simple scalar variable
+        domain "example.com"
+
+        // Structured variable (list of maps)
+        api-keys {
+            - name="alice" key="sk-aaa"
+            - name="bob" key="sk-bbb"
+            - name="charlie" key="sk-ccc"
+        }
+    }
+}
+```
+
+Structured variables are available in `${for}` loops inside template files. See [Template Loops](/advanced/loops-register/#template-loops) for usage.
+
 ## Interpolation
 
-Variable substitution is simple string replacement — no expressions, conditionals, or filters. The syntax is `${var-name}` where `var-name` matches a key from any vars block or a built-in host variable.
+The `${var-name}` syntax performs string replacement. It works in all module parameters and in template files (when `template=#true` on the file module).
 
-Undefined variables are left as-is (the literal `${var-name}` string remains).
+Undefined variables cause an error — glidesh does not silently pass through unresolved references.
