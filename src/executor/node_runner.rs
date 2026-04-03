@@ -1,5 +1,5 @@
 use crate::executor::result::{ExecutorEvent, NodeResult};
-use glidesh::config::template::interpolate_args;
+use glidesh::config::template::{TemplateData, interpolate_args};
 use glidesh::config::types::{LoopSource, Plan, ResolvedHost, Step};
 use glidesh::error::GlideshError;
 use glidesh::modules::context::ModuleContext;
@@ -19,6 +19,7 @@ pub struct NodeRunner {
     pub dry_run: bool,
     pub host_key_policy: HostKeyPolicy,
     pub event_tx: mpsc::UnboundedSender<ExecutorEvent>,
+    pub inventory_template_data: Arc<TemplateData>,
 }
 
 impl NodeRunner {
@@ -91,6 +92,16 @@ impl NodeRunner {
         vars.insert("host.user".to_string(), self.host.user.clone());
         vars.insert("host.port".to_string(), self.host.port.to_string());
 
+        // Build template data: inventory @-refs + plan structured vars.
+        // Preserve inventory-provided collections so plan structured vars
+        // cannot overwrite reserved @group.* or @inventory.* namespaces.
+        let mut template_data = (*self.inventory_template_data).clone();
+        for (key, value) in &self.plan.structured_vars {
+            if !template_data.collections.contains_key(key) {
+                template_data.collections.insert(key.clone(), value.clone());
+            }
+        }
+
         let steps = self.plan.steps();
         let total_steps = steps.len();
         let mut total_changed = 0;
@@ -106,7 +117,14 @@ impl NodeRunner {
             match &step.loop_source {
                 None => {
                     if self
-                        .run_step_tasks(step, &mut vars, &session, &os_info, &mut total_changed)
+                        .run_step_tasks(
+                            step,
+                            &mut vars,
+                            &template_data,
+                            &session,
+                            &os_info,
+                            &mut total_changed,
+                        )
                         .await
                         .is_err()
                     {
@@ -140,7 +158,14 @@ impl NodeRunner {
                     for item in &items {
                         vars.insert("item".to_string(), item.clone());
                         if self
-                            .run_step_tasks(step, &mut vars, &session, &os_info, &mut total_changed)
+                            .run_step_tasks(
+                                step,
+                                &mut vars,
+                                &template_data,
+                                &session,
+                                &os_info,
+                                &mut total_changed,
+                            )
                             .await
                             .is_err()
                         {
@@ -175,6 +200,7 @@ impl NodeRunner {
         &self,
         step: &Step,
         vars: &mut HashMap<String, String>,
+        template_data: &TemplateData,
         session: &SshSession,
         os_info: &OsInfo,
         total_changed: &mut usize,
@@ -200,6 +226,7 @@ impl NodeRunner {
                 ssh: session,
                 os_info,
                 vars,
+                template_data,
                 dry_run: self.dry_run,
             };
 

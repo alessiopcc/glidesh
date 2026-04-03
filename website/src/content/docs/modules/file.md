@@ -20,7 +20,7 @@ file "/etc/nginx/nginx.conf" {
 
 ## Template
 
-Interpolate `${var}` placeholders before uploading:
+Interpolate `${var}` placeholders and expand `${for}` loops before uploading:
 
 ```kdl
 file "/etc/myapp/config.toml" {
@@ -30,6 +30,14 @@ file "/etc/myapp/config.toml" {
     mode "0600"
 }
 ```
+
+Template mode supports:
+- `${var-name}` — simple variable interpolation
+- `${for item in collection}...${endfor}` — loop over [structured variables](/concepts/variables/#structured-variables)
+- `${@inventory.host.address}` — [inventory references](/concepts/variables/#inventory-references)
+- `${for h in @group.name}...${endfor}` — loop over hosts in an inventory group
+
+See [Template Loops](/advanced/loops-register/#template-loops) for detailed examples.
 
 ## Fetch
 
@@ -48,7 +56,7 @@ file "backups/${host.name}-dump.sql" {
 |-----------|------|-------------|
 | *(positional)* | string | Destination path (remote for copy/template, local for fetch) |
 | `src` | string | Source file path (required) |
-| `template` | boolean | Interpolate `${var}` placeholders before uploading |
+| `template` | boolean | Interpolate `${var}` placeholders and expand `${for}` loops before uploading |
 | `fetch` | boolean | Download from remote instead of uploading |
 | `owner` | string | Remote file owner |
 | `group` | string | Remote file group |

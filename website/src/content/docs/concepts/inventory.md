@@ -112,3 +112,25 @@ Global vars → Group vars → Host properties
 The most specific value wins. Variables can be referenced in plans using `${var-name}` syntax.
 
 See [Variables](/concepts/variables/) for full details on variable interpolation and merge order.
+
+## Referencing Hosts in Templates
+
+Template files can reference any host in the inventory using `${@inventory.<host>.*}` syntax:
+
+```
+reverse_proxy ${@inventory.bifrost.address}:${@inventory.bifrost.port}
+```
+
+Available fields: `address`, `user`, `port`, and `vars.<key>` for the host's resolved variables (after global → group → host merge).
+
+Template files can also loop over all hosts in a group using `${for h in @group.<name>}`:
+
+```
+${for h in @group.backend}
+server ${h.address}:8080;
+${endfor}
+```
+
+Each host exposes `name`, `address`, `user`, and `port` fields in the loop.
+
+See [Template Loops](/advanced/loops-register/#template-loops) and [Inventory References](/concepts/variables/#inventory-references) for details.

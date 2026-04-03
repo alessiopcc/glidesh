@@ -37,6 +37,8 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
 
     let mut mode = ExecutionMode::default();
     let mut vars = HashMap::new();
+    let mut structured_vars: HashMap<String, Vec<HashMap<String, String>>> = HashMap::new();
+    let mut vars_files = Vec::new();
     let mut items = Vec::new();
 
     for node in children.nodes() {
@@ -57,18 +59,50 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                 if let Some(vc) = node.children() {
                     for vnode in vc.nodes() {
                         let key = vnode.name().to_string();
-                        let value = vnode
-                            .entries()
-                            .iter()
-                            .find(|e| e.name().is_none())
-                            .map(|e| kdl_value_to_string(e.value()))
-                            .unwrap_or_default();
-                        vars.insert(key, value);
+                        if let Some(list_of_maps) = parse_structured_var(vnode) {
+                            if structured_vars.contains_key(&key) || vars.contains_key(&key) {
+                                return Err(GlideshError::ConfigParse {
+                                    message: format!(
+                                        "Duplicate variable '{}' in plan vars block",
+                                        key
+                                    ),
+                                });
+                            }
+                            structured_vars.insert(key, list_of_maps);
+                        } else {
+                            if vars.contains_key(&key) || structured_vars.contains_key(&key) {
+                                return Err(GlideshError::ConfigParse {
+                                    message: format!(
+                                        "Duplicate variable '{}' in plan vars block",
+                                        key
+                                    ),
+                                });
+                            }
+                            let value = vnode
+                                .entries()
+                                .iter()
+                                .find(|e| e.name().is_none())
+                                .map(|e| kdl_value_to_string(e.value()))
+                                .unwrap_or_default();
+                            vars.insert(key, value);
+                        }
                     }
                 }
             }
             "step" => {
                 items.push(PlanItem::Step(parse_step(node)?));
+            }
+            "vars-file" => {
+                let path = node
+                    .entries()
+                    .iter()
+                    .find(|e| e.name().is_none())
+                    .and_then(|e| e.value().as_string())
+                    .ok_or_else(|| GlideshError::ConfigParse {
+                        message: "vars-file requires a path argument".to_string(),
+                    })?
+                    .to_string();
+                vars_files.push(path);
             }
             "include" => {
                 let path = node
@@ -94,24 +128,118 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         name,
         mode,
         vars,
+        structured_vars,
+        vars_files,
         items,
     })
 }
 
 /// Recursively resolve all `include` items in a plan by loading referenced plan files
 /// and inlining their steps. The included plan's vars are merged (parent wins on conflict).
+/// Also resolves `vars-file` directives by loading external KDL var files.
 /// Detects circular includes.
 pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshError> {
+    resolve_vars_files(
+        &plan.vars_files,
+        &mut plan.vars,
+        &mut plan.structured_vars,
+        base_dir,
+    )?;
+    plan.vars_files.clear();
+
     let mut seen = HashSet::new();
     seen.insert(plan.name.clone());
-    let resolved = resolve_items(&plan.items, &plan.vars, base_dir, &mut seen)?;
+    let resolved = resolve_items(
+        &plan.items,
+        &plan.vars,
+        &plan.structured_vars,
+        base_dir,
+        &mut seen,
+    )?;
     plan.items = resolved;
+    Ok(())
+}
+
+/// Load vars from external KDL files. Each file contains raw var nodes (no wrapper).
+/// Inline vars take precedence over vars-file vars. Duplicate keys across different
+/// vars-files are rejected.
+fn resolve_vars_files(
+    paths: &[String],
+    vars: &mut HashMap<String, String>,
+    structured_vars: &mut HashMap<String, Vec<HashMap<String, String>>>,
+    base_dir: &Path,
+) -> Result<(), GlideshError> {
+    // Track keys seen across all vars-files to detect cross-file duplicates.
+    // Keys already in inline vars/structured_vars are fine (inline wins).
+    let mut seen_across_files: HashMap<String, String> = HashMap::new();
+
+    for path in paths {
+        let resolved_path = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            base_dir.join(path)
+        };
+        let content = std::fs::read_to_string(&resolved_path).map_err(|e| {
+            GlideshError::Other(format!(
+                "Failed to read vars file '{}': {}",
+                resolved_path.display(),
+                e
+            ))
+        })?;
+        let doc: kdl::KdlDocument =
+            content
+                .parse()
+                .map_err(|e: kdl::KdlError| GlideshError::ConfigParse {
+                    message: format!(
+                        "Failed to parse vars file '{}': {}",
+                        resolved_path.display(),
+                        e
+                    ),
+                })?;
+        let mut seen_in_file: HashSet<String> = HashSet::new();
+        for vnode in doc.nodes() {
+            let key = vnode.name().to_string();
+            if !seen_in_file.insert(key.clone()) {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "Duplicate variable '{}' in vars file '{}'",
+                        key,
+                        resolved_path.display()
+                    ),
+                });
+            }
+            // Check for duplicates across different vars-files
+            if let Some(prev_file) = seen_across_files.get(&key) {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "Variable '{}' defined in both '{}' and '{}'",
+                        key, prev_file, path
+                    ),
+                });
+            }
+            seen_across_files.insert(key.clone(), path.clone());
+            if let Some(list_of_maps) = parse_structured_var(vnode) {
+                // Inline structured vars win — only insert if not already present
+                structured_vars.entry(key).or_insert(list_of_maps);
+            } else {
+                let value = vnode
+                    .entries()
+                    .iter()
+                    .find(|e| e.name().is_none())
+                    .map(|e| kdl_value_to_string(e.value()))
+                    .unwrap_or_default();
+                // Inline vars win — only insert if not already present
+                vars.entry(key).or_insert(value);
+            }
+        }
+    }
     Ok(())
 }
 
 fn resolve_items(
     items: &[PlanItem],
     parent_vars: &HashMap<String, String>,
+    parent_structured: &HashMap<String, Vec<HashMap<String, String>>>,
     base_dir: &Path,
     seen: &mut HashSet<String>,
 ) -> Result<Vec<PlanItem>, GlideshError> {
@@ -145,13 +273,62 @@ fn resolve_items(
                 let mut merged_vars = included.vars.clone();
                 merged_vars.extend(parent_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
+                let mut merged_structured = included.structured_vars.clone();
+                merged_structured.extend(
+                    parent_structured
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
+
                 let child_base = resolved_path.parent().unwrap_or(base_dir);
-                let child_items = resolve_items(&included.items, &merged_vars, child_base, seen)?;
+                let child_items = resolve_items(
+                    &included.items,
+                    &merged_vars,
+                    &merged_structured,
+                    child_base,
+                    seen,
+                )?;
                 result.extend(child_items);
             }
         }
     }
     Ok(result)
+}
+
+/// Detect whether a vars node is a structured list-of-maps (for template loops).
+///
+/// Returns `Some(list)` if the node has children that are all `"-"` nodes
+/// with at least one named property. Returns `None` for scalar or plain-list vars.
+fn parse_structured_var(node: &kdl::KdlNode) -> Option<Vec<HashMap<String, String>>> {
+    let children = node.children()?;
+    let nodes = children.nodes();
+    if nodes.is_empty() {
+        return None;
+    }
+    if !nodes.iter().all(|n| n.name().to_string() == "-") {
+        return None;
+    }
+    // Must have at least one named property to distinguish from plain lists
+    let has_named = nodes
+        .iter()
+        .any(|n| n.entries().iter().any(|e| e.name().is_some()));
+    if !has_named {
+        return None;
+    }
+
+    let items = nodes
+        .iter()
+        .map(|n| {
+            let mut map = HashMap::new();
+            for entry in n.entries() {
+                if let Some(name) = entry.name() {
+                    map.insert(name.to_string(), kdl_value_to_string(entry.value()));
+                }
+            }
+            map
+        })
+        .collect();
+    Some(items)
 }
 
 fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
@@ -756,5 +933,288 @@ plan "test" {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("external requires a module name"));
+    }
+
+    #[test]
+    fn test_parse_structured_vars() {
+        let input = r#"
+plan "test" {
+    vars {
+        api-keys {
+            - name="k1" value="sk-aaa"
+            - name="k2" value="sk-bbb"
+        }
+    }
+    step "Deploy" {
+        shell "echo"
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        assert!(fp.vars.get("api-keys").is_none());
+        let keys = fp.structured_vars.get("api-keys").unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].get("name").unwrap(), "k1");
+        assert_eq!(keys[0].get("value").unwrap(), "sk-aaa");
+        assert_eq!(keys[1].get("name").unwrap(), "k2");
+        assert_eq!(keys[1].get("value").unwrap(), "sk-bbb");
+    }
+
+    #[test]
+    fn test_parse_mixed_vars() {
+        let input = r#"
+plan "test" {
+    vars {
+        simple-var "hello"
+        port 8080
+        items {
+            - key="a" val="1"
+        }
+    }
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        assert_eq!(fp.vars.get("simple-var").unwrap(), "hello");
+        assert_eq!(fp.vars.get("port").unwrap(), "8080");
+        assert!(fp.vars.get("items").is_none());
+        let items = fp.structured_vars.get("items").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("key").unwrap(), "a");
+    }
+
+    #[test]
+    fn test_structured_vars_not_list() {
+        // Plain lists (- "item") should NOT be treated as structured vars
+        let input = r#"
+plan "test" {
+    vars {
+        tags "dev"
+    }
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        assert_eq!(fp.vars.get("tags").unwrap(), "dev");
+        assert!(fp.structured_vars.is_empty());
+    }
+
+    #[test]
+    fn test_vars_file_basic() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("glidesh_test_vars_file_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let vars_content = r#"
+region "us-east-1"
+api-keys {
+    - name="k1" value="sk-aaa"
+    - name="k2" value="sk-bbb"
+}
+"#;
+        let vars_path = dir.join("keys.kdl");
+        std::fs::File::create(&vars_path)
+            .unwrap()
+            .write_all(vars_content.as_bytes())
+            .unwrap();
+
+        let plan_input = r#"
+plan "test" {
+    vars-file "keys.kdl"
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        assert_eq!(plan.vars_files.len(), 1);
+
+        resolve_includes(&mut plan, &dir).unwrap();
+
+        assert_eq!(plan.vars.get("region").unwrap(), "us-east-1");
+        let keys = plan.structured_vars.get("api-keys").unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].get("name").unwrap(), "k1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vars_file_inline_wins() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "glidesh_test_vars_file_override_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let vars_content = r#"
+region "from-file"
+"#;
+        std::fs::File::create(dir.join("ext.kdl"))
+            .unwrap()
+            .write_all(vars_content.as_bytes())
+            .unwrap();
+
+        let plan_input = r#"
+plan "test" {
+    vars {
+        region "inline-wins"
+    }
+    vars-file "ext.kdl"
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        resolve_includes(&mut plan, &dir).unwrap();
+
+        // Inline var should win over vars-file
+        assert_eq!(plan.vars.get("region").unwrap(), "inline-wins");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vars_file_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "glidesh_test_vars_file_missing_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let plan_input = r#"
+plan "test" {
+    vars-file "nonexistent.kdl"
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonexistent.kdl"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_duplicate_var_in_plan_vars_block() {
+        let input = r#"
+plan "test" {
+    vars {
+        region "us-east-1"
+        region "eu-west-1"
+    }
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let result = parse_plan(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'region'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_structured_var_in_plan_vars_block() {
+        let input = r#"
+plan "test" {
+    vars {
+        keys {
+            - name="k1" value="v1"
+        }
+        keys {
+            - name="k2" value="v2"
+        }
+    }
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let result = parse_plan(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'keys'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_var_in_vars_file() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("glidesh_test_dup_vars_file_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let vars_content = r#"
+region "us-east-1"
+region "eu-west-1"
+"#;
+        std::fs::File::create(dir.join("dup.kdl"))
+            .unwrap()
+            .write_all(vars_content.as_bytes())
+            .unwrap();
+
+        let plan_input = r#"
+plan "test" {
+    vars-file "dup.kdl"
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'region'"), "got: {}", msg);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_duplicate_var_across_vars_files() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("glidesh_test_dup_across_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        std::fs::File::create(dir.join("a.kdl"))
+            .unwrap()
+            .write_all(b"region \"us-east-1\"")
+            .unwrap();
+        std::fs::File::create(dir.join("b.kdl"))
+            .unwrap()
+            .write_all(b"region \"eu-west-1\"")
+            .unwrap();
+
+        let plan_input = r#"
+plan "test" {
+    vars-file "a.kdl"
+    vars-file "b.kdl"
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region") && msg.contains("a.kdl") && msg.contains("b.kdl"),
+            "got: {}",
+            msg
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

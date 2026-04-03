@@ -7,11 +7,13 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use executor::result::ExecutorEvent;
 use glidesh::config;
-use glidesh::config::types::ExecutionMode;
+use glidesh::config::template::TemplateData;
+use glidesh::config::types::{ExecutionMode, Inventory};
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use logging::RunLogger;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -99,6 +101,13 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         .and_then(|p| p.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
+    let inv_template_data = Arc::new(
+        inventory
+            .as_ref()
+            .map(build_inventory_template_data)
+            .unwrap_or_default(),
+    );
+
     let mut group_plans = Vec::new();
     let mut all_host_names: Vec<(String, String, String)> = Vec::new();
     let mut run_name_parts = Vec::new();
@@ -155,6 +164,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         group_plans.push(executor::GroupPlan {
             plan: Arc::new(plan),
             targets,
+            inventory_template_data: inv_template_data.clone(),
         });
     } else if let Some(ref inventory) = inventory {
         let group_plans_raw = inventory.resolve_group_plans();
@@ -254,6 +264,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             group_plans.push(executor::GroupPlan {
                 plan: Arc::new(plan),
                 targets: filtered_targets,
+                inventory_template_data: inv_template_data.clone(),
             });
         }
     } else {
@@ -544,6 +555,53 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     } else {
         Err(GlideshError::Other("Validation failed".to_string()))
     }
+}
+
+/// Build `TemplateData` from an inventory for `@inventory.*` and `@group.*` template references.
+fn build_inventory_template_data(inventory: &Inventory) -> TemplateData {
+    let mut data = TemplateData::default();
+
+    // @inventory.<host>.* flat vars for direct host lookups
+    let all_hosts = inventory.resolve_targets(None);
+    for rh in &all_hosts {
+        let prefix = format!("@inventory.{}", rh.name);
+        data.extra_vars
+            .insert(format!("{}.address", prefix), rh.address.clone());
+        data.extra_vars
+            .insert(format!("{}.user", prefix), rh.user.clone());
+        data.extra_vars
+            .insert(format!("{}.port", prefix), rh.port.to_string());
+        for (k, v) in &rh.vars {
+            data.extra_vars
+                .insert(format!("{}.vars.{}", prefix, k), v.clone());
+        }
+    }
+
+    // Build name→ResolvedHost map for group lookups (avoids resolve_targets
+    // which matches groups before hosts and could return wrong results)
+    let host_map: HashMap<&str, &glidesh::config::types::ResolvedHost> =
+        all_hosts.iter().map(|rh| (rh.name.as_str(), rh)).collect();
+
+    // @group.<name> collections for loop iteration
+    for group in &inventory.groups {
+        let group_hosts: Vec<HashMap<String, String>> = group
+            .hosts
+            .iter()
+            .filter_map(|h| host_map.get(h.name.as_str()))
+            .map(|rh| {
+                HashMap::from([
+                    ("name".to_string(), rh.name.clone()),
+                    ("address".to_string(), rh.address.clone()),
+                    ("user".to_string(), rh.user.clone()),
+                    ("port".to_string(), rh.port.to_string()),
+                ])
+            })
+            .collect();
+        data.collections
+            .insert(format!("@group.{}", group.name), group_hosts);
+    }
+
+    data
 }
 
 fn load_ssh_key(
