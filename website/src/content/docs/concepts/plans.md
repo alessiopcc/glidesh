@@ -9,7 +9,6 @@ A plan describes the desired state of your infrastructure. It is a declarative c
 
 ```kdl
 plan "deploy-app" {
-    target "web"
     mode "sync"
 
     vars {
@@ -40,7 +39,6 @@ plan "deploy-app" {
 
 ## Top-Level Properties
 
-- **target** — which inventory group (or host) this plan applies to
 - **mode** — `"sync"` (default) or `"async"` (can be overridden with `--mode` on CLI)
 - **vars** — plan-scoped variables, merged with inventory vars
 
@@ -54,8 +52,6 @@ Plans can include other plan files using the `include` directive:
 
 ```kdl
 plan "main" {
-    target "web"
-
     step "Setup" {
         package "nginx" state="present"
     }
