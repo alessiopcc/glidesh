@@ -104,6 +104,29 @@ key "charlie" = "sk-ccc"
 
 Each item in the collection is a map of named fields. Access fields with dot notation: `${k.name}`, `${k.key}`, etc. The binding name (`k` in this example) is your choice.
 
+### Separator
+
+When generating JSON, CSV, or similar formats, you often need a separator between items but not after the last one. Use the optional `separator="..."` parameter:
+
+```
+[
+${for item in items separator=","}
+  {"name": "${item.name}", "key": "${item.key}"}
+${endfor}
+]
+```
+
+With two items, this renders to:
+
+```json
+[
+  {"name": "alice", "key": "sk-aaa"},
+  {"name": "bob", "key": "sk-bbb"}
+]
+```
+
+The separator is inserted **between** items only — not before the first or after the last. If the collection has zero or one items, no separator is output.
+
 ### Looping over inventory groups
 
 You can also loop over all hosts in an inventory group using `@group.<name>`:

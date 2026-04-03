@@ -58,9 +58,9 @@ fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, Glid
                 })?
                 + for_start;
 
-        let header = &result[for_start + 2..header_end]; // "for binding in collection"
+        let header = &result[for_start + 2..header_end]; // "for binding in collection ..."
         let parts: Vec<&str> = header.split_whitespace().collect();
-        if parts.len() != 4 || parts[0] != "for" || parts[2] != "in" {
+        if parts.len() < 4 || parts[0] != "for" || parts[2] != "in" {
             return Err(GlideshError::TemplateError {
                 message: format!(
                     "Invalid for-loop syntax: expected '${{for <binding> in <collection>}}', got '${{{}}}' ",
@@ -70,6 +70,22 @@ fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, Glid
         }
         let binding = parts[1];
         let collection_name = parts[3];
+
+        // Parse optional separator="..." from the header
+        let separator = if let Some(start) = header.find("separator=\"") {
+            let val_start = start + "separator=\"".len();
+            let val_end =
+                header[val_start..]
+                    .find('"')
+                    .ok_or_else(|| GlideshError::TemplateError {
+                        message: "Unclosed separator value in for-loop (missing closing quote)"
+                            .to_string(),
+                    })?
+                    + val_start;
+            Some(&header[val_start..val_end])
+        } else {
+            None
+        };
 
         // Find matching ${endfor}, tracking nesting depth
         let body_start = header_end + 1;
@@ -114,8 +130,8 @@ fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, Glid
                     message: format!("Undefined collection in for-loop: {}", collection_name),
                 })?;
 
-        let mut expanded = String::new();
         let binding_prefix = format!("${{{binding}."); // "${binding."
+        let mut rendered_items: Vec<String> = Vec::new();
 
         for item in items {
             let mut line = body.to_string();
@@ -144,8 +160,13 @@ fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, Glid
 
                 line = format!("{}{}{}", &line[..ref_start], value, &line[ref_end + 1..]);
             }
-            expanded.push_str(&line);
+            rendered_items.push(line);
         }
+
+        let expanded = match separator {
+            Some(sep) => rendered_items.join(sep),
+            None => rendered_items.concat(),
+        };
 
         result = format!(
             "{}{}{}",
@@ -362,5 +383,48 @@ mod tests {
 
         let result = render("hello ${name}", &vars, &data).unwrap();
         assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_render_for_loop_separator() {
+        let vars = HashMap::new();
+        let mut data = TemplateData::default();
+        data.collections.insert(
+            "items".to_string(),
+            vec![
+                HashMap::from([("name".to_string(), "a".to_string())]),
+                HashMap::from([("name".to_string(), "b".to_string())]),
+                HashMap::from([("name".to_string(), "c".to_string())]),
+            ],
+        );
+
+        let template = "[\n${for x in items separator=\",\"}\n  \"${x.name}\"\n${endfor}\n]";
+        let result = render(template, &vars, &data).unwrap();
+        assert_eq!(result, "[\n\n  \"a\"\n,\n  \"b\"\n,\n  \"c\"\n\n]");
+    }
+
+    #[test]
+    fn test_render_for_loop_separator_single_item() {
+        let vars = HashMap::new();
+        let mut data = TemplateData::default();
+        data.collections.insert(
+            "items".to_string(),
+            vec![HashMap::from([("name".to_string(), "only".to_string())])],
+        );
+
+        let template = "${for x in items separator=\",\"}${x.name}${endfor}";
+        let result = render(template, &vars, &data).unwrap();
+        assert_eq!(result, "only");
+    }
+
+    #[test]
+    fn test_render_for_loop_separator_empty() {
+        let vars = HashMap::new();
+        let mut data = TemplateData::default();
+        data.collections.insert("items".to_string(), vec![]);
+
+        let template = "[${for x in items separator=\",\"}${x.name}${endfor}]";
+        let result = render(template, &vars, &data).unwrap();
+        assert_eq!(result, "[]");
     }
 }
