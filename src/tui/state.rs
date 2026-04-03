@@ -215,6 +215,7 @@ impl TuiState {
                 changed: _,
             } => {
                 if let Some(&idx) = self.node_index.get(host) {
+                    let already_finished = self.nodes[idx].finished_at.is_some();
                     self.nodes[idx].status = if *success {
                         NodeStatus::Done
                     } else {
@@ -222,7 +223,9 @@ impl TuiState {
                     };
                     self.nodes[idx].finished_at = Some(Instant::now());
                     self.nodes[idx].current_step = "--".to_string();
-                    self.completed += 1;
+                    if !already_finished {
+                        self.completed += 1;
+                    }
                 }
             }
             ExecutorEvent::RunComplete { summary } => {

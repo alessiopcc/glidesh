@@ -52,7 +52,7 @@ pub fn render(frame: &mut Frame, state: &TuiState) {
 
 fn render_header(frame: &mut Frame, area: Rect, state: &TuiState) {
     let progress = if state.total > 0 {
-        state.completed as f64 / state.total as f64
+        (state.completed as f64 / state.total as f64).min(1.0)
     } else {
         0.0
     };
