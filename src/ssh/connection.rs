@@ -351,12 +351,23 @@ impl SshSession {
         path: &str,
     ) -> Result<Option<(String, String, String)>, GlideshError> {
         let escaped = shell_escape(path);
-        let output = self
-            .exec(&format!("stat -c '%U %G %a' {escaped} 2>/dev/null"))
-            .await?;
+        let output = self.exec(&format!("stat -c '%U %G %a' {escaped}")).await?;
 
         if output.exit_code != 0 {
-            return Ok(None);
+            let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+            if combined.contains("no such file or directory") || combined.contains("cannot stat") {
+                return Ok(None);
+            }
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "stat of '{}' failed (exit {}): {}{}",
+                    path,
+                    output.exit_code,
+                    output.stdout.trim(),
+                    output.stderr.trim(),
+                ),
+            });
         }
 
         let parts: Vec<&str> = output.stdout.trim().splitn(3, ' ').collect();

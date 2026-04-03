@@ -77,8 +77,10 @@ impl FileModule {
 }
 
 /// Strips leading zeros so "0644" and "644" compare equal.
+/// Preserves "0" for zero-valued modes instead of returning an empty string.
 fn normalize_mode(mode: &str) -> &str {
-    mode.trim_start_matches('0')
+    let trimmed = mode.trim_start_matches('0');
+    if trimmed.is_empty() { "0" } else { trimmed }
 }
 
 #[async_trait]
@@ -117,9 +119,8 @@ impl Module for FileModule {
                 let desired_mode = params.args.get("mode").and_then(|v| v.as_str());
 
                 if desired_owner.is_some() || desired_group.is_some() || desired_mode.is_some() {
-                    if let Some((remote_owner, remote_group, remote_mode)) =
-                        ctx.ssh.get_file_attrs(dest).await?
-                    {
+                    let remote_attrs = ctx.ssh.get_file_attrs(dest).await?;
+                    if let Some((remote_owner, remote_group, remote_mode)) = remote_attrs {
                         let owner_ok = desired_owner.is_none_or(|o| o == remote_owner);
                         let group_ok = desired_group.is_none_or(|g| g == remote_group);
                         let mode_ok = desired_mode
@@ -153,6 +154,10 @@ impl Module for FileModule {
                         }
                         return Ok(ModuleStatus::Pending {
                             plan: format!("Fix attrs on {}: {}", dest, changes.join(", ")),
+                        });
+                    } else {
+                        return Ok(ModuleStatus::Pending {
+                            plan: format!("Set attrs on {} (could not read current attrs)", dest),
                         });
                     }
                 }
