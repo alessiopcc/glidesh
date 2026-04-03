@@ -183,6 +183,7 @@ impl TestContainer {
             ssh,
             os_info,
             vars,
+            template_data: &glidesh::config::template::EMPTY_TEMPLATE_DATA,
             dry_run,
         }
     }

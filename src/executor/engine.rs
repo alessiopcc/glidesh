@@ -1,5 +1,6 @@
 use crate::executor::node_runner::NodeRunner;
 use crate::executor::result::{ExecutorEvent, NodeResult, RunSummary};
+use glidesh::config::template::TemplateData;
 use glidesh::config::types::{Plan, ResolvedHost};
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
@@ -16,6 +17,7 @@ pub struct Engine {
     pub concurrency: usize,
     pub dry_run: bool,
     pub host_key_policy: HostKeyPolicy,
+    pub inventory_template_data: Arc<TemplateData>,
 }
 
 impl Engine {
@@ -29,6 +31,8 @@ impl Engine {
 
         let mut handles = Vec::new();
 
+        let inv_data = self.inventory_template_data.clone();
+
         for host in self.targets {
             let sem = semaphore.clone();
             let fp = plan.clone();
@@ -37,6 +41,7 @@ impl Engine {
             let dry_run = self.dry_run;
             let host_key_policy = self.host_key_policy;
             let tx = event_tx.clone();
+            let inv = inv_data.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
@@ -48,6 +53,7 @@ impl Engine {
                     dry_run,
                     host_key_policy,
                     event_tx: tx,
+                    inventory_template_data: inv,
                 };
                 runner.run().await
             });
@@ -84,6 +90,7 @@ impl Engine {
 pub struct GroupPlan {
     pub plan: Arc<Plan>,
     pub targets: Vec<ResolvedHost>,
+    pub inventory_template_data: Arc<TemplateData>,
 }
 
 /// Run multiple group-plan pairs concurrently. Each group's hosts execute
@@ -114,6 +121,7 @@ pub async fn run(
                 concurrency,
                 dry_run,
                 host_key_policy,
+                inventory_template_data: gp.inventory_template_data,
             };
             // Use a local channel so RunComplete events don't fire per-group.
             // Instead, forward all events except RunComplete to the parent.

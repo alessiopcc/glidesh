@@ -182,6 +182,10 @@ pub struct Plan {
     pub name: String,
     pub mode: ExecutionMode,
     pub vars: HashMap<String, String>,
+    /// Structured vars for template loops: each key maps to a list of named-field maps.
+    pub structured_vars: HashMap<String, Vec<HashMap<String, String>>>,
+    /// Paths to external KDL files containing additional vars (resolved during `resolve_includes`).
+    pub vars_files: Vec<String>,
     pub items: Vec<PlanItem>,
 }
 

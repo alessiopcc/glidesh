@@ -1,4 +1,4 @@
-use crate::config::template::interpolate;
+use crate::config::template::{TemplateData, render};
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
@@ -39,6 +39,7 @@ impl FileModule {
         src: &str,
         template: bool,
         vars: &std::collections::HashMap<String, String>,
+        template_data: &TemplateData,
     ) -> Result<Vec<u8>, GlideshError> {
         let content = std::fs::read(src).map_err(|e| GlideshError::Module {
             module: "file".to_string(),
@@ -50,7 +51,7 @@ impl FileModule {
                 module: "file".to_string(),
                 message: format!("Template file '{}' is not valid UTF-8: {}", src, e),
             })?;
-            let rendered = interpolate(&text, vars)?;
+            let rendered = render(&text, vars, template_data)?;
             Ok(rendered.into_bytes())
         } else {
             Ok(content)
@@ -84,7 +85,8 @@ impl Module for FileModule {
             });
         }
 
-        let content = Self::read_local_content(src, Self::is_template(params), ctx.vars)?;
+        let content =
+            Self::read_local_content(src, Self::is_template(params), ctx.vars, ctx.template_data)?;
         let local_hash = Self::sha256_hex(&content);
 
         match ctx.ssh.checksum_remote(dest).await? {
@@ -134,7 +136,8 @@ impl FileModule {
             });
         }
 
-        let content = Self::read_local_content(src, Self::is_template(params), ctx.vars)?;
+        let content =
+            Self::read_local_content(src, Self::is_template(params), ctx.vars, ctx.template_data)?;
 
         if let Some(parent) = std::path::Path::new(dest).parent() {
             let parent_str = parent.to_string_lossy();

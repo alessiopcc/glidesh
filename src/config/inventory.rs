@@ -525,4 +525,66 @@ host "standalone" "10.0.0.2"
         assert!(resolved[0].jump.is_none());
         assert!(resolved[1].jump.is_none());
     }
+
+    #[test]
+    fn test_duplicate_hostname_same_group() {
+        let input = r#"
+group "web" {
+    host "app" "10.0.0.1"
+    host "app" "10.0.0.2"
+}
+"#;
+        let result = parse_inventory(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate host name 'app'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_hostname_across_groups() {
+        let input = r#"
+group "web" {
+    host "app" "10.0.0.1"
+}
+group "db" {
+    host "app" "10.0.0.2"
+}
+"#;
+        let result = parse_inventory(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate host name 'app'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_hostname_grouped_and_ungrouped() {
+        let input = r#"
+group "web" {
+    host "app" "10.0.0.1"
+}
+host "app" "10.0.0.2"
+"#;
+        let result = parse_inventory(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate host name 'app'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_ungrouped_host_collides_with_group_name() {
+        let input = r#"
+group "web" {
+    host "web-1" "10.0.0.1"
+}
+host "web" "10.0.0.2"
+"#;
+        let result = parse_inventory(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("same name as a group"),
+            "got: {}",
+            msg
+        );
+    }
 }
