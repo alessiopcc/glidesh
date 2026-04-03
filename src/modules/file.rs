@@ -35,15 +35,26 @@ impl FileModule {
             })
     }
 
+    fn resolve_src(src: &str, plan_base_dir: &std::path::Path) -> std::path::PathBuf {
+        let path = std::path::Path::new(src);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            plan_base_dir.join(path)
+        }
+    }
+
     fn read_local_content(
         src: &str,
         template: bool,
         vars: &std::collections::HashMap<String, String>,
         template_data: &TemplateData,
+        plan_base_dir: &std::path::Path,
     ) -> Result<Vec<u8>, GlideshError> {
-        let content = std::fs::read(src).map_err(|e| GlideshError::Module {
+        let resolved = Self::resolve_src(src, plan_base_dir);
+        let content = std::fs::read(&resolved).map_err(|e| GlideshError::Module {
             module: "file".to_string(),
-            message: format!("Failed to read local file '{}': {}", src, e),
+            message: format!("Failed to read local file '{}': {}", resolved.display(), e),
         })?;
 
         if template {
@@ -85,8 +96,13 @@ impl Module for FileModule {
             });
         }
 
-        let content =
-            Self::read_local_content(src, Self::is_template(params), ctx.vars, ctx.template_data)?;
+        let content = Self::read_local_content(
+            src,
+            Self::is_template(params),
+            ctx.vars,
+            ctx.template_data,
+            ctx.plan_base_dir,
+        )?;
         let local_hash = Self::sha256_hex(&content);
 
         match ctx.ssh.checksum_remote(dest).await? {
@@ -136,8 +152,13 @@ impl FileModule {
             });
         }
 
-        let content =
-            Self::read_local_content(src, Self::is_template(params), ctx.vars, ctx.template_data)?;
+        let content = Self::read_local_content(
+            src,
+            Self::is_template(params),
+            ctx.vars,
+            ctx.template_data,
+            ctx.plan_base_dir,
+        )?;
 
         if let Some(parent) = std::path::Path::new(dest).parent() {
             let parent_str = parent.to_string_lossy();

@@ -185,6 +185,7 @@ impl TestContainer {
             vars,
             template_data: &glidesh::config::template::EMPTY_TEMPLATE_DATA,
             dry_run,
+            plan_base_dir: std::path::Path::new("."),
         }
     }
 }
