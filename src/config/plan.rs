@@ -60,8 +60,24 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                     for vnode in vc.nodes() {
                         let key = vnode.name().to_string();
                         if let Some(list_of_maps) = parse_structured_var(vnode) {
+                            if structured_vars.contains_key(&key) || vars.contains_key(&key) {
+                                return Err(GlideshError::ConfigParse {
+                                    message: format!(
+                                        "Duplicate variable '{}' in plan vars block",
+                                        key
+                                    ),
+                                });
+                            }
                             structured_vars.insert(key, list_of_maps);
                         } else {
+                            if vars.contains_key(&key) || structured_vars.contains_key(&key) {
+                                return Err(GlideshError::ConfigParse {
+                                    message: format!(
+                                        "Duplicate variable '{}' in plan vars block",
+                                        key
+                                    ),
+                                });
+                            }
                             let value = vnode
                                 .entries()
                                 .iter()
@@ -175,8 +191,18 @@ fn resolve_vars_files(
                         e
                     ),
                 })?;
+        let mut seen_in_file: HashSet<String> = HashSet::new();
         for vnode in doc.nodes() {
             let key = vnode.name().to_string();
+            if !seen_in_file.insert(key.clone()) {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "Duplicate variable '{}' in vars file '{}'",
+                        key,
+                        resolved_path.display()
+                    ),
+                });
+            }
             if let Some(list_of_maps) = parse_structured_var(vnode) {
                 // Inline structured vars win — only insert if not already present
                 structured_vars.entry(key).or_insert(list_of_maps);
@@ -1053,6 +1079,80 @@ plan "test" {
         let result = resolve_includes(&mut plan, &dir);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nonexistent.kdl"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_duplicate_var_in_plan_vars_block() {
+        let input = r#"
+plan "test" {
+    vars {
+        region "us-east-1"
+        region "eu-west-1"
+    }
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let result = parse_plan(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'region'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_structured_var_in_plan_vars_block() {
+        let input = r#"
+plan "test" {
+    vars {
+        keys {
+            - name="k1" value="v1"
+        }
+        keys {
+            - name="k2" value="v2"
+        }
+    }
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let result = parse_plan(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'keys'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_var_in_vars_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("glidesh_test_dup_vars_file");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let vars_content = r#"
+region "us-east-1"
+region "eu-west-1"
+"#;
+        std::fs::File::create(dir.join("dup.kdl"))
+            .unwrap()
+            .write_all(vars_content.as_bytes())
+            .unwrap();
+
+        let plan_input = r#"
+plan "test" {
+    vars-file "dup.kdl"
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'region'"), "got: {}", msg);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

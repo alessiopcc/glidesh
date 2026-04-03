@@ -281,6 +281,11 @@ fn parse_vars_block(doc: &kdl::KdlDocument) -> Result<HashMap<String, String>, G
     let mut vars = HashMap::new();
     for node in doc.nodes() {
         let key = node.name().to_string();
+        if vars.contains_key(&key) {
+            return Err(GlideshError::ConfigParse {
+                message: format!("Duplicate variable '{}' in vars block", key),
+            });
+        }
         let value = node
             .entries()
             .iter()
@@ -581,10 +586,38 @@ host "web" "10.0.0.2"
         let result = parse_inventory(input);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("same name as a group"),
-            "got: {}",
-            msg
-        );
+        assert!(msg.contains("same name as a group"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_var_in_inventory_vars_block() {
+        let input = r#"
+vars {
+    region "us-east-1"
+    region "eu-west-1"
+}
+host "web-1" "10.0.0.1"
+"#;
+        let result = parse_inventory(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'region'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_duplicate_var_in_group_vars_block() {
+        let input = r#"
+group "web" {
+    vars {
+        port 8080
+        port 9090
+    }
+    host "web-1" "10.0.0.1"
+}
+"#;
+        let result = parse_inventory(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'port'"), "got: {}", msg);
     }
 }
