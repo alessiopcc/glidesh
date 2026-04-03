@@ -6,6 +6,7 @@ use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
 use glidesh::ssh::HostKeyPolicy;
 use russh_keys::key::PrivateKeyWithHashAlg;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Semaphore, mpsc};
 
@@ -18,6 +19,7 @@ pub struct Engine {
     pub dry_run: bool,
     pub host_key_policy: HostKeyPolicy,
     pub inventory_template_data: Arc<TemplateData>,
+    pub plan_base_dir: Arc<PathBuf>,
 }
 
 impl Engine {
@@ -42,6 +44,7 @@ impl Engine {
             let host_key_policy = self.host_key_policy;
             let tx = event_tx.clone();
             let inv = inv_data.clone();
+            let base_dir = self.plan_base_dir.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
@@ -54,6 +57,7 @@ impl Engine {
                     host_key_policy,
                     event_tx: tx,
                     inventory_template_data: inv,
+                    plan_base_dir: base_dir,
                 };
                 runner.run().await
             });
@@ -91,6 +95,7 @@ pub struct GroupPlan {
     pub plan: Arc<Plan>,
     pub targets: Vec<ResolvedHost>,
     pub inventory_template_data: Arc<TemplateData>,
+    pub plan_base_dir: Arc<PathBuf>,
 }
 
 /// Run multiple group-plan pairs concurrently. Each group's hosts execute
@@ -122,6 +127,7 @@ pub async fn run(
                 dry_run,
                 host_key_policy,
                 inventory_template_data: gp.inventory_template_data,
+                plan_base_dir: gp.plan_base_dir,
             };
             // Use a local channel so RunComplete events don't fire per-group.
             // Instead, forward all events except RunComplete to the parent.

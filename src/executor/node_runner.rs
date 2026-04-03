@@ -8,6 +8,7 @@ use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -20,6 +21,7 @@ pub struct NodeRunner {
     pub host_key_policy: HostKeyPolicy,
     pub event_tx: mpsc::UnboundedSender<ExecutorEvent>,
     pub inventory_template_data: Arc<TemplateData>,
+    pub plan_base_dir: Arc<PathBuf>,
 }
 
 impl NodeRunner {
@@ -128,6 +130,11 @@ impl NodeRunner {
                         .await
                         .is_err()
                     {
+                        let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+                            host: self.host.name.clone(),
+                            success: false,
+                            changed: total_changed,
+                        });
                         let _ = session.close().await;
                         return Ok(NodeResult {
                             success: false,
@@ -170,6 +177,11 @@ impl NodeRunner {
                             .is_err()
                         {
                             vars.remove("item");
+                            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+                                host: self.host.name.clone(),
+                                success: false,
+                                changed: total_changed,
+                            });
                             let _ = session.close().await;
                             return Ok(NodeResult {
                                 success: false,
@@ -228,6 +240,7 @@ impl NodeRunner {
                 vars,
                 template_data,
                 dry_run: self.dry_run,
+                plan_base_dir: &self.plan_base_dir,
             };
 
             let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
@@ -236,10 +249,18 @@ impl NodeRunner {
                 resource: params.resource_name.clone(),
             });
 
-            let status = module
-                .check(&ctx, &params)
-                .await
-                .map_err(|e| (step.name.clone(), e.to_string()))?;
+            let status = match module.check(&ctx, &params).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
+                        host: self.host.name.clone(),
+                        module: task.module.clone(),
+                        resource: params.resource_name.clone(),
+                        error: e.to_string(),
+                    });
+                    return Err((step.name.clone(), e.to_string()));
+                }
+            };
 
             match status {
                 ModuleStatus::Satisfied => {

@@ -161,10 +161,13 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                 .map(|h| (h.name.clone(), String::new(), pn.clone())),
         );
 
+        let plan_base_dir =
+            std::fs::canonicalize(plan_base_dir).unwrap_or_else(|_| plan_base_dir.to_path_buf());
         group_plans.push(executor::GroupPlan {
             plan: Arc::new(plan),
             targets,
             inventory_template_data: inv_template_data.clone(),
+            plan_base_dir: Arc::new(plan_base_dir),
         });
     } else if let Some(ref inventory) = inventory {
         let group_plans_raw = inventory.resolve_group_plans();
@@ -261,10 +264,13 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                     .map(|h| (h.name.clone(), gn.clone(), pn.clone())),
             );
 
+            let plan_base_dir =
+                std::fs::canonicalize(include_base).unwrap_or_else(|_| include_base.to_path_buf());
             group_plans.push(executor::GroupPlan {
                 plan: Arc::new(plan),
                 targets: filtered_targets,
                 inventory_template_data: inv_template_data.clone(),
+                plan_base_dir: Arc::new(plan_base_dir),
             });
         }
     } else {
