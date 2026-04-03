@@ -8,6 +8,15 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::OpenFlags;
 use std::sync::Arc;
+use std::time::Duration;
+
+fn ssh_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        keepalive_interval: Some(Duration::from_secs(15)),
+        keepalive_max: 3,
+        ..client::Config::default()
+    })
+}
 
 pub struct CommandOutput {
     pub exit_code: u32,
@@ -30,7 +39,7 @@ impl SshSession {
         key: &PrivateKeyWithHashAlg,
         host_key_policy: HostKeyPolicy,
     ) -> Result<Self, GlideshError> {
-        let config = Arc::new(client::Config::default());
+        let config = ssh_config();
         let handler = SshHandler {
             host: host.to_string(),
             port,
@@ -85,7 +94,7 @@ impl SshSession {
         jump: &ResolvedJumpHost,
     ) -> Result<Self, GlideshError> {
         // Connect and authenticate to the jump host
-        let jump_config = Arc::new(client::Config::default());
+        let jump_config = ssh_config();
         let jump_handler = SshHandler {
             host: jump.address.clone(),
             port: jump.port,
@@ -139,7 +148,7 @@ impl SshSession {
         let stream = channel.into_stream();
 
         // Run SSH over the tunneled channel
-        let target_config = Arc::new(client::Config::default());
+        let target_config = ssh_config();
         let target_handler = SshHandler {
             host: host.to_string(),
             port,
