@@ -42,10 +42,11 @@ Each `host` node takes two positional arguments:
 Optional properties:
 - `user` — SSH username (overrides group/global vars)
 - `port` — SSH port (default: 22)
+- `plan` — path to a plan file to run on this host (see [Inline Plans](#inline-plans))
 
 ## Groups
 
-A `group` node collects hosts under a name that can be targeted in plans or via `--target` on the CLI. Groups can define their own `vars` block.
+A `group` node collects hosts under a name that can be targeted in plans or via `--target` on the CLI. Groups can define their own `vars` block and an optional `plan=` attribute to link a plan file (see [Inline Plans](#inline-plans)).
 
 ## Jump Hosts
 
@@ -73,6 +74,32 @@ Optional properties on `jump`:
 - `port` — SSH port on the bastion (default: 22)
 
 **Resolution order:** a host-level `jump` overrides the group-level `jump`. If no `user` is set on the jump node, it inherits the resolved user of the target host.
+
+## Inline Plans
+
+Instead of passing `--plan` on the CLI, you can link a plan file directly to a group or host using the `plan=` attribute. When you run `glidesh run -i inventory.kdl` without `--plan`, glidesh automatically runs each linked plan against its associated hosts.
+
+```kdl
+group "web" plan="plans/web.kdl" {
+    host "web-1" "10.0.0.1" user="deploy"
+    host "web-2" "10.0.0.2" user="deploy"
+}
+
+group "db" plan="plans/db.kdl" {
+    host "db-1" "10.0.1.1" user="root"
+}
+
+// Ungrouped hosts can also have a plan
+host "monitoring" "10.0.2.1" user="admin" plan="plans/monitoring.kdl"
+```
+
+This lets different groups run different plans in a single invocation — useful when your infrastructure has distinct roles that each need their own configuration.
+
+Plan paths are resolved relative to the inventory file's directory.
+
+:::note
+When `--plan` is provided on the CLI, it overrides all `plan=` attributes in the inventory.
+:::
 
 ## Variables
 
