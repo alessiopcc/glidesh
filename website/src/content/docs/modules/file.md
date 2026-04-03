@@ -62,6 +62,29 @@ file "backups/${host.name}-dump.sql" {
 | `group` | string | Remote file group |
 | `mode` | string | Remote file permissions (e.g., `"0644"`) |
 
+## Path Resolution
+
+The `src` path is resolved **relative to the plan file's directory**, not the current working directory. Absolute paths are used as-is.
+
+Given this layout:
+
+```
+project/
+├── inventory.kdl
+├── plans/
+│   ├── web.kdl          ← plan file
+│   └── files/
+│       └── nginx.conf
+```
+
+A step in `plans/web.kdl` references the file relative to its own directory:
+
+```kdl
+file "/etc/nginx/nginx.conf" src="files/nginx.conf"
+```
+
+This resolves to `plans/files/nginx.conf` regardless of where you run glidesh from.
+
 ## Idempotency
 
 Copy and template modes compare SHA256 checksums between the local and remote files. If they match, the transfer is skipped. Fetch mode always downloads.

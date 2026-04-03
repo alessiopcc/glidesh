@@ -95,7 +95,11 @@ host "monitoring" "10.0.2.1" user="admin" plan="plans/monitoring.kdl"
 
 This lets different groups run different plans in a single invocation — useful when your infrastructure has distinct roles that each need their own configuration.
 
-Plan paths are resolved relative to the inventory file's directory.
+:::tip[Path resolution]
+The `plan=` path is resolved **relative to the inventory file's directory**. Given an inventory at `infra/inventory.kdl` with `plan="plans/web.kdl"`, glidesh looks for `infra/plans/web.kdl`. Absolute paths are used as-is.
+
+Once a plan is loaded, all paths *inside* the plan (`include`, `vars-file`, file `src`) resolve relative to the plan file's own directory — see [Plans — Path Resolution](/concepts/plans/#path-resolution).
+:::
 
 :::note
 When `--plan` is provided on the CLI, it overrides all `plan=` attributes in the inventory.
