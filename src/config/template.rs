@@ -29,8 +29,10 @@ pub fn render(
     if data.extra_vars.is_empty() {
         interpolate(&expanded, vars)
     } else {
-        let mut merged = data.extra_vars.clone();
-        merged.extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+        // User vars first, then extra_vars override — this prevents user-defined
+        // keys from spoofing reserved @inventory.*/@group.* references.
+        let mut merged = vars.clone();
+        merged.extend(data.extra_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
         interpolate(&expanded, &merged)
     }
 }

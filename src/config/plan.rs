@@ -161,13 +161,18 @@ pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshE
 }
 
 /// Load vars from external KDL files. Each file contains raw var nodes (no wrapper).
-/// Inline vars take precedence over vars-file vars (loaded first, inline overwrites).
+/// Inline vars take precedence over vars-file vars. Duplicate keys across different
+/// vars-files are rejected.
 fn resolve_vars_files(
     paths: &[String],
     vars: &mut HashMap<String, String>,
     structured_vars: &mut HashMap<String, Vec<HashMap<String, String>>>,
     base_dir: &Path,
 ) -> Result<(), GlideshError> {
+    // Track keys seen across all vars-files to detect cross-file duplicates.
+    // Keys already in inline vars/structured_vars are fine (inline wins).
+    let mut seen_across_files: HashMap<String, String> = HashMap::new();
+
     for path in paths {
         let resolved_path = if Path::new(path).is_absolute() {
             PathBuf::from(path)
@@ -203,6 +208,16 @@ fn resolve_vars_files(
                     ),
                 });
             }
+            // Check for duplicates across different vars-files
+            if let Some(prev_file) = seen_across_files.get(&key) {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "Variable '{}' defined in both '{}' and '{}'",
+                        key, prev_file, path
+                    ),
+                });
+            }
+            seen_across_files.insert(key.clone(), path.clone());
             if let Some(list_of_maps) = parse_structured_var(vnode) {
                 // Inline structured vars win — only insert if not already present
                 structured_vars.entry(key).or_insert(list_of_maps);
@@ -991,7 +1006,8 @@ plan "test" {
     #[test]
     fn test_vars_file_basic() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join("glidesh_test_vars_file");
+        let dir =
+            std::env::temp_dir().join(format!("glidesh_test_vars_file_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
         let vars_content = r#"
@@ -1031,7 +1047,10 @@ plan "test" {
     #[test]
     fn test_vars_file_inline_wins() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join("glidesh_test_vars_file_override");
+        let dir = std::env::temp_dir().join(format!(
+            "glidesh_test_vars_file_override_{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
 
         let vars_content = r#"
@@ -1064,7 +1083,10 @@ plan "test" {
 
     #[test]
     fn test_vars_file_missing() {
-        let dir = std::env::temp_dir().join("glidesh_test_vars_file_missing");
+        let dir = std::env::temp_dir().join(format!(
+            "glidesh_test_vars_file_missing_{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
 
         let plan_input = r#"
@@ -1128,7 +1150,8 @@ plan "test" {
     #[test]
     fn test_duplicate_var_in_vars_file() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join("glidesh_test_dup_vars_file");
+        let dir =
+            std::env::temp_dir().join(format!("glidesh_test_dup_vars_file_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
         let vars_content = r#"
@@ -1153,6 +1176,44 @@ plan "test" {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Duplicate variable 'region'"), "got: {}", msg);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_duplicate_var_across_vars_files() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("glidesh_test_dup_across_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        std::fs::File::create(dir.join("a.kdl"))
+            .unwrap()
+            .write_all(b"region \"us-east-1\"")
+            .unwrap();
+        std::fs::File::create(dir.join("b.kdl"))
+            .unwrap()
+            .write_all(b"region \"eu-west-1\"")
+            .unwrap();
+
+        let plan_input = r#"
+plan "test" {
+    vars-file "a.kdl"
+    vars-file "b.kdl"
+    step "Do" {
+        shell "echo"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region") && msg.contains("a.kdl") && msg.contains("b.kdl"),
+            "got: {}",
+            msg
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

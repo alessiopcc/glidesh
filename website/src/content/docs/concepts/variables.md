@@ -116,9 +116,11 @@ You can reference any host from the inventory in templates using the `@inventory
 | `${@inventory.<host>.address}` | Address of the named host |
 | `${@inventory.<host>.user}` | SSH user of the named host |
 | `${@inventory.<host>.port}` | SSH port of the named host |
-| `${@inventory.<host>.vars.<key>}` | A host-level variable |
+| `${@inventory.<host>.vars.<key>}` | A resolved variable for the named host, after applying inventory merge order |
 
 Host names are unique across the entire inventory, so the lookup is unambiguous regardless of which group the host belongs to.
+
+`@inventory.<host>.vars` exposes the host's effective merged variables, so values may come from global, group, or host `vars` blocks.
 
 ### Example
 

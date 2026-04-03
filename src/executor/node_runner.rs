@@ -92,14 +92,15 @@ impl NodeRunner {
         vars.insert("host.user".to_string(), self.host.user.clone());
         vars.insert("host.port".to_string(), self.host.port.to_string());
 
-        // Build template data: inventory @-refs + plan structured vars
+        // Build template data: inventory @-refs + plan structured vars.
+        // Preserve inventory-provided collections so plan structured vars
+        // cannot overwrite reserved @group.* or @inventory.* namespaces.
         let mut template_data = (*self.inventory_template_data).clone();
-        template_data.collections.extend(
-            self.plan
-                .structured_vars
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
-        );
+        for (key, value) in &self.plan.structured_vars {
+            if !template_data.collections.contains_key(key) {
+                template_data.collections.insert(key.clone(), value.clone());
+            }
+        }
 
         let steps = self.plan.steps();
         let total_steps = steps.len();

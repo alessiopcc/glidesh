@@ -121,7 +121,7 @@ Template files can reference any host in the inventory using `${@inventory.<host
 reverse_proxy ${@inventory.bifrost.address}:${@inventory.bifrost.port}
 ```
 
-Available fields: `address`, `user`, `port`, and `vars.<key>` for host-level variables.
+Available fields: `address`, `user`, `port`, and `vars.<key>` for the host's resolved variables (after global → group → host merge).
 
 Template files can also loop over all hosts in a group using `${for h in @group.<name>}`:
 

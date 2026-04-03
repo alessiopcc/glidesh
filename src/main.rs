@@ -577,14 +577,18 @@ fn build_inventory_template_data(inventory: &Inventory) -> TemplateData {
         }
     }
 
+    // Build name→ResolvedHost map for group lookups (avoids resolve_targets
+    // which matches groups before hosts and could return wrong results)
+    let host_map: HashMap<&str, &glidesh::config::types::ResolvedHost> =
+        all_hosts.iter().map(|rh| (rh.name.as_str(), rh)).collect();
+
     // @group.<name> collections for loop iteration
     for group in &inventory.groups {
         let group_hosts: Vec<HashMap<String, String>> = group
             .hosts
             .iter()
-            .map(|h| {
-                let resolved = inventory.resolve_targets(Some(&h.name));
-                let rh = &resolved[0];
+            .filter_map(|h| host_map.get(h.name.as_str()))
+            .map(|rh| {
                 HashMap::from([
                     ("name".to_string(), rh.name.clone()),
                     ("address".to_string(), rh.address.clone()),
