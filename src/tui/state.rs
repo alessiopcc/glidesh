@@ -1,6 +1,16 @@
 use crate::executor::result::ExecutorEvent;
+use glidesh::config::types::ResolvedJumpHost;
 use std::collections::HashMap;
 use std::time::Instant;
+
+/// Connection details for a host, used to open a shell after plan completion.
+#[derive(Debug, Clone)]
+pub struct HostConnectionInfo {
+    pub address: String,
+    pub user: String,
+    pub port: u16,
+    pub jump: Option<ResolvedJumpHost>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusPanel {
@@ -77,11 +87,17 @@ pub struct TuiState {
     pub viewing_node: Option<usize>,
     /// Whether a quit confirmation dialog is showing
     pub confirm_quit: bool,
+    /// Connection info per node for post-run shell access
+    pub connection_info: Vec<HostConnectionInfo>,
 }
 
 impl TuiState {
     /// Create a new TUI state. `hosts` is a slice of `(hostname, group_name, plan_name)` tuples.
-    pub fn new(plan_name: &str, hosts: &[(String, String, String)]) -> Self {
+    pub fn new(
+        plan_name: &str,
+        hosts: &[(String, String, String)],
+        connection_info: Vec<HostConnectionInfo>,
+    ) -> Self {
         let now = Instant::now();
         let mut nodes = Vec::new();
         let mut node_index = HashMap::new();
@@ -125,6 +141,7 @@ impl TuiState {
             combined_auto_scroll: true,
             viewing_node: None,
             confirm_quit: false,
+            connection_info,
         }
     }
 

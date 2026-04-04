@@ -371,6 +371,15 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
                 " \u{2191}\u{2193}/j/k scroll  PgUp/PgDn page  g/G top/bottom  Esc/Tab back  q quit "
             }
         }
+    } else if state.run_complete {
+        match state.focus {
+            FocusPanel::Nodes => {
+                " \u{2191}\u{2193} select node  s shell  Enter view node  Tab switch panel  q quit "
+            }
+            FocusPanel::Logs => {
+                " \u{2191}\u{2193}/j/k scroll  PgUp/PgDn page  g/G top/bottom  Tab switch panel  q quit "
+            }
+        }
     } else {
         match state.focus {
             FocusPanel::Nodes => {

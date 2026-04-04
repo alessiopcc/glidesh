@@ -22,6 +22,9 @@ pub enum Commands {
 
     /// Validate configuration files
     Validate(ValidateArgs),
+
+    /// Open an interactive shell or run a command on target hosts
+    Shell(ShellArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -96,6 +99,37 @@ pub struct LogsArgs {
     /// Specific run directory
     #[arg(long)]
     pub run: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct ShellArgs {
+    /// Path to the inventory file
+    #[arg(short, long)]
+    pub inventory: PathBuf,
+
+    /// Target filter: group name, host name, or group:hostname
+    #[arg(short, long)]
+    pub target: Option<String>,
+
+    /// Command to run (if omitted, opens interactive shell for single host)
+    #[arg(short, long)]
+    pub command: Option<String>,
+
+    /// SSH private key path
+    #[arg(short, long)]
+    pub key: Option<PathBuf>,
+
+    /// Max concurrent hosts
+    #[arg(long, default_value = "10")]
+    pub concurrency: usize,
+
+    /// Skip SSH host key verification
+    #[arg(long)]
+    pub no_host_key_check: bool,
+
+    /// Accept and save new host keys to known_hosts
+    #[arg(long)]
+    pub accept_new_host_key: bool,
 }
 
 #[derive(Parser, Debug)]
