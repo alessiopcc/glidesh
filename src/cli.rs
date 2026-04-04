@@ -119,8 +119,8 @@ pub struct ShellArgs {
     #[arg(short, long)]
     pub key: Option<PathBuf>,
 
-    /// Max concurrent hosts
-    #[arg(long, default_value = "10")]
+    /// Max concurrent hosts (minimum 1)
+    #[arg(long, default_value = "10", value_parser = parse_concurrency)]
     pub concurrency: usize,
 
     /// Skip SSH host key verification
@@ -141,4 +141,12 @@ pub struct ValidateArgs {
     /// Path to the inventory file
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
+}
+
+fn parse_concurrency(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{}", e))?;
+    if n == 0 {
+        return Err("concurrency must be at least 1".to_string());
+    }
+    Ok(n)
 }

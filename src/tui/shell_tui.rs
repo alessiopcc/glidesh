@@ -56,11 +56,61 @@ impl ShellTuiState {
                 ),
                 OutputKind::System,
             )],
-            scroll: usize::MAX,
+            scroll: 0,
             auto_scroll: true,
             running: false,
             host_count,
         }
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        let pos = self.cursor_pos;
+        self.input.insert(pos, ch);
+        self.cursor_pos += ch.len_utf8();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        if let Some((idx, _)) = self.input[..self.cursor_pos].char_indices().last() {
+            self.input.remove(idx);
+            self.cursor_pos = idx;
+        }
+    }
+
+    fn move_cursor_left(&mut self) {
+        if let Some((idx, _)) = self.input[..self.cursor_pos].char_indices().last() {
+            self.cursor_pos = idx;
+        }
+    }
+
+    fn move_cursor_right(&mut self) {
+        if let Some(ch) = self.input[self.cursor_pos..].chars().next() {
+            self.cursor_pos += ch.len_utf8();
+        }
+    }
+
+    fn scroll_up(&mut self, amount: usize) {
+        self.auto_scroll = false;
+        self.scroll = self.scroll.saturating_sub(amount);
+    }
+
+    fn scroll_down(&mut self, amount: usize) {
+        self.scroll = self.scroll.saturating_add(amount);
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.auto_scroll = false;
+        self.scroll = 0;
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.auto_scroll = true;
+    }
+
+    fn push_output(&mut self, text: String, kind: OutputKind) {
+        self.output_lines.push((text, kind));
     }
 }
 
@@ -113,10 +163,10 @@ async fn shell_tui_loop(
         while let Ok(msg) = output_rx.try_recv() {
             let mut s = state.lock().unwrap();
             match msg {
-                ShellMsg::Line(text, kind) => s.output_lines.push((text, kind)),
+                ShellMsg::Line(text, kind) => s.push_output(text, kind),
                 ShellMsg::Done => {
                     s.running = false;
-                    s.output_lines.push(("---".to_string(), OutputKind::System));
+                    s.push_output("---".to_string(), OutputKind::System);
                 }
             }
         }
@@ -147,14 +197,9 @@ async fn shell_tui_loop(
                     KeyCode::Char('d') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
-                    // Ctrl+C: cancel running or exit
+                    // Ctrl+C: exit
                     KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if s.running {
-                            // Just note it; tasks will finish on their own
-                            s.output_lines.push(("^C".to_string(), OutputKind::System));
-                        } else {
-                            break;
-                        }
+                        break;
                     }
                     // Enter: submit command
                     KeyCode::Enter if !s.running => {
@@ -166,12 +211,11 @@ async fn shell_tui_loop(
                         s.input.clear();
                         s.cursor_pos = 0;
                         s.running = true;
-                        s.output_lines.push((
+                        s.push_output(
                             format!("$ {} ({} hosts)", cmd, host_count),
                             OutputKind::System,
-                        ));
-                        s.auto_scroll = true;
-                        s.scroll = usize::MAX;
+                        );
+                        s.scroll_to_bottom();
 
                         // Spawn command execution
                         let tx = output_tx.clone();
@@ -197,68 +241,31 @@ async fn shell_tui_loop(
                         continue;
                     }
                     // Text editing
-                    KeyCode::Char(c) if !s.running => {
-                        let pos = s.cursor_pos;
-                        s.input.insert(pos, c);
-                        s.cursor_pos += c.len_utf8();
-                    }
-                    KeyCode::Backspace if !s.running => {
-                        if s.cursor_pos > 0 {
-                            let prev = s.input[..s.cursor_pos]
-                                .chars()
-                                .last()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(0);
-                            s.cursor_pos -= prev;
-                            let pos = s.cursor_pos;
-                            s.input.remove(pos);
-                        }
-                    }
-                    KeyCode::Left if !s.running => {
-                        if s.cursor_pos > 0 {
-                            let prev = s.input[..s.cursor_pos]
-                                .chars()
-                                .last()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(0);
-                            s.cursor_pos -= prev;
-                        }
-                    }
-                    KeyCode::Right if !s.running => {
-                        if s.cursor_pos < s.input.len() {
-                            let next = s.input[s.cursor_pos..]
-                                .chars()
-                                .next()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(0);
-                            s.cursor_pos += next;
-                        }
-                    }
+                    KeyCode::Char(c) if !s.running => s.insert_char(c),
+                    KeyCode::Backspace if !s.running => s.backspace(),
+                    KeyCode::Left if !s.running => s.move_cursor_left(),
+                    KeyCode::Right if !s.running => s.move_cursor_right(),
                     KeyCode::Home => {
                         if s.running {
-                            s.auto_scroll = false;
-                            s.scroll = 0;
+                            s.scroll_to_top();
                         } else {
                             s.cursor_pos = 0;
                         }
                     }
                     KeyCode::End => {
                         if s.running {
-                            s.auto_scroll = true;
-                            s.scroll = usize::MAX;
+                            s.scroll_to_bottom();
                         } else {
                             s.cursor_pos = s.input.len();
                         }
                     }
-                    // Scroll while running
                     KeyCode::Up | KeyCode::PageUp => {
                         let amount = if key_event.code == KeyCode::PageUp {
                             10
                         } else {
                             1
                         };
-                        s.auto_scroll = false;
-                        s.scroll = s.scroll.saturating_sub(amount);
+                        s.scroll_up(amount);
                     }
                     KeyCode::Down | KeyCode::PageDown => {
                         let amount = if key_event.code == KeyCode::PageDown {
@@ -266,7 +273,7 @@ async fn shell_tui_loop(
                         } else {
                             1
                         };
-                        s.scroll = s.scroll.saturating_add(amount);
+                        s.scroll_down(amount);
                     }
                     _ => {}
                 }
@@ -398,7 +405,11 @@ fn render_output(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) 
 
     let total = styled_lines.len();
     let max_scroll = total.saturating_sub(visible_height);
-    let scroll = state.scroll.min(max_scroll);
+    let scroll = if state.auto_scroll {
+        max_scroll
+    } else {
+        state.scroll.min(max_scroll)
+    };
     let end = (scroll + visible_height).min(total);
 
     let items: Vec<ListItem> = styled_lines[scroll..end]
@@ -480,9 +491,9 @@ fn render_input(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) {
 
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) {
     let text = if state.running {
-        " \u{2191}\u{2193} scroll  Ctrl+C cancel  "
+        " \u{2191}\u{2193} scroll  Ctrl+C/Ctrl+D exit  "
     } else {
-        " Enter run  \u{2191}\u{2193} scroll  Ctrl+D exit  "
+        " Enter run  \u{2191}\u{2193} scroll  Ctrl+C/Ctrl+D exit  "
     };
 
     let paragraph = Paragraph::new(Line::from(Span::styled(
@@ -490,4 +501,118 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) 
         Style::default().fg(Color::DarkGray),
     )));
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutputKind, ShellTuiState};
+
+    #[test]
+    fn new_initializes_defaults() {
+        let state = ShellTuiState::new(3);
+        assert_eq!(state.input, "");
+        assert_eq!(state.cursor_pos, 0);
+        assert_eq!(state.output_lines.len(), 1);
+        assert!(state.output_lines[0].0.contains("3 host(s)"));
+        assert!(state.auto_scroll);
+        assert!(!state.running);
+        assert_eq!(state.host_count, 3);
+    }
+
+    #[test]
+    fn insert_and_backspace() {
+        let mut s = ShellTuiState::new(1);
+
+        s.insert_char('a');
+        s.insert_char('b');
+        s.insert_char('c');
+        assert_eq!(s.input, "abc");
+        assert_eq!(s.cursor_pos, 3);
+
+        s.backspace();
+        assert_eq!(s.input, "ab");
+        assert_eq!(s.cursor_pos, 2);
+
+        // Backspace at position 0 is a no-op
+        s.cursor_pos = 0;
+        s.backspace();
+        assert_eq!(s.input, "ab");
+    }
+
+    #[test]
+    fn cursor_movement() {
+        let mut s = ShellTuiState::new(1);
+        s.insert_char('a');
+        s.insert_char('b');
+        s.insert_char('c');
+
+        s.move_cursor_left();
+        assert_eq!(s.cursor_pos, 2);
+
+        s.insert_char('X');
+        assert_eq!(s.input, "abXc");
+        assert_eq!(s.cursor_pos, 3);
+
+        s.move_cursor_left();
+        s.move_cursor_left();
+        s.move_cursor_left();
+        assert_eq!(s.cursor_pos, 0);
+
+        // Left at 0 is a no-op
+        s.move_cursor_left();
+        assert_eq!(s.cursor_pos, 0);
+
+        s.move_cursor_right();
+        assert_eq!(s.cursor_pos, 1);
+
+        // Right past end is a no-op
+        s.cursor_pos = s.input.len();
+        s.move_cursor_right();
+        assert_eq!(s.cursor_pos, s.input.len());
+    }
+
+    #[test]
+    fn scroll_up_disables_autoscroll() {
+        let mut s = ShellTuiState::new(1);
+        assert!(s.auto_scroll);
+
+        s.scroll_up(5);
+        assert!(!s.auto_scroll);
+        assert_eq!(s.scroll, 0); // saturating_sub from 0
+
+        s.scroll_down(3);
+        assert_eq!(s.scroll, 3);
+        assert!(!s.auto_scroll); // scroll_down doesn't re-enable
+
+        s.scroll_to_bottom();
+        assert!(s.auto_scroll);
+    }
+
+    #[test]
+    fn scroll_to_top_disables_autoscroll() {
+        let mut s = ShellTuiState::new(1);
+        s.scroll = 10;
+        s.scroll_to_top();
+        assert_eq!(s.scroll, 0);
+        assert!(!s.auto_scroll);
+    }
+
+    #[test]
+    fn running_state_transitions() {
+        let mut s = ShellTuiState::new(2);
+        assert!(!s.running);
+        s.running = true;
+        assert!(s.running);
+        s.running = false;
+        assert!(!s.running);
+    }
+
+    #[test]
+    fn push_output_appends() {
+        let mut s = ShellTuiState::new(1);
+        let initial = s.output_lines.len();
+        s.push_output("hello".to_string(), OutputKind::Stdout);
+        assert_eq!(s.output_lines.len(), initial + 1);
+        assert_eq!(s.output_lines.last().unwrap().0, "hello");
+    }
 }

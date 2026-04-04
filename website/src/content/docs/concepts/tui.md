@@ -67,8 +67,7 @@ Commands run concurrently on all targeted hosts (bounded by `--concurrency`), an
 | Enter | Run command on all hosts |
 | Up/Down | Scroll output |
 | PgUp/PgDn | Scroll output by page |
-| Ctrl+C | Cancel (while running) |
-| Ctrl+D | Exit |
+| Ctrl+C / Ctrl+D | Exit |
 
 This is useful for ad-hoc investigation across a fleet — checking disk usage, tailing logs, or verifying a deploy without writing a plan.
 
