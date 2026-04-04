@@ -2,7 +2,7 @@
   <img src="website/public/logo.jpg" alt="glidesh" width="200">
 </p>
 
-<h1 align="center">glidesh</h1>
+<h1 align="center">glide·sh</h1>
 
 <p align="center">
   Fast, stateless, SSH-only infrastructure automation built in Rust.
@@ -106,6 +106,8 @@ See the [`examples/`](examples/) directory for ready-to-use examples:
 | [container-app](examples/container-app/) | Containerized app with ports and volumes |
 | [disk-management](examples/disk-management/) | Dynamic disk formatting with register/loop |
 | [multi-tier](examples/multi-tier/) | Multi-group setup with plan includes |
+| [external-module](examples/external-module/) | External plugin module to set system MOTD |
+| [jump-host](examples/jump-host/) | Connect to hosts through an SSH bastion |
 
 ## License
 
