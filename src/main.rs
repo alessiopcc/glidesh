@@ -803,7 +803,6 @@ async fn run_command_on_hosts(
     }
     drop(tx);
 
-    // Print lines as they arrive
     while let Some((host, line, is_stderr)) = rx.recv().await {
         if is_stderr {
             eprintln!("[{}] {}", host, line);
@@ -861,7 +860,6 @@ async fn run_with_ui(
     };
 
     if tui::is_tty() && !args.no_tui {
-        // Build connection info for TUI shell access
         let connection_info: Vec<tui::state::HostConnectionInfo> = group_plans
             .iter()
             .flat_map(|gp| &gp.targets)

@@ -497,7 +497,6 @@ impl SshSession {
         let mut exit_code: u32 = 0;
         let mut last_size = crossterm::terminal::size().unwrap_or((80, 24));
 
-        // Spawn a blocking task that reads stdin events and sends them via a channel
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let stdin_reader = tokio::task::spawn_blocking(move || {
             loop {

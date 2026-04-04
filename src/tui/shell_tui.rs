@@ -166,11 +166,9 @@ async fn shell_tui_loop(
     host_key_policy: HostKeyPolicy,
     concurrency: usize,
 ) -> Result<(), GlideshError> {
-    // Channel for receiving output lines from command execution
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<ShellMsg>();
 
     loop {
-        // Drain any pending output
         while let Ok(msg) = output_rx.try_recv() {
             let mut s = state.lock().unwrap();
             match msg {
@@ -182,7 +180,6 @@ async fn shell_tui_loop(
             }
         }
 
-        // Render
         {
             let s = state.lock().unwrap();
             terminal
@@ -190,7 +187,6 @@ async fn shell_tui_loop(
                 .map_err(|e| GlideshError::Other(e.to_string()))?;
         }
 
-        // Poll for input
         if event::poll(std::time::Duration::from_millis(16))
             .map_err(|e| GlideshError::Other(e.to_string()))?
         {
@@ -204,15 +200,12 @@ async fn shell_tui_loop(
                 let mut s = state.lock().unwrap();
 
                 match key_event.code {
-                    // Ctrl+D: exit
                     KeyCode::Char('d') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
-                    // Ctrl+C: exit
                     KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                         break;
                     }
-                    // Enter: submit command
                     KeyCode::Enter if !s.running => {
                         let cmd = s.input.trim().to_string();
                         if cmd.is_empty() {
@@ -228,7 +221,6 @@ async fn shell_tui_loop(
                         );
                         s.scroll_to_bottom();
 
-                        // Spawn command execution
                         let tx = output_tx.clone();
                         let hosts_vec: Vec<ResolvedHost> = hosts.to_vec();
                         let key_clone = key.clone();
@@ -247,11 +239,9 @@ async fn shell_tui_loop(
                             let _ = tx.send(ShellMsg::Done);
                         });
 
-                        // The sentinel is handled in the drain loop below
                         drop(s);
                         continue;
                     }
-                    // Text editing
                     KeyCode::Char(c) if !s.running => s.insert_char(c),
                     KeyCode::Backspace if !s.running => s.backspace(),
                     KeyCode::Left if !s.running => s.move_cursor_left(),
@@ -492,7 +482,6 @@ fn render_input(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) {
     );
     frame.render_widget(paragraph, area);
 
-    // Place cursor
     if !state.running {
         let cursor_x = area.x + 3 + state.cursor_pos as u16;
         let cursor_y = area.y + 1;
