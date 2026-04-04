@@ -30,7 +30,6 @@ pub fn is_tty() -> bool {
 /// `hosts` is a slice of `(hostname, group_name, plan_name)` tuples.
 pub async fn run_tui(
     mut event_rx: mpsc::UnboundedReceiver<ExecutorEvent>,
-    plan_name: &str,
     hosts: &[(String, String, String)],
     engine_handle: tokio::task::AbortHandle,
     connection_info: Vec<HostConnectionInfo>,
@@ -42,7 +41,7 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let state = Arc::new(Mutex::new(TuiState::new(plan_name, hosts, connection_info)));
+    let state = Arc::new(Mutex::new(TuiState::new(hosts, connection_info)));
 
     let state_clone = state.clone();
 

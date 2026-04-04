@@ -894,7 +894,6 @@ async fn run_with_ui(
         });
 
         let tui_key = key.clone();
-        let run_name_owned = run_name.to_string();
         let host_names_owned = host_names.to_vec();
         let engine_handle = tokio::spawn(async move {
             executor::run(
@@ -912,7 +911,6 @@ async fn run_with_ui(
         let abort_handle = engine_handle.abort_handle();
         let aborted = tui::run_tui(
             tui_rx,
-            &run_name_owned,
             &host_names_owned,
             abort_handle,
             connection_info,

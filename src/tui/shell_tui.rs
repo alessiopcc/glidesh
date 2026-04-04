@@ -123,6 +123,22 @@ pub async fn run_shell_tui(
     concurrency: usize,
 ) -> Result<(), GlideshError> {
     terminal::enable_raw_mode().map_err(|e| GlideshError::Other(e.to_string()))?;
+
+    let result = run_shell_tui_inner(hosts, key, host_key_policy, concurrency).await;
+
+    // Always restore terminal state, even on error
+    let _ = terminal::disable_raw_mode();
+    let _ = io::stdout().execute(LeaveAlternateScreen);
+
+    result
+}
+
+async fn run_shell_tui_inner(
+    hosts: &[ResolvedHost],
+    key: &PrivateKeyWithHashAlg,
+    host_key_policy: HostKeyPolicy,
+    concurrency: usize,
+) -> Result<(), GlideshError> {
     io::stdout()
         .execute(EnterAlternateScreen)
         .map_err(|e| GlideshError::Other(e.to_string()))?;
@@ -131,7 +147,7 @@ pub async fn run_shell_tui(
 
     let state = Arc::new(std::sync::Mutex::new(ShellTuiState::new(hosts.len())));
 
-    let result = shell_tui_loop(
+    shell_tui_loop(
         &mut terminal,
         &state,
         hosts,
@@ -139,12 +155,7 @@ pub async fn run_shell_tui(
         host_key_policy,
         concurrency,
     )
-    .await;
-
-    let _ = terminal::disable_raw_mode();
-    let _ = io::stdout().execute(LeaveAlternateScreen);
-
-    result
+    .await
 }
 
 async fn shell_tui_loop(

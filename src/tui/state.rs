@@ -94,7 +94,6 @@ pub struct TuiState {
 impl TuiState {
     /// Create a new TUI state. `hosts` is a slice of `(hostname, group_name, plan_name)` tuples.
     pub fn new(
-        plan_name: &str,
         hosts: &[(String, String, String)],
         connection_info: Vec<HostConnectionInfo>,
     ) -> Self {
@@ -120,7 +119,6 @@ impl TuiState {
             });
         }
 
-        let _ = plan_name; // kept in signature for API compatibility
         TuiState {
             nodes,
             node_index,
