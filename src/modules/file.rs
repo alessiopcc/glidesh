@@ -5,6 +5,10 @@ use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 pub struct FileModule;
 
 impl FileModule {
@@ -72,7 +76,7 @@ impl FileModule {
     fn sha256_hex(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
-        format!("{:x}", hasher.finalize())
+        hex_encode(hasher.finalize().as_slice())
     }
 }
 

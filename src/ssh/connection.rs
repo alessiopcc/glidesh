@@ -2,11 +2,13 @@ use crate::config::types::ResolvedJumpHost;
 use crate::error::GlideshError;
 use crate::ssh::HostKeyPolicy;
 use crate::ssh::handler::SshHandler;
+use crossterm::event::{self, Event, KeyModifiers};
 use russh::client;
 use russh_keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::OpenFlags;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -448,6 +450,123 @@ impl SshSession {
         Ok(())
     }
 
+    /// Open an interactive PTY shell session.
+    /// Takes over stdin/stdout until the remote shell exits.
+    /// Returns the remote exit code.
+    pub async fn interactive_shell(&self) -> Result<u32, GlideshError> {
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+
+        let mut channel =
+            self.handle
+                .channel_open_session()
+                .await
+                .map_err(|e| GlideshError::SshChannel {
+                    message: format!("Failed to open session on {}: {}", self.host, e),
+                })?;
+
+        channel
+            .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
+            .await
+            .map_err(|e| GlideshError::SshChannel {
+                message: format!("Failed to request PTY on {}: {}", self.host, e),
+            })?;
+
+        channel
+            .request_shell(true)
+            .await
+            .map_err(|e| GlideshError::SshChannel {
+                message: format!("Failed to request shell on {}: {}", self.host, e),
+            })?;
+
+        crossterm::terminal::enable_raw_mode().map_err(|e| GlideshError::Other(e.to_string()))?;
+
+        let exit_code = self.pty_proxy_loop(&mut channel).await;
+
+        let _ = crossterm::terminal::disable_raw_mode();
+
+        match exit_code {
+            Ok(code) => Ok(code),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn pty_proxy_loop(
+        &self,
+        channel: &mut russh::Channel<russh::client::Msg>,
+    ) -> Result<u32, GlideshError> {
+        let mut exit_code: u32 = 0;
+        let mut last_size = crossterm::terminal::size().unwrap_or((80, 24));
+
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let stdin_reader = tokio::task::spawn_blocking(move || {
+            loop {
+                match event::poll(Duration::from_millis(50)) {
+                    Ok(true) => {
+                        if let Ok(ev) = event::read() {
+                            // Filter out Release/Repeat events (Windows sends both)
+                            if let Event::Key(ref k) = ev {
+                                if k.kind != crossterm::event::KeyEventKind::Press {
+                                    continue;
+                                }
+                            }
+                            if input_tx.send(ev).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+
+        loop {
+            tokio::select! {
+                msg = channel.wait() => {
+                    match msg {
+                        Some(russh::ChannelMsg::Data { ref data }) => {
+                            let mut stdout = std::io::stdout().lock();
+                            let _ = stdout.write_all(data);
+                            let _ = stdout.flush();
+                        }
+                        Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                            exit_code = exit_status;
+                        }
+                        Some(russh::ChannelMsg::Eof) | None => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                ev = input_rx.recv() => {
+                    match ev {
+                        Some(Event::Key(key)) => {
+                            let data = key_event_to_bytes(&key);
+                            if !data.is_empty() {
+                                let _ = channel.data(&data[..]).await;
+                            }
+                        }
+                        Some(Event::Resize(cols, rows)) => {
+                            if (cols, rows) != last_size {
+                                last_size = (cols, rows);
+                                let _ = channel
+                                    .window_change(cols as u32, rows as u32, 0, 0)
+                                    .await;
+                            }
+                        }
+                        None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Drop the receiver so input_tx.send() fails, causing the reader to exit
+        drop(input_rx);
+        let _ = stdin_reader.await;
+        Ok(exit_code)
+    }
+
     pub async fn close(self) -> Result<(), GlideshError> {
         self.handle
             .disconnect(russh::Disconnect::ByApplication, "session closed", "en")
@@ -475,4 +594,62 @@ impl SshSession {
 /// Escape a string for safe use in shell commands by wrapping in single quotes.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Convert a crossterm key event into the byte sequence expected by a remote terminal.
+fn key_event_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
+    use crossterm::event::KeyCode;
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    match key.code {
+        KeyCode::Char(c) if ctrl => {
+            // Ctrl+A..Z maps to 0x01..0x1A
+            let b = c.to_ascii_lowercase() as u8;
+            if b.is_ascii_lowercase() {
+                vec![b - b'a' + 1]
+            } else {
+                vec![]
+            }
+        }
+        KeyCode::Char(c) => {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            s.as_bytes().to_vec()
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::F(n) => f_key_escape(n),
+        _ => vec![],
+    }
+}
+
+fn f_key_escape(n: u8) -> Vec<u8> {
+    match n {
+        1 => b"\x1bOP".to_vec(),
+        2 => b"\x1bOQ".to_vec(),
+        3 => b"\x1bOR".to_vec(),
+        4 => b"\x1bOS".to_vec(),
+        5 => b"\x1b[15~".to_vec(),
+        6 => b"\x1b[17~".to_vec(),
+        7 => b"\x1b[18~".to_vec(),
+        8 => b"\x1b[19~".to_vec(),
+        9 => b"\x1b[20~".to_vec(),
+        10 => b"\x1b[21~".to_vec(),
+        11 => b"\x1b[23~".to_vec(),
+        12 => b"\x1b[24~".to_vec(),
+        _ => vec![],
+    }
 }

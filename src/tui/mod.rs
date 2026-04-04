@@ -1,16 +1,20 @@
 pub mod logs_explorer;
+pub mod shell_tui;
 pub mod state;
 pub mod widgets;
 
 pub use logs_explorer::run_logs_tui;
+pub use shell_tui::run_shell_tui;
 
 use crate::executor::result::ExecutorEvent;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use glidesh::ssh::{HostKeyPolicy, SshSession};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use state::{FocusPanel, TuiState};
+use russh_keys::key::PrivateKeyWithHashAlg;
+use state::{FocusPanel, HostConnectionInfo, TuiState};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,16 +30,18 @@ pub fn is_tty() -> bool {
 /// `hosts` is a slice of `(hostname, group_name, plan_name)` tuples.
 pub async fn run_tui(
     mut event_rx: mpsc::UnboundedReceiver<ExecutorEvent>,
-    plan_name: &str,
     hosts: &[(String, String, String)],
     engine_handle: tokio::task::AbortHandle,
+    connection_info: Vec<HostConnectionInfo>,
+    ssh_key: PrivateKeyWithHashAlg,
+    host_key_policy: HostKeyPolicy,
 ) -> io::Result<bool> {
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let state = Arc::new(Mutex::new(TuiState::new(plan_name, hosts)));
+    let state = Arc::new(Mutex::new(TuiState::new(hosts, connection_info)));
 
     let state_clone = state.clone();
 
@@ -56,6 +62,8 @@ pub async fn run_tui(
         }
 
         // Poll for keyboard events (16ms = ~60fps)
+        let mut shell_request: Option<HostConnectionInfo> = None;
+
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
@@ -123,8 +131,28 @@ pub async fn run_tui(
                     KeyCode::PageDown => s.scroll_log_down(10),
                     KeyCode::Home | KeyCode::Char('g') => s.scroll_log_to_top(),
                     KeyCode::End | KeyCode::Char('G') => s.scroll_log_to_bottom(),
+                    KeyCode::Char('s') if s.run_complete && s.focus == FocusPanel::Nodes => {
+                        shell_request = Some(s.connection_info[s.selected_node].clone());
+                    }
                     _ => {}
                 }
+            }
+        }
+
+        // Handle shell request outside the mutex scope
+        if let Some(info) = shell_request {
+            terminal::disable_raw_mode()?;
+            io::stdout().execute(LeaveAlternateScreen)?;
+
+            let shell_result = open_shell_for_host(&info, &ssh_key, host_key_policy).await;
+
+            terminal::enable_raw_mode()?;
+            io::stdout().execute(EnterAlternateScreen)?;
+            terminal.clear()?;
+
+            if let Err(e) = shell_result {
+                let mut s = state.lock().unwrap();
+                s.combined_log.push(format!("Shell error: {}", e));
             }
         }
     }
@@ -151,4 +179,31 @@ pub async fn run_tui(
     }
 
     Ok(aborted)
+}
+
+async fn open_shell_for_host(
+    info: &HostConnectionInfo,
+    key: &PrivateKeyWithHashAlg,
+    policy: HostKeyPolicy,
+) -> Result<(), glidesh::error::GlideshError> {
+    let session = match &info.jump {
+        Some(jump) => {
+            SshSession::connect_via_jump(&info.address, info.port, &info.user, key, policy, jump)
+                .await?
+        }
+        None => SshSession::connect(&info.address, info.port, &info.user, key, policy).await?,
+    };
+
+    println!(
+        "Connected to {}@{}. Type 'exit' to return to TUI.\r",
+        info.user, info.address
+    );
+    let exit_code = session.interactive_shell().await?;
+    session.close().await?;
+    println!("\r\nShell exited (code {}).\r", exit_code);
+
+    // Brief pause so user can see the exit message
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    Ok(())
 }

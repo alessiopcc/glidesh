@@ -22,6 +22,9 @@ pub enum Commands {
 
     /// Validate configuration files
     Validate(ValidateArgs),
+
+    /// Open an interactive shell or run a command on target hosts
+    Shell(ShellArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -99,6 +102,37 @@ pub struct LogsArgs {
 }
 
 #[derive(Parser, Debug)]
+pub struct ShellArgs {
+    /// Path to the inventory file
+    #[arg(short, long)]
+    pub inventory: PathBuf,
+
+    /// Target filter: group name, host name, or group:hostname
+    #[arg(short, long)]
+    pub target: Option<String>,
+
+    /// Command to run (if omitted, opens interactive shell for single host)
+    #[arg(short, long)]
+    pub command: Option<String>,
+
+    /// SSH private key path
+    #[arg(short, long)]
+    pub key: Option<PathBuf>,
+
+    /// Max concurrent hosts (minimum 1)
+    #[arg(long, default_value = "10", value_parser = parse_concurrency)]
+    pub concurrency: usize,
+
+    /// Skip SSH host key verification
+    #[arg(long)]
+    pub no_host_key_check: bool,
+
+    /// Accept and save new host keys to known_hosts
+    #[arg(long)]
+    pub accept_new_host_key: bool,
+}
+
+#[derive(Parser, Debug)]
 pub struct ValidateArgs {
     /// Path to the plan file
     #[arg(short, long)]
@@ -107,4 +141,12 @@ pub struct ValidateArgs {
     /// Path to the inventory file
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
+}
+
+fn parse_concurrency(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{}", e))?;
+    if n == 0 {
+        return Err("concurrency must be at least 1".to_string());
+    }
+    Ok(n)
 }

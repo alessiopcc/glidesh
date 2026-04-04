@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
-  <a href="https://github.com/alessiopcc/glidesh"><img src="https://img.shields.io/badge/rust-1.85%2B-orange" alt="Rust"></a>
+  <a href="https://github.com/alessiopcc/glidesh"><img src="https://img.shields.io/badge/rust-1.86%2B-orange" alt="Rust"></a>
 </p>
 
 ---
@@ -38,7 +38,7 @@ sudo mv glidesh /usr/local/bin/
 
 ### From source
 
-Requires Rust 1.85+.
+Requires Rust 1.86+.
 
 ```bash
 git clone https://github.com/alessiopcc/glidesh.git

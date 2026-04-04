@@ -32,6 +32,7 @@ async fn main() -> miette::Result<()> {
         Commands::Run(args) => cmd_run(args).await?,
         Commands::Logs(args) => cmd_logs(args)?,
         Commands::Validate(args) => cmd_validate(args)?,
+        Commands::Shell(args) => cmd_shell(args).await?,
     }
 
     Ok(())
@@ -621,8 +622,14 @@ fn load_ssh_key(
     } else {
         expand_tilde(&default_ssh_key())
     };
+    load_key_from_path(&key_path)
+}
+
+fn load_key_from_path(
+    key_path: &std::path::Path,
+) -> Result<russh_keys::key::PrivateKeyWithHashAlg, GlideshError> {
     tracing::debug!("Using SSH key: {}", key_path.display());
-    let key_pair = russh_keys::load_secret_key(&key_path, None)?;
+    let key_pair = russh_keys::load_secret_key(key_path, None)?;
     let hash_alg = match key_pair.algorithm() {
         ssh_key::Algorithm::Rsa { .. } => Some(ssh_key::HashAlg::Sha256),
         _ => None,
@@ -631,6 +638,193 @@ fn load_ssh_key(
         Arc::new(key_pair),
         hash_alg,
     )?)
+}
+
+async fn cmd_shell(args: cli::ShellArgs) -> Result<(), GlideshError> {
+    let host_key_policy = HostKeyPolicy {
+        verify: !args.no_host_key_check,
+        accept_new: args.accept_new_host_key,
+    };
+
+    let hosts = resolve_shell_hosts(&args)?;
+    let key = load_shell_key(&args, &hosts)?;
+
+    match (hosts.len(), &args.command) {
+        // Single host + command: run and print output directly
+        (1, Some(command)) => {
+            let host = &hosts[0];
+            let session = connect_host(host, &key, host_key_policy).await?;
+            let output = session.exec(command).await?;
+            if !output.stdout.is_empty() {
+                print!("{}", output.stdout);
+            }
+            if !output.stderr.is_empty() {
+                eprint!("{}", output.stderr);
+            }
+            let exit_code = output.exit_code;
+            session.close().await?;
+            if exit_code != 0 {
+                return Err(GlideshError::SshCommand {
+                    exit_code,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                });
+            }
+        }
+        // Single host, no command: interactive shell
+        (1, None) => {
+            let host = &hosts[0];
+            eprintln!(
+                "Opening shell to {}@{}:{}",
+                host.user, host.address, host.port
+            );
+            let session = connect_host(host, &key, host_key_policy).await?;
+            let exit_code = session.interactive_shell().await?;
+            session.close().await?;
+            if exit_code != 0 {
+                std::process::exit(exit_code as i32);
+            }
+        }
+        // Multiple hosts + command: run concurrently with prefixed output
+        (_, Some(command)) => {
+            run_command_on_hosts(&hosts, command, &key, host_key_policy, args.concurrency).await?;
+        }
+        // Multiple hosts, no command: interactive TUI shell
+        (_, None) => {
+            tui::run_shell_tui(&hosts, &key, host_key_policy, args.concurrency).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_shell_hosts(
+    args: &cli::ShellArgs,
+) -> Result<Vec<config::types::ResolvedHost>, GlideshError> {
+    let inv_content = std::fs::read_to_string(&args.inventory).map_err(|e| {
+        GlideshError::Other(format!(
+            "Failed to read inventory '{}': {}",
+            args.inventory.display(),
+            e
+        ))
+    })?;
+    let inventory = config::parse_inventory(&inv_content)?;
+    let resolved = inventory.resolve_targets(args.target.as_deref());
+
+    if resolved.is_empty() {
+        return Err(GlideshError::NoTargets);
+    }
+    Ok(resolved)
+}
+
+fn load_shell_key(
+    args: &cli::ShellArgs,
+    hosts: &[config::types::ResolvedHost],
+) -> Result<russh_keys::key::PrivateKeyWithHashAlg, GlideshError> {
+    let key_path = if let Some(ref k) = args.key {
+        expand_tilde(k)
+    } else if let Some(inv_key) = hosts.first().and_then(|h| h.vars.get("ssh-key")) {
+        expand_tilde(&PathBuf::from(inv_key))
+    } else {
+        expand_tilde(&default_ssh_key())
+    };
+    load_key_from_path(&key_path)
+}
+
+async fn connect_host(
+    host: &config::types::ResolvedHost,
+    key: &russh_keys::key::PrivateKeyWithHashAlg,
+    policy: HostKeyPolicy,
+) -> Result<SshSession, GlideshError> {
+    match &host.jump {
+        Some(jump) => {
+            SshSession::connect_via_jump(&host.address, host.port, &host.user, key, policy, jump)
+                .await
+        }
+        None => SshSession::connect(&host.address, host.port, &host.user, key, policy).await,
+    }
+}
+
+async fn run_command_on_hosts(
+    hosts: &[config::types::ResolvedHost],
+    command: &str,
+    key: &russh_keys::key::PrivateKeyWithHashAlg,
+    policy: HostKeyPolicy,
+    concurrency: usize,
+) -> Result<(), GlideshError> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, bool)>();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+
+    let mut handles = Vec::new();
+    for host in hosts {
+        let tx = tx.clone();
+        let key = key.clone();
+        let host = host.clone();
+        let command = command.to_string();
+        let sem = semaphore.clone();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await;
+            let name = host.name.clone();
+            let session = match connect_host(&host, &key, policy).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send((name, format!("Connection failed: {}", e), true));
+                    return true; // failed
+                }
+            };
+            let failed = match session.exec(&command).await {
+                Ok(output) => {
+                    for line in output.stdout.lines() {
+                        let _ = tx.send((name.clone(), line.to_string(), false));
+                    }
+                    for line in output.stderr.lines() {
+                        let _ = tx.send((name.clone(), line.to_string(), true));
+                    }
+                    if output.exit_code != 0 {
+                        let _ = tx.send((
+                            name.clone(),
+                            format!("(exit code {})", output.exit_code),
+                            true,
+                        ));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send((name, format!("Command failed: {}", e), true));
+                    true
+                }
+            };
+            let _ = session.close().await;
+            failed
+        }));
+    }
+    drop(tx);
+
+    while let Some((host, line, is_stderr)) = rx.recv().await {
+        if is_stderr {
+            eprintln!("[{}] {}", host, line);
+        } else {
+            println!("[{}] {}", host, line);
+        }
+    }
+
+    let mut failed_count = 0;
+    for handle in handles {
+        if let Ok(true) = handle.await {
+            failed_count += 1;
+        }
+    }
+
+    if failed_count > 0 {
+        return Err(GlideshError::Executor {
+            message: format!("{} host(s) failed", failed_count),
+        });
+    }
+
+    Ok(())
 }
 
 async fn run_with_ui(
@@ -666,6 +860,17 @@ async fn run_with_ui(
     };
 
     if tui::is_tty() && !args.no_tui {
+        let connection_info: Vec<tui::state::HostConnectionInfo> = group_plans
+            .iter()
+            .flat_map(|gp| &gp.targets)
+            .map(|h| tui::state::HostConnectionInfo {
+                address: h.address.clone(),
+                user: h.user.clone(),
+                port: h.port,
+                jump: h.jump.clone(),
+            })
+            .collect();
+
         let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel();
         let log_consumer = tokio::spawn(async move {
             while let Some(event) = log_rx.recv().await {
@@ -686,7 +891,7 @@ async fn run_with_ui(
             }
         });
 
-        let run_name_owned = run_name.to_string();
+        let tui_key = key.clone();
         let host_names_owned = host_names.to_vec();
         let engine_handle = tokio::spawn(async move {
             executor::run(
@@ -702,9 +907,16 @@ async fn run_with_ui(
         });
 
         let abort_handle = engine_handle.abort_handle();
-        let aborted = tui::run_tui(tui_rx, &run_name_owned, &host_names_owned, abort_handle)
-            .await
-            .map_err(|e| GlideshError::Other(format!("TUI error: {}", e)))?;
+        let aborted = tui::run_tui(
+            tui_rx,
+            &host_names_owned,
+            abort_handle,
+            connection_info,
+            tui_key,
+            host_key_policy,
+        )
+        .await
+        .map_err(|e| GlideshError::Other(format!("TUI error: {}", e)))?;
 
         if aborted {
             engine_handle.abort();
