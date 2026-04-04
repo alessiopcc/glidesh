@@ -770,10 +770,10 @@ async fn run_command_on_hosts(
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx.send((name, format!("Connection failed: {}", e), true));
-                    return;
+                    return true; // failed
                 }
             };
-            match session.exec(&command).await {
+            let failed = match session.exec(&command).await {
                 Ok(output) => {
                     for line in output.stdout.lines() {
                         let _ = tx.send((name.clone(), line.to_string(), false));
@@ -787,13 +787,18 @@ async fn run_command_on_hosts(
                             format!("(exit code {})", output.exit_code),
                             true,
                         ));
+                        true
+                    } else {
+                        false
                     }
                 }
                 Err(e) => {
                     let _ = tx.send((name, format!("Command failed: {}", e), true));
+                    true
                 }
-            }
+            };
             let _ = session.close().await;
+            failed
         }));
     }
     drop(tx);
@@ -807,8 +812,17 @@ async fn run_command_on_hosts(
         }
     }
 
+    let mut failed_count = 0;
     for handle in handles {
-        let _ = handle.await;
+        if let Ok(true) = handle.await {
+            failed_count += 1;
+        }
+    }
+
+    if failed_count > 0 {
+        return Err(GlideshError::Executor {
+            message: format!("{} host(s) failed", failed_count),
+        });
     }
 
     Ok(())

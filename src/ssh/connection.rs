@@ -562,7 +562,9 @@ impl SshSession {
             }
         }
 
-        stdin_reader.abort();
+        // Drop the receiver so input_tx.send() fails, causing the reader to exit
+        drop(input_rx);
+        let _ = stdin_reader.await;
         Ok(exit_code)
     }
 

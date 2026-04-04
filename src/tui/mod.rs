@@ -204,7 +204,7 @@ async fn open_shell_for_host(
     println!("\r\nShell exited (code {}).\r", exit_code);
 
     // Brief pause so user can see the exit message
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     Ok(())
 }

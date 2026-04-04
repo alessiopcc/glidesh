@@ -38,6 +38,12 @@ enum OutputKind {
     System,
 }
 
+/// Messages sent from command execution tasks to the TUI.
+enum ShellMsg {
+    Line(String, OutputKind),
+    Done,
+}
+
 impl ShellTuiState {
     fn new(host_count: usize) -> Self {
         Self {
@@ -100,13 +106,19 @@ async fn shell_tui_loop(
     concurrency: usize,
 ) -> Result<(), GlideshError> {
     // Channel for receiving output lines from command execution
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<(String, OutputKind)>();
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<ShellMsg>();
 
     loop {
         // Drain any pending output
-        while let Ok(line) = output_rx.try_recv() {
+        while let Ok(msg) = output_rx.try_recv() {
             let mut s = state.lock().unwrap();
-            s.output_lines.push(line);
+            match msg {
+                ShellMsg::Line(text, kind) => s.output_lines.push((text, kind)),
+                ShellMsg::Done => {
+                    s.running = false;
+                    s.output_lines.push(("---".to_string(), OutputKind::System));
+                }
+            }
         }
 
         // Render
@@ -177,8 +189,7 @@ async fn shell_tui_loop(
                                 &tx,
                             )
                             .await;
-                            let _ = tx.send((String::new(), OutputKind::System));
-                            // Mark as done — we use empty string as sentinel
+                            let _ = tx.send(ShellMsg::Done);
                         });
 
                         // The sentinel is handled in the drain loop below
@@ -261,23 +272,6 @@ async fn shell_tui_loop(
                 }
             }
         }
-
-        // Check for sentinel (empty string = execution done)
-        // We already drained above, check if running should stop
-        {
-            let mut s = state.lock().unwrap();
-            if s.running {
-                // Check if we received the sentinel
-                if s.output_lines
-                    .last()
-                    .is_some_and(|(line, _)| line.is_empty())
-                {
-                    s.output_lines.pop(); // Remove sentinel
-                    s.running = false;
-                    s.output_lines.push(("---".to_string(), OutputKind::System));
-                }
-            }
-        }
     }
 
     Ok(())
@@ -289,7 +283,7 @@ async fn run_on_all_hosts(
     key: &PrivateKeyWithHashAlg,
     policy: HostKeyPolicy,
     semaphore: Arc<tokio::sync::Semaphore>,
-    tx: &mpsc::UnboundedSender<(String, OutputKind)>,
+    tx: &mpsc::UnboundedSender<ShellMsg>,
 ) {
     let mut handles = Vec::new();
 
@@ -307,7 +301,7 @@ async fn run_on_all_hosts(
             let session = match connect_to_host(&host, &key, policy).await {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = tx.send((
+                    let _ = tx.send(ShellMsg::Line(
                         format!("[{}] Connection failed: {}", name, e),
                         OutputKind::Stderr,
                     ));
@@ -318,20 +312,26 @@ async fn run_on_all_hosts(
             match session.exec(&command).await {
                 Ok(output) => {
                     for line in output.stdout.lines() {
-                        let _ = tx.send((format!("[{}] {}", name, line), OutputKind::Stdout));
+                        let _ = tx.send(ShellMsg::Line(
+                            format!("[{}] {}", name, line),
+                            OutputKind::Stdout,
+                        ));
                     }
                     for line in output.stderr.lines() {
-                        let _ = tx.send((format!("[{}] {}", name, line), OutputKind::Stderr));
+                        let _ = tx.send(ShellMsg::Line(
+                            format!("[{}] {}", name, line),
+                            OutputKind::Stderr,
+                        ));
                     }
                     if output.exit_code != 0 {
-                        let _ = tx.send((
+                        let _ = tx.send(ShellMsg::Line(
                             format!("[{}] (exit code {})", name, output.exit_code),
                             OutputKind::Stderr,
                         ));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send((
+                    let _ = tx.send(ShellMsg::Line(
                         format!("[{}] Command failed: {}", name, e),
                         OutputKind::Stderr,
                     ));
@@ -390,15 +390,9 @@ fn render_output(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) 
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::ITALIC),
             };
-            // Simple wrapping
-            if inner_width == 0 || line.len() <= inner_width {
-                vec![(line.clone(), style)]
-            } else {
-                line.as_bytes()
-                    .chunks(inner_width)
-                    .map(|chunk| (String::from_utf8_lossy(chunk).to_string(), style))
-                    .collect()
-            }
+            super::widgets::wrap_line(line, inner_width)
+                .into_iter()
+                .map(move |s| (s.to_string(), style))
         })
         .collect();
 
