@@ -45,9 +45,9 @@ fn apply_common_std(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         // Build the landlock ruleset in the parent process (heap allocation is safe here).
         // Only the final restrict_self() syscall runs in the child after fork().
-        let prepared = prepare_landlock();
+        let mut prepared = prepare_landlock();
         unsafe {
-            cmd.pre_exec(move || pre_exec_sandbox(prepared));
+            cmd.pre_exec(move || pre_exec_sandbox(prepared.take()));
         }
     }
 }
@@ -61,9 +61,9 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
 
     #[cfg(unix)]
     {
-        let prepared = prepare_landlock();
+        let mut prepared = prepare_landlock();
         unsafe {
-            cmd.pre_exec(move || pre_exec_sandbox(prepared));
+            cmd.pre_exec(move || pre_exec_sandbox(prepared.take()));
         }
     }
 }
@@ -87,7 +87,7 @@ fn pre_exec_sandbox(landlock: PreparedLandlock) -> std::io::Result<()> {
 type PreparedLandlock = Option<landlock::RulesetCreated>;
 
 #[cfg(all(unix, not(target_os = "linux")))]
-type PreparedLandlock = ();
+type PreparedLandlock = Option<()>;
 
 /// Build the landlock ruleset in the parent process. All heap allocation
 /// (PathFd opens, Ruleset builder, rule additions) happens here, before fork().
@@ -125,13 +125,15 @@ fn prepare_landlock() -> PreparedLandlock {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn prepare_landlock() -> PreparedLandlock {}
+fn prepare_landlock() -> PreparedLandlock {
+    None
+}
 
 /// Apply the pre-built landlock ruleset. Only calls restrict_self() (a syscall),
 /// which is async-signal-safe and does not allocate.
 #[cfg(target_os = "linux")]
 fn restrict_landlock(prepared: PreparedLandlock) {
-    use landlock::{CompatLevel, Compatible, RulesetCreatedAttr};
+    use landlock::{CompatLevel, Compatible};
     if let Some(ruleset) = prepared {
         if let Err(e) = ruleset
             .set_compatibility(CompatLevel::BestEffort)
