@@ -12,7 +12,7 @@ Thank you for your interest in contributing to glidesh! This guide will help you
 
 ## Development Setup
 
-You need Rust 1.85+ installed. Then:
+You need Rust 1.86+ installed. Then:
 
 ```bash
 cargo build
