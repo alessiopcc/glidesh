@@ -76,6 +76,13 @@ impl FileModule {
     }
 }
 
+/// Strips leading zeros so "0644" and "644" compare equal.
+/// Preserves "0" for zero-valued modes instead of returning an empty string.
+fn normalize_mode(mode: &str) -> &str {
+    let trimmed = mode.trim_start_matches('0');
+    if trimmed.is_empty() { "0" } else { trimmed }
+}
+
 #[async_trait]
 impl Module for FileModule {
     fn name(&self) -> &str {
@@ -106,7 +113,57 @@ impl Module for FileModule {
         let local_hash = Self::sha256_hex(&content);
 
         match ctx.ssh.checksum_remote(dest).await? {
-            Some(remote_hash) if remote_hash == local_hash => Ok(ModuleStatus::Satisfied),
+            Some(remote_hash) if remote_hash == local_hash => {
+                let desired_owner = params.args.get("owner").and_then(|v| v.as_str());
+                let desired_group = params.args.get("group").and_then(|v| v.as_str());
+                let desired_mode = params.args.get("mode").and_then(|v| v.as_str());
+
+                if desired_owner.is_some() || desired_group.is_some() || desired_mode.is_some() {
+                    let remote_attrs = ctx.ssh.get_file_attrs(dest).await?;
+                    if let Some((remote_owner, remote_group, remote_mode)) = remote_attrs {
+                        let owner_ok = desired_owner.is_none_or(|o| o == remote_owner);
+                        let group_ok = desired_group.is_none_or(|g| g == remote_group);
+                        let mode_ok = desired_mode
+                            .is_none_or(|m| normalize_mode(m) == normalize_mode(&remote_mode));
+
+                        if owner_ok && group_ok && mode_ok {
+                            return Ok(ModuleStatus::Satisfied);
+                        }
+
+                        let mut changes = Vec::new();
+                        if !owner_ok {
+                            changes.push(format!(
+                                "owner: {} -> {}",
+                                remote_owner,
+                                desired_owner.unwrap()
+                            ));
+                        }
+                        if !group_ok {
+                            changes.push(format!(
+                                "group: {} -> {}",
+                                remote_group,
+                                desired_group.unwrap()
+                            ));
+                        }
+                        if !mode_ok {
+                            changes.push(format!(
+                                "mode: {} -> {}",
+                                remote_mode,
+                                desired_mode.unwrap()
+                            ));
+                        }
+                        return Ok(ModuleStatus::Pending {
+                            plan: format!("Fix attrs on {}: {}", dest, changes.join(", ")),
+                        });
+                    } else {
+                        return Ok(ModuleStatus::Pending {
+                            plan: format!("Set attrs on {} (could not read current attrs)", dest),
+                        });
+                    }
+                }
+
+                Ok(ModuleStatus::Satisfied)
+            }
             _ => Ok(ModuleStatus::Pending {
                 plan: format!("Upload {} -> {}", src, dest),
             }),
@@ -159,17 +216,25 @@ impl FileModule {
             ctx.template_data,
             ctx.plan_base_dir,
         )?;
+        let local_hash = Self::sha256_hex(&content);
 
-        if let Some(parent) = std::path::Path::new(dest).parent() {
-            let parent_str = parent.to_string_lossy();
-            if !parent_str.is_empty() {
-                ctx.ssh
-                    .exec(&format!("mkdir -p '{}'", parent_str.replace('\'', "'\\''")))
-                    .await?;
+        let needs_upload = match ctx.ssh.checksum_remote(dest).await? {
+            Some(remote_hash) => remote_hash != local_hash,
+            None => true,
+        };
+
+        if needs_upload {
+            if let Some(parent) = std::path::Path::new(dest).parent() {
+                let parent_str = parent.to_string_lossy();
+                if !parent_str.is_empty() {
+                    ctx.ssh
+                        .exec(&format!("mkdir -p '{}'", parent_str.replace('\'', "'\\''")))
+                        .await?;
+                }
             }
-        }
 
-        ctx.ssh.upload_file(&content, dest).await?;
+            ctx.ssh.upload_file(&content, dest).await?;
+        }
 
         let owner = params.args.get("owner").and_then(|v| v.as_str());
         let group = params.args.get("group").and_then(|v| v.as_str());
@@ -177,9 +242,15 @@ impl FileModule {
 
         ctx.ssh.set_file_attrs(dest, owner, group, mode).await?;
 
+        let output_msg = if needs_upload {
+            format!("{} {} -> {} ({} bytes)", mode_str, src, dest, content.len())
+        } else {
+            format!("attrs {} (content unchanged)", dest)
+        };
+
         Ok(ModuleResult {
             changed: true,
-            output: format!("{} {} -> {} ({} bytes)", mode_str, src, dest, content.len()),
+            output: output_msg,
             stderr: String::new(),
             exit_code: 0,
         })

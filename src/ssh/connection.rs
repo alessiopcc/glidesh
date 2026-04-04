@@ -345,6 +345,43 @@ impl SshSession {
             .map(|s| s.to_string()))
     }
 
+    /// Returns (owner, group, octal_mode) for a remote file, or None if the file doesn't exist.
+    pub async fn get_file_attrs(
+        &self,
+        path: &str,
+    ) -> Result<Option<(String, String, String)>, GlideshError> {
+        let escaped = shell_escape(path);
+        let output = self.exec(&format!("stat -c '%U %G %a' {escaped}")).await?;
+
+        if output.exit_code != 0 {
+            let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+            if combined.contains("no such file or directory") || combined.contains("cannot stat") {
+                return Ok(None);
+            }
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "stat of '{}' failed (exit {}): {}{}",
+                    path,
+                    output.exit_code,
+                    output.stdout.trim(),
+                    output.stderr.trim(),
+                ),
+            });
+        }
+
+        let parts: Vec<&str> = output.stdout.trim().splitn(3, ' ').collect();
+        if parts.len() == 3 {
+            Ok(Some((
+                parts[0].to_string(),
+                parts[1].to_string(),
+                parts[2].to_string(),
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn set_file_attrs(
         &self,
         path: &str,

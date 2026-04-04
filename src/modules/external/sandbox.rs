@@ -43,8 +43,11 @@ fn apply_common_std(cmd: &mut std::process::Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // Build the landlock ruleset in the parent process (heap allocation is safe here).
+        // Only the final restrict_self() syscall runs in the child after fork().
+        let mut prepared = prepare_landlock();
         unsafe {
-            cmd.pre_exec(pre_exec_sandbox);
+            cmd.pre_exec(move || pre_exec_sandbox(prepared.take()));
         }
     }
 }
@@ -57,26 +60,39 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
     cmd.current_dir(std::env::temp_dir());
 
     #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(pre_exec_sandbox);
+    {
+        let mut prepared = prepare_landlock();
+        unsafe {
+            cmd.pre_exec(move || pre_exec_sandbox(prepared.take()));
+        }
     }
 }
 
 /// Pre-exec hook: session isolation + filesystem restriction.
 /// Runs in the child process after fork(), before exec().
-/// Note: only async-signal-safe functions are technically permitted here,
-/// but setsid and landlock syscalls are safe. Avoid heap allocation.
+/// Only async-signal-safe operations here — no heap allocation.
+/// The landlock ruleset is pre-built in the parent; we only call restrict_self().
 #[cfg(unix)]
-fn pre_exec_sandbox() -> std::io::Result<()> {
+fn pre_exec_sandbox(landlock: PreparedLandlock) -> std::io::Result<()> {
     if unsafe { libc::setsid() } == -1 {
         return Err(std::io::Error::last_os_error());
     }
-    apply_landlock();
+    restrict_landlock(landlock);
     Ok(())
 }
 
+/// A pre-built landlock ruleset ready to be restricted in a child process.
+/// Built in the parent (where heap allocation is safe), moved into pre_exec.
 #[cfg(target_os = "linux")]
-fn apply_landlock() {
+type PreparedLandlock = Option<landlock::RulesetCreated>;
+
+#[cfg(all(unix, not(target_os = "linux")))]
+type PreparedLandlock = Option<()>;
+
+/// Build the landlock ruleset in the parent process. All heap allocation
+/// (PathFd opens, Ruleset builder, rule additions) happens here, before fork().
+#[cfg(target_os = "linux")]
+fn prepare_landlock() -> PreparedLandlock {
     use landlock::{
         ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
         RulesetCreatedAttr,
@@ -87,24 +103,12 @@ fn apply_landlock() {
     let read_exec = AccessFs::from_read(abi) | AccessFs::Execute;
     let read_write = AccessFs::from_all(abi);
 
-    let fd_temp = match PathFd::new(&temp) {
-        Ok(fd) => fd,
-        Err(_) => return,
-    };
-    let fd_usr = match PathFd::new("/usr") {
-        Ok(fd) => fd,
-        Err(_) => return,
-    };
-    let fd_lib = match PathFd::new("/lib") {
-        Ok(fd) => fd,
-        Err(_) => return,
-    };
-    let fd_lib64 = match PathFd::new("/lib64") {
-        Ok(fd) => fd,
-        Err(_) => return,
-    };
+    let fd_temp = PathFd::new(&temp).ok()?;
+    let fd_usr = PathFd::new("/usr").ok()?;
+    let fd_lib = PathFd::new("/lib").ok()?;
+    let fd_lib64 = PathFd::new("/lib64").ok()?;
 
-    let result = Ruleset::default()
+    let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))
         .and_then(|r: Ruleset| r.set_compatibility(CompatLevel::BestEffort).create())
@@ -113,21 +117,36 @@ fn apply_landlock() {
                 .add_rule(PathBeneath::new(fd_temp, read_write))?
                 .add_rule(PathBeneath::new(fd_usr, read_exec))?
                 .add_rule(PathBeneath::new(fd_lib, read_exec))?
-                .add_rule(PathBeneath::new(fd_lib64, read_exec))?
-                .restrict_self()
-        });
+                .add_rule(PathBeneath::new(fd_lib64, read_exec))
+        })
+        .ok()?;
 
-    if let Err(e) = result {
-        eprintln!("landlock: {e}");
+    Some(ruleset)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn prepare_landlock() -> PreparedLandlock {
+    None
+}
+
+/// Apply the pre-built landlock ruleset. Only calls restrict_self() (a syscall),
+/// which is async-signal-safe and does not allocate.
+#[cfg(target_os = "linux")]
+fn restrict_landlock(prepared: PreparedLandlock) {
+    use landlock::{CompatLevel, Compatible};
+    if let Some(ruleset) = prepared {
+        if let Err(e) = ruleset
+            .set_compatibility(CompatLevel::BestEffort)
+            .restrict_self()
+        {
+            // Cannot use eprintln (allocates) in pre_exec; silently ignore.
+            let _ = e;
+        }
     }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn apply_landlock() {}
-
-#[cfg(not(unix))]
-#[allow(dead_code)]
-fn apply_landlock() {}
+fn restrict_landlock(_prepared: PreparedLandlock) {}
 
 #[cfg(test)]
 mod tests {
