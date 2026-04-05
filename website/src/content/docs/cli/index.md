@@ -17,9 +17,9 @@ glidesh run [OPTIONS]
 | `--inventory <PATH>` | `-i` | Path to the inventory file | — |
 | `--target <NAME>` | `-t` | Target filter: group name, host name, or group:hostname | — |
 | `--host <ADDR>` | — | Single host for ad-hoc mode | — |
-| `--user <USER>` | `-u` | SSH user | — |
+| `--user <USER>` | `-u` | SSH user (ad-hoc mode only) | `root` |
 | `--port <PORT>` | `-P` | SSH port | `22` |
-| `--key <PATH>` | `-k` | SSH private key path | — |
+| `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
 | `--command <CMD>` | `-c` | Ad-hoc command to run | — |
 | `--mode <MODE>` | `-m` | Execution mode: `sync` or `async` | `sync` |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
@@ -27,6 +27,14 @@ glidesh run [OPTIONS]
 | `--no-tui` | — | Disable TUI, use plain text output | `false` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
+
+### SSH Key Resolution
+
+The SSH private key is resolved in this order (first match wins):
+
+1. `--key` CLI flag
+2. `ssh-key` variable from the inventory (global, group, or host `vars`)
+3. `~/.ssh/id_ed25519` (default)
 
 ### Ad-hoc mode
 
@@ -49,6 +57,24 @@ Filter to a specific group or host:
 ```bash
 glidesh run -i inventory.kdl -p plan.kdl -t web
 glidesh run -i inventory.kdl -p plan.kdl -t web-1
+```
+
+### Ad-hoc host with a plan
+
+Combine `--host` with `--plan` to run a plan against a single host without an inventory file:
+
+```bash
+glidesh run --host 192.168.1.10 -u deploy -p plan.kdl
+```
+
+The host uses the `--user` (default `root`) and `--port` (default `22`) flags. Plan vars are applied as usual.
+
+### Inventory-linked plans
+
+When `--plan` is omitted but `--inventory` is provided, glidesh runs the `plan=` attributes defined in the inventory (per-group or per-host). See [Inline Plans](/concepts/inventory/#inline-plans).
+
+```bash
+glidesh run -i inventory.kdl
 ```
 
 ## `glidesh logs`
@@ -84,10 +110,12 @@ glidesh shell [OPTIONS] --inventory <PATH>
 | `--inventory <PATH>` | `-i` | Path to the inventory file | *(required)* |
 | `--target <NAME>` | `-t` | Target filter: group name, host name, or group:hostname | — |
 | `--command <CMD>` | `-c` | Command to run (skip interactive mode) | — |
-| `--key <PATH>` | `-k` | SSH private key path | — |
-| `--concurrency <N>` | — | Max concurrent hosts | `10` |
+| `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
+| `--concurrency <N>` | — | Max concurrent hosts (minimum 1) | `10` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
+
+The `shell` command resolves SSH keys using the same [resolution order](#ssh-key-resolution) as `run`.
 
 ### Interactive shell (single host)
 
@@ -146,4 +174,14 @@ glidesh validate [OPTIONS]
 glidesh validate -p plan.kdl
 glidesh validate -i inventory.kdl
 glidesh validate -p plan.kdl -i inventory.kdl
+```
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `RUST_LOG` | Control log verbosity. Default is `glidesh=info`. Set to `glidesh=debug` or `glidesh=trace` for troubleshooting. |
+
+```bash
+RUST_LOG=glidesh=debug glidesh run -i inventory.kdl -p plan.kdl
 ```

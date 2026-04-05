@@ -65,8 +65,8 @@ pub struct RunArgs {
     #[arg(short, long, default_value = "sync")]
     pub mode: String,
 
-    /// Max concurrent hosts
-    #[arg(long, default_value = "10")]
+    /// Max concurrent hosts (minimum 1)
+    #[arg(long, default_value = "10", value_parser = parse_concurrency)]
     pub concurrency: usize,
 
     /// Dry run (check only, no changes)

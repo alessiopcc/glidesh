@@ -115,6 +115,20 @@ Global vars → Group vars → Host properties
 
 The most specific value wins. Variables can be referenced in plans using `${var-name}` syntax.
 
+### Reserved Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ssh-key` | Path to the SSH private key. Used when `--key` is not provided on the CLI. Supports `~` expansion. |
+
+```kdl
+vars {
+    ssh-key "~/.ssh/deploy_ed25519"
+}
+```
+
+See [CLI Reference — SSH Key Resolution](/cli/#ssh-key-resolution) for the full resolution order.
+
 See [Variables](/concepts/variables/) for full details on variable interpolation and merge order.
 
 ## Referencing Hosts in Templates
