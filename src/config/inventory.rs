@@ -648,7 +648,6 @@ group "web" {
 }
 "#;
         let inv = parse_inventory(input).unwrap();
-        // Verify host-level vars are parsed
         assert_eq!(
             inv.groups[0].hosts[0].vars.get("http-port").unwrap(),
             "9090"
@@ -657,16 +656,13 @@ group "web" {
             inv.groups[0].hosts[0].vars.get("host-var").unwrap(),
             "from-host"
         );
-        // web-2 has no host vars
         assert!(inv.groups[0].hosts[1].vars.is_empty());
 
         let resolved = inv.resolve_targets(Some("web"));
-        // web-1: host var overrides group var
         assert_eq!(resolved[0].vars.get("http-port").unwrap(), "9090");
         assert_eq!(resolved[0].vars.get("host-var").unwrap(), "from-host");
         assert_eq!(resolved[0].vars.get("group-var").unwrap(), "from-group");
         assert_eq!(resolved[0].vars.get("global-var").unwrap(), "from-global");
-        // web-2: inherits group and global, no host override
         assert_eq!(resolved[1].vars.get("http-port").unwrap(), "8080");
         assert_eq!(resolved[1].vars.get("group-var").unwrap(), "from-group");
         assert_eq!(resolved[1].vars.get("global-var").unwrap(), "from-global");
