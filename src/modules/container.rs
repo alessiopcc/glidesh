@@ -277,6 +277,41 @@ impl ContainerModule {
         Ok(())
     }
 
+    async fn ensure_network(
+        ctx: &ModuleContext<'_>,
+        runtime: &str,
+        network: &str,
+    ) -> Result<(), GlideshError> {
+        let inspect = ctx
+            .ssh
+            .exec(&format!(
+                "{} network inspect {} 2>/dev/null",
+                runtime, network
+            ))
+            .await?;
+
+        if inspect.exit_code == 0 {
+            return Ok(());
+        }
+
+        let create = ctx
+            .ssh
+            .exec(&format!("{} network create {}", runtime, network))
+            .await?;
+
+        if create.exit_code != 0 {
+            return Err(GlideshError::Module {
+                module: "container".to_string(),
+                message: format!(
+                    "Failed to create network '{}' (exit {}): {}",
+                    network, create.exit_code, create.stderr
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     async fn ensure_running(
         &self,
         ctx: &ModuleContext<'_>,
@@ -284,6 +319,12 @@ impl ContainerModule {
         runtime: &str,
     ) -> Result<ModuleResult, GlideshError> {
         let container_name = &params.resource_name;
+
+        if let Some(network) = params.args.get("network").and_then(|v| v.as_str()) {
+            if !is_builtin_network(network) {
+                Self::ensure_network(ctx, runtime, network).await?;
+            }
+        }
 
         let _ = ctx
             .ssh
@@ -400,6 +441,11 @@ fn runtime_packages(pkg: &PkgManager, runtime: &str) -> Vec<String> {
             _ => vec!["docker-ce".to_string()],
         },
     }
+}
+
+/// Returns true for Docker/Podman built-in network modes that should not be auto-created.
+fn is_builtin_network(name: &str) -> bool {
+    matches!(name, "host" | "bridge" | "none" | "default")
 }
 
 /// Build the `<runtime> run` command string from parameters (extracted for testability).
@@ -537,6 +583,29 @@ mod tests {
         let cmd = build_run_command("podman", "testcontainer", &params).unwrap();
         assert!(cmd.contains("'docker.io/nginx:latest'"));
         assert!(cmd.ends_with("nginx -g 'daemon off;'"));
+    }
+
+    #[test]
+    fn test_is_builtin_network() {
+        assert!(is_builtin_network("host"));
+        assert!(is_builtin_network("bridge"));
+        assert!(is_builtin_network("none"));
+        assert!(is_builtin_network("default"));
+        assert!(!is_builtin_network("mynet"));
+        assert!(!is_builtin_network("app-network"));
+    }
+
+    #[test]
+    fn test_build_run_command_with_custom_network() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("nginx:latest".into())),
+            ("network", ParamValue::String("mynet".into())),
+        ]);
+        let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
+        assert_eq!(
+            cmd,
+            "docker run -d --name testcontainer --network mynet 'nginx:latest'"
+        );
     }
 
     #[test]
