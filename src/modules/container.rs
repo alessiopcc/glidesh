@@ -61,6 +61,25 @@ impl Module for ContainerModule {
                         }
                     }
 
+                    if let Some(desired_net) = params.args.get("network").and_then(|v| v.as_str()) {
+                        let net_output = ctx
+                            .ssh
+                            .exec(&format!(
+                                "{} inspect --format '{{{{.HostConfig.NetworkMode}}}}' {} 2>/dev/null",
+                                runtime, container_name
+                            ))
+                            .await?;
+                        let current_net = net_output.stdout.trim();
+                        if current_net != desired_net {
+                            return Ok(ModuleStatus::Pending {
+                                plan: format!(
+                                    "Recreate container {} (network {} -> {})",
+                                    container_name, current_net, desired_net
+                                ),
+                            });
+                        }
+                    }
+
                     if let Some(desired_cmd) = params.args.get("command").and_then(|v| v.as_str()) {
                         let cmd_output = ctx
                             .ssh
@@ -401,6 +420,10 @@ fn build_run_command(
     let image = qualify_image(raw_image, runtime);
     let mut cmd = format!("{} run -d --name {}", runtime, container_name);
 
+    if let Some(network) = params.args.get("network").and_then(|v| v.as_str()) {
+        cmd.push_str(&format!(" --network {}", network));
+    }
+
     if let Some(restart) = params.args.get("restart").and_then(|v| v.as_str()) {
         cmd.push_str(&format!(" --restart={}", restart));
     }
@@ -514,6 +537,19 @@ mod tests {
         let cmd = build_run_command("podman", "testcontainer", &params).unwrap();
         assert!(cmd.contains("'docker.io/nginx:latest'"));
         assert!(cmd.ends_with("nginx -g 'daemon off;'"));
+    }
+
+    #[test]
+    fn test_build_run_command_with_host_network() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("nginx:latest".into())),
+            ("network", ParamValue::String("host".into())),
+        ]);
+        let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
+        assert_eq!(
+            cmd,
+            "docker run -d --name testcontainer --network host 'nginx:latest'"
+        );
     }
 
     #[test]
