@@ -207,11 +207,17 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         .map(|s| s.to_string());
 
     let mut jump = None;
+    let mut vars = HashMap::new();
     if let Some(children) = node.children() {
         for child in children.nodes() {
             match child.name().to_string().as_str() {
                 "jump" => {
                     jump = Some(parse_jump(child)?);
+                }
+                "vars" => {
+                    if let Some(vc) = child.children() {
+                        vars = parse_vars_block(vc)?;
+                    }
                 }
                 other => {
                     return Err(GlideshError::ConfigParse {
@@ -227,7 +233,7 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         address,
         user,
         port,
-        vars: HashMap::new(),
+        vars,
         plan,
         jump,
     })
@@ -613,6 +619,83 @@ group "web" {
         port 9090
     }
     host "web-1" "10.0.0.1"
+}
+"#;
+        let result = parse_inventory(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate variable 'port'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_host_level_vars() {
+        let input = r#"
+vars {
+    global-var "from-global"
+}
+group "web" {
+    vars {
+        http-port 8080
+        group-var "from-group"
+    }
+    host "web-1" "10.0.0.1" {
+        vars {
+            http-port 9090
+            host-var "from-host"
+        }
+    }
+    host "web-2" "10.0.0.2"
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        // Verify host-level vars are parsed
+        assert_eq!(
+            inv.groups[0].hosts[0].vars.get("http-port").unwrap(),
+            "9090"
+        );
+        assert_eq!(
+            inv.groups[0].hosts[0].vars.get("host-var").unwrap(),
+            "from-host"
+        );
+        // web-2 has no host vars
+        assert!(inv.groups[0].hosts[1].vars.is_empty());
+
+        let resolved = inv.resolve_targets(Some("web"));
+        // web-1: host var overrides group var
+        assert_eq!(resolved[0].vars.get("http-port").unwrap(), "9090");
+        assert_eq!(resolved[0].vars.get("host-var").unwrap(), "from-host");
+        assert_eq!(resolved[0].vars.get("group-var").unwrap(), "from-group");
+        assert_eq!(resolved[0].vars.get("global-var").unwrap(), "from-global");
+        // web-2: inherits group and global, no host override
+        assert_eq!(resolved[1].vars.get("http-port").unwrap(), "8080");
+        assert_eq!(resolved[1].vars.get("group-var").unwrap(), "from-group");
+        assert_eq!(resolved[1].vars.get("global-var").unwrap(), "from-global");
+    }
+
+    #[test]
+    fn test_ungrouped_host_vars() {
+        let input = r#"
+host "standalone" "10.0.0.1" user="admin" {
+    vars {
+        env "production"
+    }
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let resolved = inv.resolve_targets(Some("standalone"));
+        assert_eq!(resolved[0].vars.get("env").unwrap(), "production");
+    }
+
+    #[test]
+    fn test_duplicate_var_in_host_vars_block() {
+        let input = r#"
+group "web" {
+    host "web-1" "10.0.0.1" {
+        vars {
+            port 8080
+            port 9090
+        }
+    }
 }
 "#;
         let result = parse_inventory(input);

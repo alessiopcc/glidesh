@@ -22,6 +22,13 @@ group "web" {
         http-port 8080
     }
     host "web-1" "10.0.0.1" user="deploy"
+    host "web-2" "10.0.0.2" user="deploy" {
+        // Host-level variables — override group and global vars
+        vars {
+            http-port 9090
+            app-env "staging"
+        }
+    }
 }
 ```
 
@@ -76,7 +83,7 @@ Inline `vars` take precedence over `vars-file` when the same key appears in both
 When the same variable is defined at multiple levels, the most specific value wins:
 
 ```
-Inventory global vars → Group vars → Host properties → Plan vars
+Inventory global vars → Group vars → Host vars → Plan vars
 ```
 
 Built-in host variables are injected last and cannot be overridden.
@@ -120,7 +127,7 @@ You can reference any host from the inventory in templates using the `@inventory
 
 Host names are unique across the entire inventory, so the lookup is unambiguous regardless of which group the host belongs to.
 
-`@inventory.<host>.vars` exposes the host's effective merged variables, so values may come from global, group, or host `vars` blocks.
+`@inventory.<host>.vars` exposes the host's effective merged variables — values may come from global, group, or host-level `vars` blocks, with the most specific level winning.
 
 ### Example
 
