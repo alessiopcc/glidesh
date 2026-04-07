@@ -500,6 +500,9 @@ impl SshSession {
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let stdin_reader = tokio::task::spawn_blocking(move || {
             loop {
+                if input_tx.is_closed() {
+                    break;
+                }
                 match event::poll(Duration::from_millis(50)) {
                     Ok(true) => {
                         if let Ok(ev) = event::read() {
