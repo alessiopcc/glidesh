@@ -203,3 +203,61 @@ plan "full" {
     // include
     assert!(matches!(&fp.items[2], PlanItem::Include(p) if p == "monitoring.kdl"));
 }
+
+/// Test that host-level vars override group vars and flow through to module execution.
+#[tokio::test]
+async fn test_host_level_vars_override_and_interpolate() {
+    skip_unless_integration!();
+
+    use glidesh::config::inventory::parse_inventory;
+    use glidesh::config::template::interpolate;
+    use glidesh::modules::shell::ShellModule;
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+
+    let inv_input = r#"
+vars {
+    greeting "global-hello"
+    shared "from-global"
+}
+group "app" {
+    vars {
+        shared "from-group"
+        group-only "group-val"
+    }
+    host "test-host" "127.0.0.1" user="root" {
+        vars {
+            shared "from-host"
+            host-only "host-val"
+        }
+    }
+}
+"#;
+    let inv = parse_inventory(inv_input).unwrap();
+    let resolved = inv.resolve_targets(Some("app"));
+    assert_eq!(resolved.len(), 1);
+
+    let host = &resolved[0];
+    assert_eq!(host.vars.get("shared").unwrap(), "from-host");
+    assert_eq!(host.vars.get("greeting").unwrap(), "global-hello");
+    assert_eq!(host.vars.get("group-only").unwrap(), "group-val");
+    assert_eq!(host.vars.get("host-only").unwrap(), "host-val");
+
+    let cmd_template = "echo ${shared}-${greeting}-${host-only}-${group-only}";
+    let cmd = interpolate(cmd_template, &host.vars).unwrap();
+    assert_eq!(cmd, "echo from-host-global-hello-host-val-group-val");
+
+    let ctx = container.module_context(&ssh, &os_info, &host.vars, false);
+    let params = ModuleParams {
+        resource_name: cmd,
+        args: HashMap::new(),
+    };
+    let result = ShellModule.apply(&ctx, &params).await.unwrap();
+    assert!(result.changed);
+    assert_eq!(
+        result.output.trim(),
+        "from-host-global-hello-host-val-group-val"
+    );
+}

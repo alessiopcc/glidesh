@@ -20,7 +20,11 @@ group "web" {
     }
     host "web-1" "10.0.0.1" user="deploy" port=22
     host "web-2" "10.0.0.2" user="deploy"
-    host "web-3" "web3.example.com"
+    host "web-3" "web3.example.com" {
+        vars {
+            http-port 9090
+        }
+    }
 }
 
 group "db" {
@@ -43,6 +47,17 @@ Optional properties:
 - `user` — SSH username (overrides group/global vars)
 - `port` — SSH port (default: 22)
 - `plan` — path to a plan file to run on this host (see [Inline Plans](#inline-plans))
+
+Hosts can also have a `vars` block to define host-specific variables that override group and global vars:
+
+```kdl
+host "web-1" "10.0.0.1" user="deploy" {
+    vars {
+        http-port 9090
+        app-env "staging"
+    }
+}
+```
 
 ## Groups
 
@@ -110,7 +125,7 @@ When `--plan` is provided on the CLI, it overrides all `plan=` attributes in the
 Variables are defined in `vars` blocks and follow a scoping hierarchy:
 
 ```
-Global vars → Group vars → Host properties
+Global vars → Group vars → Host vars
 ```
 
 The most specific value wins. Variables can be referenced in plans using `${var-name}` syntax.
@@ -139,7 +154,7 @@ Template files can reference any host in the inventory using `${@inventory.<host
 reverse_proxy ${@inventory.bifrost.address}:${@inventory.bifrost.port}
 ```
 
-Available fields: `address`, `user`, `port`, and `vars.<key>` for the host's resolved variables (after global → group → host merge).
+Available fields: `address`, `user`, `port`, and `vars.<key>` for the host's resolved variables (after global → group → host vars merge).
 
 Template files can also loop over all hosts in a group using `${for h in @group.<name>}`:
 
