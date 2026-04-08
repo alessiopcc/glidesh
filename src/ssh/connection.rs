@@ -450,6 +450,72 @@ impl SshSession {
         Ok(())
     }
 
+    pub async fn set_file_attrs_recursive(
+        &self,
+        path: &str,
+        owner: Option<&str>,
+        group: Option<&str>,
+        mode: Option<&str>,
+    ) -> Result<(), GlideshError> {
+        let escaped = shell_escape(path);
+
+        if let Some(mode) = mode {
+            let output = self
+                .exec(&format!("chmod -R {} {}", shell_escape(mode), escaped))
+                .await?;
+            if output.exit_code != 0 {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("chmod -R failed: {}", output.stderr),
+                });
+            }
+        }
+
+        match (owner, group) {
+            (Some(o), Some(g)) => {
+                let output = self
+                    .exec(&format!(
+                        "chown -R {}:{} {}",
+                        shell_escape(o),
+                        shell_escape(g),
+                        escaped
+                    ))
+                    .await?;
+                if output.exit_code != 0 {
+                    return Err(GlideshError::Module {
+                        module: "file".to_string(),
+                        message: format!("chown -R failed: {}", output.stderr),
+                    });
+                }
+            }
+            (Some(o), None) => {
+                let output = self
+                    .exec(&format!("chown -R {} {}", shell_escape(o), escaped))
+                    .await?;
+                if output.exit_code != 0 {
+                    return Err(GlideshError::Module {
+                        module: "file".to_string(),
+                        message: format!("chown -R failed: {}", output.stderr),
+                    });
+                }
+            }
+            (None, Some(g)) => {
+                let output = self
+                    .exec(&format!("chgrp -R {} {}", shell_escape(g), escaped))
+                    .await?;
+                if output.exit_code != 0 {
+                    return Err(GlideshError::Module {
+                        module: "file".to_string(),
+                        message: format!("chgrp -R failed: {}", output.stderr),
+                    });
+                }
+            }
+            (None, None) => {}
+        }
+
+        Ok(())
+    }
+
     /// Open an interactive PTY shell session.
     /// Takes over stdin/stdout until the remote shell exits.
     /// Returns the remote exit code.

@@ -39,6 +39,25 @@ Template mode supports:
 
 See [Template Loops](/advanced/loops-register/#template-loops) for detailed examples.
 
+## Recursive Directory Copy
+
+Upload an entire directory tree to the remote host:
+
+```kdl
+file "/etc/myapp/" src="configs/" recurse=#true owner="deploy" mode="0644"
+```
+
+All files under the local `configs/` directory are uploaded to `/etc/myapp/`, preserving the directory structure. Remote directories are created automatically.
+
+Recursive copy supports:
+- **Idempotency** — each file is compared by SHA256 checksum; only changed files are uploaded
+- **Template mode** — combine with `template=#true` to interpolate all files in the directory
+- **Attributes** — `owner`, `group`, and `mode` are applied recursively to all files and directories
+
+:::note
+`fetch=#true` and `recurse=#true` cannot be combined.
+:::
+
 ## Fetch
 
 Download a remote file to the local machine:
@@ -58,6 +77,7 @@ file "backups/${host.name}-dump.sql" {
 | `src` | string | Source file path (required) |
 | `template` | boolean | Interpolate `${var}` placeholders and expand `${for}` loops before uploading |
 | `fetch` | boolean | Download from remote instead of uploading |
+| `recurse` | boolean | Recursively copy a directory tree |
 | `owner` | string | Remote file owner |
 | `group` | string | Remote file group |
 | `mode` | string | Remote file permissions (e.g., `"0644"`) |

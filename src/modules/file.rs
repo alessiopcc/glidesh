@@ -4,6 +4,7 @@ use crate::modules::context::ModuleContext;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -73,10 +74,59 @@ impl FileModule {
         }
     }
 
+    fn is_recurse(params: &ModuleParams) -> bool {
+        params
+            .args
+            .get("recurse")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     fn sha256_hex(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
         hex_encode(hasher.finalize().as_slice())
+    }
+
+    /// Recursively walk a local directory, returning relative paths of all files (sorted).
+    fn walk_dir(base: &Path) -> Result<Vec<PathBuf>, GlideshError> {
+        let mut files = Vec::new();
+        Self::walk_dir_inner(base, base, &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn walk_dir_inner(
+        root: &Path,
+        current: &Path,
+        files: &mut Vec<PathBuf>,
+    ) -> Result<(), GlideshError> {
+        let entries = std::fs::read_dir(current).map_err(|e| GlideshError::Module {
+            module: "file".to_string(),
+            message: format!("Failed to read directory '{}': {}", current.display(), e),
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "Failed to read directory entry in '{}': {}",
+                    current.display(),
+                    e
+                ),
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::walk_dir_inner(root, &path, files)?;
+            } else {
+                let relative = path.strip_prefix(root).map_err(|e| GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("Failed to compute relative path: {}", e),
+                })?;
+                files.push(relative.to_path_buf());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -102,9 +152,19 @@ impl Module for FileModule {
         let dest = &params.resource_name;
 
         if Self::is_fetch(params) {
+            if Self::is_recurse(params) {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: "fetch=true and recurse=true cannot be combined".to_string(),
+                });
+            }
             return Ok(ModuleStatus::Pending {
                 plan: format!("Fetch {} -> {}", src, dest),
             });
+        }
+
+        if Self::is_recurse(params) {
+            return self.check_recurse(ctx, params, src, dest).await;
         }
 
         let content = Self::read_local_content(
@@ -184,6 +244,10 @@ impl Module for FileModule {
 
         if Self::is_fetch(params) {
             return self.apply_fetch(ctx, src, dest).await;
+        }
+
+        if Self::is_recurse(params) {
+            return self.apply_recurse(ctx, params, src, dest).await;
         }
 
         self.apply_upload(ctx, params, src, dest).await
@@ -302,6 +366,197 @@ impl FileModule {
             exit_code: 0,
         })
     }
+
+    async fn check_recurse(
+        &self,
+        ctx: &ModuleContext<'_>,
+        params: &ModuleParams,
+        src: &str,
+        dest: &str,
+    ) -> Result<ModuleStatus, GlideshError> {
+        let resolved_src = Self::resolve_src(src, ctx.plan_base_dir);
+        if !resolved_src.is_dir() {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "recurse=true but '{}' is not a directory",
+                    resolved_src.display()
+                ),
+            });
+        }
+
+        let local_files = Self::walk_dir(&resolved_src)?;
+        if local_files.is_empty() {
+            return Ok(ModuleStatus::Satisfied);
+        }
+
+        let template = Self::is_template(params);
+        let mut changed_count = 0usize;
+
+        for rel_path in &local_files {
+            let local_path = resolved_src.join(rel_path);
+            let content = if template {
+                let text =
+                    std::fs::read_to_string(&local_path).map_err(|e| GlideshError::Module {
+                        module: "file".to_string(),
+                        message: format!("Failed to read '{}': {}", local_path.display(), e),
+                    })?;
+                let rendered = render(&text, ctx.vars, ctx.template_data)?;
+                rendered.into_bytes()
+            } else {
+                std::fs::read(&local_path).map_err(|e| GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("Failed to read '{}': {}", local_path.display(), e),
+                })?
+            };
+
+            let local_hash = Self::sha256_hex(&content);
+            let remote_path = format!(
+                "{}/{}",
+                dest.trim_end_matches('/'),
+                rel_path.to_string_lossy().replace('\\', "/")
+            );
+
+            match ctx.ssh.checksum_remote(&remote_path).await? {
+                Some(remote_hash) if remote_hash == local_hash => {}
+                _ => changed_count += 1,
+            }
+        }
+
+        if changed_count == 0 {
+            Ok(ModuleStatus::Satisfied)
+        } else {
+            Ok(ModuleStatus::Pending {
+                plan: format!(
+                    "Upload dir {} -> {} ({} of {} files changed)",
+                    src,
+                    dest,
+                    changed_count,
+                    local_files.len()
+                ),
+            })
+        }
+    }
+
+    async fn apply_recurse(
+        &self,
+        ctx: &ModuleContext<'_>,
+        params: &ModuleParams,
+        src: &str,
+        dest: &str,
+    ) -> Result<ModuleResult, GlideshError> {
+        let resolved_src = Self::resolve_src(src, ctx.plan_base_dir);
+        if !resolved_src.is_dir() {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "recurse=true but '{}' is not a directory",
+                    resolved_src.display()
+                ),
+            });
+        }
+
+        let local_files = Self::walk_dir(&resolved_src)?;
+
+        if ctx.dry_run {
+            return Ok(ModuleResult {
+                changed: false,
+                output: format!(
+                    "[dry-run] Would copy dir {} -> {} ({} files)",
+                    src,
+                    dest,
+                    local_files.len()
+                ),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+        }
+
+        let template = Self::is_template(params);
+        let dest_trimmed = dest.trim_end_matches('/');
+        let mut uploaded = 0usize;
+
+        let mut remote_dirs: Vec<String> = local_files
+            .iter()
+            .filter_map(|rel| {
+                rel.parent().map(|p| {
+                    let p_str = p.to_string_lossy().replace('\\', "/");
+                    if p_str.is_empty() {
+                        dest_trimmed.to_string()
+                    } else {
+                        format!("{}/{}", dest_trimmed, p_str)
+                    }
+                })
+            })
+            .collect();
+        remote_dirs.sort();
+        remote_dirs.dedup();
+
+        if !remote_dirs.is_empty() {
+            let dirs_arg = remote_dirs
+                .iter()
+                .map(|d| format!("'{}'", d.replace('\'', "'\\''")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            ctx.ssh.exec(&format!("mkdir -p {}", dirs_arg)).await?;
+        }
+
+        for rel_path in &local_files {
+            let local_path = resolved_src.join(rel_path);
+            let content = if template {
+                let text =
+                    std::fs::read_to_string(&local_path).map_err(|e| GlideshError::Module {
+                        module: "file".to_string(),
+                        message: format!("Failed to read '{}': {}", local_path.display(), e),
+                    })?;
+                let rendered = render(&text, ctx.vars, ctx.template_data)?;
+                rendered.into_bytes()
+            } else {
+                std::fs::read(&local_path).map_err(|e| GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("Failed to read '{}': {}", local_path.display(), e),
+                })?
+            };
+
+            let local_hash = Self::sha256_hex(&content);
+            let remote_path = format!(
+                "{}/{}",
+                dest_trimmed,
+                rel_path.to_string_lossy().replace('\\', "/")
+            );
+
+            let needs_upload = match ctx.ssh.checksum_remote(&remote_path).await? {
+                Some(remote_hash) => remote_hash != local_hash,
+                None => true,
+            };
+
+            if needs_upload {
+                ctx.ssh.upload_file(&content, &remote_path).await?;
+                uploaded += 1;
+            }
+        }
+
+        let owner = params.args.get("owner").and_then(|v| v.as_str());
+        let group = params.args.get("group").and_then(|v| v.as_str());
+        let mode = params.args.get("mode").and_then(|v| v.as_str());
+
+        ctx.ssh
+            .set_file_attrs_recursive(dest_trimmed, owner, group, mode)
+            .await?;
+
+        Ok(ModuleResult {
+            changed: uploaded > 0,
+            output: format!(
+                "copy dir {} -> {} ({} uploaded, {} total)",
+                src,
+                dest,
+                uploaded,
+                local_files.len()
+            ),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -366,5 +621,65 @@ mod tests {
             args,
         };
         assert_eq!(FileModule::get_src(&params).unwrap(), "files/test.conf");
+    }
+
+    #[test]
+    fn test_walk_dir_basic() {
+        let dir = std::env::temp_dir().join(format!("glidesh_walk_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), "world").unwrap();
+
+        let files = FileModule::walk_dir(&dir).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0], PathBuf::from("a.txt"));
+        assert_eq!(
+            files[1],
+            PathBuf::from(if cfg!(windows) {
+                "sub\\b.txt"
+            } else {
+                "sub/b.txt"
+            })
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_walk_dir_empty() {
+        let dir = std::env::temp_dir().join(format!("glidesh_walk_empty_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let files = FileModule::walk_dir(&dir).unwrap();
+        assert!(files.is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_walk_dir_nonexistent() {
+        let dir = std::env::temp_dir().join("glidesh_walk_nonexistent_dir");
+        assert!(FileModule::walk_dir(&dir).is_err());
+    }
+
+    #[test]
+    fn test_is_recurse_default_false() {
+        let params = ModuleParams {
+            resource_name: "/tmp/test".to_string(),
+            args: std::collections::HashMap::new(),
+        };
+        assert!(!FileModule::is_recurse(&params));
+    }
+
+    #[test]
+    fn test_is_recurse_true() {
+        use crate::config::types::ParamValue;
+        let mut args = std::collections::HashMap::new();
+        args.insert("recurse".to_string(), ParamValue::Bool(true));
+        let params = ModuleParams {
+            resource_name: "/tmp/test".to_string(),
+            args,
+        };
+        assert!(FileModule::is_recurse(&params));
     }
 }
