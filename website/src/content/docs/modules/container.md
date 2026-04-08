@@ -14,6 +14,7 @@ container "myapp" {
     runtime "podman"
     install-runtime #true
     restart "always"
+    network "host"
     command "nginx -g 'daemon off;'"
     ports {
         - "8080:80"
@@ -38,6 +39,7 @@ container "myapp" {
 | `state` | string | `"running"`, `"stopped"`, or `"absent"` |
 | `runtime` | string | `"docker"` or `"podman"` (default: auto-detect) |
 | `install-runtime` | boolean | Auto-install the runtime if not found |
+| `network` | string | Network mode: `"host"`, `"bridge"`, `"none"`, or a custom network name (auto-created if it doesn't exist) |
 | `restart` | string | Restart policy: `"always"`, `"on-failure"`, `"no"` |
 | `command` | string | Custom command to run in the container (overrides image default) |
 | `ports` | list | Port mappings (`host:container`) |
@@ -46,7 +48,26 @@ container "myapp" {
 
 ## Idempotency
 
-The module checks if a container with the given name exists and is in the desired state. For `running`, it also verifies the image and command match. If a container exists with a different image or command, it is replaced.
+The module checks if a container with the given name exists and is in the desired state. For `running`, it also verifies the image, network, and command match. If a container exists with a different image, network, or command, it is replaced.
+
+## Custom Networks
+
+When `network` is set to a name other than `host`, `bridge`, `none`, or `default`, the module automatically creates the network if it doesn't already exist. This lets containers on the same custom network communicate by container name.
+
+```kdl
+container "redis" {
+    image "redis:7"
+    network "app-net"
+}
+
+container "webapp" {
+    image "myapp:latest"
+    network "app-net"
+    environment {
+        REDIS_URL "redis://redis:6379"
+    }
+}
+```
 
 ## Example
 
