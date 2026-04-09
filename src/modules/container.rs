@@ -434,11 +434,7 @@ fn param_hash(runtime: &str, params: &ModuleParams) -> String {
     }
 
     let result = hasher.finalize();
-    result
-        .iter()
-        .take(8)
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Qualify a short image name for Podman which doesn't default to Docker Hub.
@@ -662,7 +658,7 @@ mod tests {
         let h1 = param_hash("docker", &params);
         let h2 = param_hash("docker", &params);
         assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 16); // 8 bytes = 16 hex chars
+        assert_eq!(h1.len(), 64); // 32 bytes = 64 hex chars
     }
 
     #[test]
