@@ -48,7 +48,7 @@ container "myapp" {
 
 ## Idempotency
 
-The module checks if a container with the given name exists and is in the desired state. For `running`, it also verifies the image, network, and command match. If a container exists with a different image, network, or command, it is replaced.
+The module checks if a container with the given name exists and is in the desired state. For `running`, it compares a hash of all configuration parameters (image, network, restart policy, ports, environment, volumes, and command) against a label stored on the container. If any parameter changes, the container is recreated.
 
 ## Custom Networks
 
