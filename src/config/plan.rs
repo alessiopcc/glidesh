@@ -124,6 +124,24 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         }
     }
 
+    // Validate subscribe references: must refer to earlier steps by name
+    let mut seen_steps: Vec<String> = Vec::new();
+    for item in &items {
+        if let PlanItem::Step(step) = item {
+            for sub in &step.subscribe {
+                if !seen_steps.contains(sub) {
+                    return Err(GlideshError::ConfigParse {
+                        message: format!(
+                            "Step '{}' subscribes to '{}', which is not a preceding step",
+                            step.name, sub
+                        ),
+                    });
+                }
+            }
+            seen_steps.push(step.name.clone());
+        }
+    }
+
     Ok(Plan {
         name,
         mode,
@@ -360,6 +378,19 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
             }
         });
 
+    let subscribe: Vec<String> = node
+        .entries()
+        .iter()
+        .find(|e| e.name().map(|n| n.to_string()).as_deref() == Some("subscribe"))
+        .and_then(|e| e.value().as_string())
+        .map(|s| {
+            s.split(',')
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut tasks = Vec::new();
 
     if let Some(children) = node.children() {
@@ -372,6 +403,7 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         name,
         tasks,
         loop_source,
+        subscribe,
     })
 }
 
@@ -1216,5 +1248,77 @@ plan "test" {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_subscribe() {
+        let input = r#"
+plan "test" {
+    step "Deploy config" {
+        shell "echo deploy"
+    }
+    step "Restart app" subscribe="Deploy config" {
+        shell "echo restart"
+    }
+}
+"#;
+        let plan = parse_plan(input).unwrap();
+        let steps = plan.steps();
+        assert!(steps[0].subscribe.is_empty());
+        assert_eq!(steps[1].subscribe, vec!["Deploy config"]);
+    }
+
+    #[test]
+    fn test_parse_subscribe_comma_separated() {
+        let input = r#"
+plan "test" {
+    step "Upload files" {
+        shell "echo upload"
+    }
+    step "Deploy config" {
+        shell "echo deploy"
+    }
+    step "Restart app" subscribe="Upload files, Deploy config" {
+        shell "echo restart"
+    }
+}
+"#;
+        let plan = parse_plan(input).unwrap();
+        let steps = plan.steps();
+        assert_eq!(steps[2].subscribe, vec!["Upload files", "Deploy config"]);
+    }
+
+    #[test]
+    fn test_subscribe_rejects_forward_reference() {
+        let input = r#"
+plan "test" {
+    step "Restart app" subscribe="Deploy config" {
+        shell "echo restart"
+    }
+    step "Deploy config" {
+        shell "echo deploy"
+    }
+}
+"#;
+        let result = parse_plan(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Deploy config"), "got: {}", msg);
+        assert!(msg.contains("not a preceding step"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_subscribe_rejects_unknown_step() {
+        let input = r#"
+plan "test" {
+    step "Restart app" subscribe="Nonexistent" {
+        shell "echo restart"
+    }
+}
+"#;
+        let result = parse_plan(input);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Nonexistent"), "got: {}", msg);
     }
 }

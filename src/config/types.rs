@@ -219,6 +219,7 @@ pub struct Step {
     pub name: String,
     pub tasks: Vec<TaskDef>,
     pub loop_source: Option<LoopSource>,
+    pub subscribe: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
