@@ -457,7 +457,7 @@ impl FileModule {
             }
             Ok(ModuleStatus::Pending {
                 plan: format!(
-                    "Upload dir {} -> {} ({} of {} files changed)",
+                    "Upload dir {} -> {} (changed: {} of {} files)",
                     src,
                     dest,
                     parts.join(", "),

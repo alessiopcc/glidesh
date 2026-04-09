@@ -293,7 +293,7 @@ impl NodeRunner {
             if should_apply {
                 match module.apply(&ctx, &params).await {
                     Ok(result) => {
-                        if result.changed {
+                        if result.changed || force_apply {
                             *total_changed += 1;
                             any_changed = true;
                         }

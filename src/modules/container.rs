@@ -398,7 +398,9 @@ fn param_hash(runtime: &str, params: &ModuleParams) -> String {
 
     if let Some(ports) = params.args.get("ports").and_then(|v| v.as_list()) {
         hasher.update(b"ports:");
-        for port in ports {
+        let mut sorted: Vec<&str> = ports.iter().map(|s| s.as_str()).collect();
+        sorted.sort_unstable();
+        for port in sorted {
             hasher.update(port.as_bytes());
             hasher.update(b",");
         }
@@ -420,7 +422,9 @@ fn param_hash(runtime: &str, params: &ModuleParams) -> String {
 
     if let Some(volumes) = params.args.get("volumes").and_then(|v| v.as_list()) {
         hasher.update(b"volumes:");
-        for vol in volumes {
+        let mut sorted: Vec<&str> = volumes.iter().map(|s| s.as_str()).collect();
+        sorted.sort_unstable();
+        for vol in sorted {
             hasher.update(vol.as_bytes());
             hasher.update(b",");
         }

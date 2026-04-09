@@ -72,7 +72,9 @@ plan "stack" {
 
 ## Rules
 
+- **Step names must be unique** within a plan (including steps from [included plans](/advanced/plan-includes/)). Duplicate names are rejected at parse time.
 - Referenced steps must appear **before** the subscribing step in the plan. Forward references are rejected at parse time.
 - Step names must match exactly (case-sensitive).
+- A force-applied step always propagates as changed to its own subscribers, enabling reliable chaining.
 - When combined with `loop`, the subscribe fires on every iteration if the referenced step changed.
 - Subscribe works with all modules. It is most useful with `systemd state="restarted"` and `container` steps, but any module can be a subscriber or a dependency.
