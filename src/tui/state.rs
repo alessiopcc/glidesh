@@ -283,6 +283,13 @@ impl TuiState {
         }
     }
 
+    pub fn set_active_scroll(&mut self, value: usize) {
+        match self.viewing_node {
+            None => self.combined_scroll = value,
+            Some(_) => self.log_scroll = value,
+        }
+    }
+
     /// Returns the log panel title based on active view.
     pub fn log_title(&self) -> String {
         match self.viewing_node {

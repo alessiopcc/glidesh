@@ -24,6 +24,7 @@ export default defineConfig({
 						{ label: 'Execution Modes', slug: 'concepts/execution-modes' },
 						{ label: 'Variables', slug: 'concepts/variables' },
 						{ label: 'TUI', slug: 'concepts/tui' },
+						{ label: 'Logs', slug: 'concepts/logs' },
 					],
 				},
 				{ label: 'CLI Reference', slug: 'cli' },
