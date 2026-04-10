@@ -545,9 +545,11 @@ impl SshSession {
             })?;
 
         crossterm::terminal::enable_raw_mode().map_err(|e| GlideshError::Other(e.to_string()))?;
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
 
         let exit_code = self.pty_proxy_loop(&mut channel).await;
 
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         let _ = crossterm::terminal::disable_raw_mode();
 
         match exit_code {
@@ -615,6 +617,9 @@ impl SshSession {
                                 let _ = channel.data(&data[..]).await;
                             }
                         }
+                        Some(Event::Paste(text)) => {
+                            let _ = channel.data(text.as_bytes()).await;
+                        }
                         Some(Event::Resize(cols, rows)) => {
                             if (cols, rows) != last_size {
                                 last_size = (cols, rows);
@@ -669,7 +674,11 @@ fn shell_escape(s: &str) -> String {
 fn key_event_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
     use crossterm::event::KeyCode;
 
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // AltGr on Windows is reported as Ctrl+Alt. Only treat as a real Ctrl
+    // shortcut when Alt is NOT pressed, so AltGr-produced characters (brackets,
+    // braces, etc. on non-US keyboard layouts) pass through normally.
+    let ctrl =
+        key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT);
 
     match key.code {
         KeyCode::Char(c) if ctrl => {

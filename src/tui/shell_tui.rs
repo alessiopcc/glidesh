@@ -1,5 +1,7 @@
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use glidesh::config::types::ResolvedHost;
 use glidesh::error::GlideshError;
@@ -69,6 +71,11 @@ impl ShellTuiState {
         self.cursor_pos += ch.len_utf8();
     }
 
+    fn insert_string(&mut self, s: &str) {
+        self.input.insert_str(self.cursor_pos, s);
+        self.cursor_pos += s.len();
+    }
+
     fn backspace(&mut self) {
         if self.cursor_pos == 0 {
             return;
@@ -127,6 +134,7 @@ pub async fn run_shell_tui(
     let result = run_shell_tui_inner(hosts, key, host_key_policy, concurrency).await;
 
     // Always restore terminal state, even on error
+    let _ = io::stdout().execute(DisableBracketedPaste);
     let _ = terminal::disable_raw_mode();
     let _ = io::stdout().execute(LeaveAlternateScreen);
 
@@ -141,6 +149,9 @@ async fn run_shell_tui_inner(
 ) -> Result<(), GlideshError> {
     io::stdout()
         .execute(EnterAlternateScreen)
+        .map_err(|e| GlideshError::Other(e.to_string()))?;
+    io::stdout()
+        .execute(EnableBracketedPaste)
         .map_err(|e| GlideshError::Other(e.to_string()))?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).map_err(|e| GlideshError::Other(e.to_string()))?;
@@ -190,20 +201,34 @@ async fn shell_tui_loop(
         if event::poll(std::time::Duration::from_millis(16))
             .map_err(|e| GlideshError::Other(e.to_string()))?
         {
-            if let Event::Key(key_event) =
-                event::read().map_err(|e| GlideshError::Other(e.to_string()))?
-            {
+            let ev = event::read().map_err(|e| GlideshError::Other(e.to_string()))?;
+
+            if let Event::Paste(text) = &ev {
+                let mut s = state.lock().unwrap();
+                if !s.running {
+                    s.insert_string(text);
+                }
+                continue;
+            }
+
+            if let Event::Key(key_event) = ev {
                 if key_event.kind != KeyEventKind::Press {
                     continue;
                 }
 
                 let mut s = state.lock().unwrap();
 
+                // AltGr on Windows is reported as Ctrl+Alt. Distinguish real
+                // Ctrl shortcuts from AltGr-produced characters (e.g. brackets
+                // on non-US keyboard layouts) by checking that ALT is NOT set.
+                let is_ctrl_only = key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key_event.modifiers.contains(KeyModifiers::ALT);
+
                 match key_event.code {
-                    KeyCode::Char('d') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('d') if is_ctrl_only => {
                         break;
                     }
-                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('c') if is_ctrl_only => {
                         break;
                     }
                     KeyCode::Enter if !s.running => {
