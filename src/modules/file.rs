@@ -391,7 +391,13 @@ impl FileModule {
         }
 
         let template = Self::is_template(params);
-        let mut changed_count = 0usize;
+        let desired_owner = params.args.get("owner").and_then(|v| v.as_str());
+        let desired_group = params.args.get("group").and_then(|v| v.as_str());
+        let desired_mode = params.args.get("mode").and_then(|v| v.as_str());
+        let check_attrs =
+            desired_owner.is_some() || desired_group.is_some() || desired_mode.is_some();
+        let mut content_changed = 0usize;
+        let mut attrs_changed = 0usize;
 
         for rel_path in &local_files {
             let local_path = resolved_src.join(rel_path);
@@ -418,20 +424,43 @@ impl FileModule {
             );
 
             match ctx.ssh.checksum_remote(&remote_path).await? {
-                Some(remote_hash) if remote_hash == local_hash => {}
-                _ => changed_count += 1,
+                Some(remote_hash) if remote_hash == local_hash => {
+                    if check_attrs {
+                        if let Some((remote_owner, remote_group, remote_mode)) =
+                            ctx.ssh.get_file_attrs(&remote_path).await?
+                        {
+                            let owner_ok = desired_owner.is_none_or(|o| o == remote_owner);
+                            let group_ok = desired_group.is_none_or(|g| g == remote_group);
+                            let mode_ok = desired_mode
+                                .is_none_or(|m| normalize_mode(m) == normalize_mode(&remote_mode));
+                            if !owner_ok || !group_ok || !mode_ok {
+                                attrs_changed += 1;
+                            }
+                        } else {
+                            attrs_changed += 1;
+                        }
+                    }
+                }
+                _ => content_changed += 1,
             }
         }
 
-        if changed_count == 0 {
+        if content_changed == 0 && attrs_changed == 0 {
             Ok(ModuleStatus::Satisfied)
         } else {
+            let mut parts = Vec::new();
+            if content_changed > 0 {
+                parts.push(format!("{} content", content_changed));
+            }
+            if attrs_changed > 0 {
+                parts.push(format!("{} attrs", attrs_changed));
+            }
             Ok(ModuleStatus::Pending {
                 plan: format!(
-                    "Upload dir {} -> {} ({} of {} files changed)",
+                    "Upload dir {} -> {} (changed: {} of {} files)",
                     src,
                     dest,
-                    changed_count,
+                    parts.join(", "),
                     local_files.len()
                 ),
             })
@@ -540,12 +569,15 @@ impl FileModule {
         let group = params.args.get("group").and_then(|v| v.as_str());
         let mode = params.args.get("mode").and_then(|v| v.as_str());
 
-        ctx.ssh
-            .set_file_attrs_recursive(dest_trimmed, owner, group, mode)
-            .await?;
+        let attrs_changed = owner.is_some() || group.is_some() || mode.is_some();
+        if attrs_changed {
+            ctx.ssh
+                .set_file_attrs_recursive(dest_trimmed, owner, group, mode)
+                .await?;
+        }
 
         Ok(ModuleResult {
-            changed: uploaded > 0,
+            changed: uploaded > 0 || attrs_changed,
             output: format!(
                 "copy dir {} -> {} ({} uploaded, {} total)",
                 src,

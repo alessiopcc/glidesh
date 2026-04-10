@@ -140,3 +140,21 @@ plan "main" {
 ```
 
 See [Plan Includes](/advanced/plan-includes/) for details.
+
+## Subscribe
+
+Steps can react to changes made by earlier steps using the `subscribe` attribute. When the referenced step applies changes, the subscribing step forces a re-apply:
+
+```kdl
+plan "web-server" {
+    step "Deploy config" {
+        file "/etc/nginx/nginx.conf" src="files/nginx.conf" template=#true
+    }
+
+    step "Restart nginx" subscribe="Deploy config" {
+        systemd "nginx" state="restarted"
+    }
+}
+```
+
+See [Subscribe](/advanced/subscribe/) for details.

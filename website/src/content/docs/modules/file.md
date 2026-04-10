@@ -107,7 +107,7 @@ This resolves to `plans/files/nginx.conf` regardless of where you run glidesh fr
 
 ## Idempotency
 
-Copy and template modes compare SHA256 checksums between the local and remote files. If they match, the transfer is skipped. Fetch mode always downloads.
+Copy and template modes compare SHA256 checksums between the local and remote files. If they match, the transfer is skipped. When `owner`, `group`, or `mode` are specified, the module also checks the remote file's attributes — if only permissions differ, the attributes are corrected without re-uploading the file. This applies to both single-file and recursive directory copies. Fetch mode always downloads.
 
 ## Example
 

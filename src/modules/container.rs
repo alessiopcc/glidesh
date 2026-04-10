@@ -4,8 +4,11 @@ use crate::modules::detect::ContainerRuntime;
 use crate::modules::detect::PkgManager;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 pub struct ContainerModule;
+
+const PARAM_HASH_LABEL: &str = "sh.glide.param-hash";
 
 #[async_trait]
 impl Module for ContainerModule {
@@ -41,62 +44,23 @@ impl Module for ContainerModule {
         match desired_state {
             "running" => {
                 if exists && current_state == "running" {
-                    if let Some(raw_image) = params.args.get("image").and_then(|v| v.as_str()) {
-                        let desired_image = qualify_image(raw_image, &runtime);
-                        let img_output = ctx
-                            .ssh
-                            .exec(&format!(
-                                "{} inspect --format '{{{{.Config.Image}}}}' {} 2>/dev/null",
-                                runtime, container_name
-                            ))
-                            .await?;
-                        let current_image = img_output.stdout.trim();
-                        if current_image != desired_image.as_str() {
-                            return Ok(ModuleStatus::Pending {
-                                plan: format!(
-                                    "Recreate container {} (image {} -> {})",
-                                    container_name, current_image, desired_image
-                                ),
-                            });
-                        }
-                    }
+                    let desired_hash = param_hash(&runtime, params);
+                    let label_output = ctx
+                        .ssh
+                        .exec(&format!(
+                            "{} inspect --format '{{{{index .Config.Labels \"{}\"}}}}' {} 2>/dev/null",
+                            runtime, PARAM_HASH_LABEL, container_name
+                        ))
+                        .await?;
+                    let current_hash = label_output.stdout.trim();
 
-                    if let Some(desired_net) = params.args.get("network").and_then(|v| v.as_str()) {
-                        let net_output = ctx
-                            .ssh
-                            .exec(&format!(
-                                "{} inspect --format '{{{{.HostConfig.NetworkMode}}}}' {} 2>/dev/null",
-                                runtime, container_name
-                            ))
-                            .await?;
-                        let current_net = net_output.stdout.trim();
-                        if current_net != desired_net {
-                            return Ok(ModuleStatus::Pending {
-                                plan: format!(
-                                    "Recreate container {} (network {} -> {})",
-                                    container_name, current_net, desired_net
-                                ),
-                            });
-                        }
-                    }
-
-                    if let Some(desired_cmd) = params.args.get("command").and_then(|v| v.as_str()) {
-                        let cmd_output = ctx
-                            .ssh
-                            .exec(&format!(
-                                "{} inspect --format '{{{{.Config.Cmd}}}}' {} 2>/dev/null",
-                                runtime, container_name
-                            ))
-                            .await?;
-                        let current_cmd = cmd_output.stdout.trim();
-                        if !current_cmd.contains(desired_cmd) {
-                            return Ok(ModuleStatus::Pending {
-                                plan: format!(
-                                    "Recreate container {} (command changed)",
-                                    container_name
-                                ),
-                            });
-                        }
+                    if current_hash != desired_hash {
+                        return Ok(ModuleStatus::Pending {
+                            plan: format!(
+                                "Recreate container {} (configuration changed)",
+                                container_name
+                            ),
+                        });
                     }
 
                     Ok(ModuleStatus::Satisfied)
@@ -408,6 +372,75 @@ impl ContainerModule {
     }
 }
 
+/// Compute a stable hash of all container parameters that affect runtime behavior.
+/// Used to detect configuration drift via a label stored on the container.
+fn param_hash(runtime: &str, params: &ModuleParams) -> String {
+    let mut hasher = Sha256::new();
+
+    // Image (qualified, so runtime switch also triggers recreate)
+    if let Some(img) = params.args.get("image").and_then(|v| v.as_str()) {
+        hasher.update(b"image:");
+        hasher.update(qualify_image(img, runtime).as_bytes());
+        hasher.update(b"\n");
+    }
+
+    if let Some(network) = params.args.get("network").and_then(|v| v.as_str()) {
+        hasher.update(b"network:");
+        hasher.update(network.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    if let Some(restart) = params.args.get("restart").and_then(|v| v.as_str()) {
+        hasher.update(b"restart:");
+        hasher.update(restart.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    if let Some(ports) = params.args.get("ports").and_then(|v| v.as_list()) {
+        hasher.update(b"ports:");
+        let mut sorted: Vec<&str> = ports.iter().map(|s| s.as_str()).collect();
+        sorted.sort_unstable();
+        for port in sorted {
+            hasher.update(port.as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b"\n");
+    }
+
+    if let Some(env) = params.args.get("environment").and_then(|v| v.as_map()) {
+        hasher.update(b"env:");
+        let mut pairs: Vec<_> = env.iter().collect();
+        pairs.sort_by_key(|(k, _)| *k);
+        for (key, value) in pairs {
+            hasher.update(key.as_bytes());
+            hasher.update(b"=");
+            hasher.update(value.as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b"\n");
+    }
+
+    if let Some(volumes) = params.args.get("volumes").and_then(|v| v.as_list()) {
+        hasher.update(b"volumes:");
+        let mut sorted: Vec<&str> = volumes.iter().map(|s| s.as_str()).collect();
+        sorted.sort_unstable();
+        for vol in sorted {
+            hasher.update(vol.as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b"\n");
+    }
+
+    if let Some(command) = params.args.get("command").and_then(|v| v.as_str()) {
+        hasher.update(b"command:");
+        hasher.update(command.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    let result = hasher.finalize();
+    result.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// Qualify a short image name for Podman which doesn't default to Docker Hub.
 /// If the image has no registry prefix (no `.` or `localhost` before the first `/`),
 /// prepend `docker.io/`. For Docker this is a no-op since Docker already defaults
@@ -464,7 +497,11 @@ fn build_run_command(
         })?;
 
     let image = qualify_image(raw_image, runtime);
-    let mut cmd = format!("{} run -d --name {}", runtime, container_name);
+    let hash = param_hash(runtime, params);
+    let mut cmd = format!(
+        "{} run -d --name {} --label {}={}",
+        runtime, container_name, PARAM_HASH_LABEL, hash
+    );
 
     if let Some(network) = params.args.get("network").and_then(|v| v.as_str()) {
         cmd.push_str(&format!(" --network {}", network));
@@ -521,7 +558,8 @@ mod tests {
     fn test_build_run_command_basic() {
         let params = make_params(vec![("image", ParamValue::String("nginx:latest".into()))]);
         let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
-        assert_eq!(cmd, "docker run -d --name testcontainer 'nginx:latest'");
+        assert!(cmd.starts_with("docker run -d --name testcontainer --label sh.glide.param-hash="));
+        assert!(cmd.ends_with("'nginx:latest'"));
     }
 
     #[test]
@@ -534,10 +572,8 @@ mod tests {
             ),
         ]);
         let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
-        assert_eq!(
-            cmd,
-            "docker run -d --name testcontainer 'python:3.12' python -m http.server 8000"
-        );
+        assert!(cmd.starts_with("docker run -d --name testcontainer --label sh.glide.param-hash="));
+        assert!(cmd.ends_with("'python:3.12' python -m http.server 8000"));
     }
 
     #[test]
@@ -602,10 +638,8 @@ mod tests {
             ("network", ParamValue::String("mynet".into())),
         ]);
         let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
-        assert_eq!(
-            cmd,
-            "docker run -d --name testcontainer --network mynet 'nginx:latest'"
-        );
+        assert!(cmd.contains("--network mynet"));
+        assert!(cmd.ends_with("'nginx:latest'"));
     }
 
     #[test]
@@ -615,9 +649,35 @@ mod tests {
             ("network", ParamValue::String("host".into())),
         ]);
         let cmd = build_run_command("docker", "testcontainer", &params).unwrap();
-        assert_eq!(
-            cmd,
-            "docker run -d --name testcontainer --network host 'nginx:latest'"
+        assert!(cmd.contains("--network host"));
+        assert!(cmd.ends_with("'nginx:latest'"));
+    }
+
+    #[test]
+    fn test_param_hash_stable() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("nginx:latest".into())),
+            ("network", ParamValue::String("mynet".into())),
+        ]);
+        let h1 = param_hash("docker", &params);
+        let h2 = param_hash("docker", &params);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64); // 32 bytes = 64 hex chars
+    }
+
+    #[test]
+    fn test_param_hash_differs_on_change() {
+        let params_a = make_params(vec![
+            ("image", ParamValue::String("nginx:latest".into())),
+            ("ports", ParamValue::List(vec!["8080:80".into()])),
+        ]);
+        let params_b = make_params(vec![
+            ("image", ParamValue::String("nginx:latest".into())),
+            ("ports", ParamValue::List(vec!["9090:80".into()])),
+        ]);
+        assert_ne!(
+            param_hash("docker", &params_a),
+            param_hash("docker", &params_b)
         );
     }
 

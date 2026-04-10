@@ -107,6 +107,7 @@ impl NodeRunner {
         let steps = self.plan.steps();
         let total_steps = steps.len();
         let mut total_changed = 0;
+        let mut step_changed: HashMap<String, bool> = HashMap::new();
 
         for (step_idx, step) in steps.iter().enumerate() {
             let _ = self.event_tx.send(ExecutorEvent::StepStarted {
@@ -116,9 +117,14 @@ impl NodeRunner {
                 total_steps,
             });
 
+            let force_apply = step
+                .subscribe
+                .iter()
+                .any(|s| step_changed.get(s).copied().unwrap_or(false));
+
             match &step.loop_source {
                 None => {
-                    if self
+                    match self
                         .run_step_tasks(
                             step,
                             &mut vars,
@@ -126,20 +132,25 @@ impl NodeRunner {
                             &session,
                             &os_info,
                             &mut total_changed,
+                            force_apply,
                         )
                         .await
-                        .is_err()
                     {
-                        let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-                            host: self.host.name.clone(),
-                            success: false,
-                            changed: total_changed,
-                        });
-                        let _ = session.close().await;
-                        return Ok(NodeResult {
-                            success: false,
-                            total_changed,
-                        });
+                        Ok(changed) => {
+                            step_changed.insert(step.name.clone(), changed);
+                        }
+                        Err(_) => {
+                            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+                                host: self.host.name.clone(),
+                                success: false,
+                                changed: total_changed,
+                            });
+                            let _ = session.close().await;
+                            return Ok(NodeResult {
+                                success: false,
+                                total_changed,
+                            });
+                        }
                     }
                 }
                 Some(loop_source) => {
@@ -162,9 +173,10 @@ impl NodeRunner {
                         LoopSource::Literal(items) => items.clone(),
                     };
 
+                    let mut any_iteration_changed = false;
                     for item in &items {
                         vars.insert("item".to_string(), item.clone());
-                        if self
+                        match self
                             .run_step_tasks(
                                 step,
                                 &mut vars,
@@ -172,24 +184,30 @@ impl NodeRunner {
                                 &session,
                                 &os_info,
                                 &mut total_changed,
+                                force_apply,
                             )
                             .await
-                            .is_err()
                         {
-                            vars.remove("item");
-                            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-                                host: self.host.name.clone(),
-                                success: false,
-                                changed: total_changed,
-                            });
-                            let _ = session.close().await;
-                            return Ok(NodeResult {
-                                success: false,
-                                total_changed,
-                            });
+                            Ok(changed) => {
+                                any_iteration_changed |= changed;
+                            }
+                            Err(_) => {
+                                vars.remove("item");
+                                let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+                                    host: self.host.name.clone(),
+                                    success: false,
+                                    changed: total_changed,
+                                });
+                                let _ = session.close().await;
+                                return Ok(NodeResult {
+                                    success: false,
+                                    total_changed,
+                                });
+                            }
                         }
                     }
                     vars.remove("item");
+                    step_changed.insert(step.name.clone(), any_iteration_changed);
                 }
             }
         }
@@ -208,6 +226,7 @@ impl NodeRunner {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_step_tasks(
         &self,
         step: &Step,
@@ -216,7 +235,10 @@ impl NodeRunner {
         session: &SshSession,
         os_info: &OsInfo,
         total_changed: &mut usize,
-    ) -> Result<(), (String, String)> {
+        force_apply: bool,
+    ) -> Result<bool, (String, String)> {
+        let mut any_changed = false;
+
         for task in &step.tasks {
             let module = self.registry.get(&task.module).ok_or_else(|| {
                 (
@@ -262,22 +284,18 @@ impl NodeRunner {
                 }
             };
 
-            match status {
-                ModuleStatus::Satisfied => {
-                    if let Some(ref var_name) = task.register {
-                        vars.insert(var_name.clone(), String::new());
-                    }
-                    let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
-                        host: self.host.name.clone(),
-                        module: task.module.clone(),
-                        resource: params.resource_name.clone(),
-                        changed: false,
-                    });
-                }
-                ModuleStatus::Pending { .. } => match module.apply(&ctx, &params).await {
+            let should_apply = match &status {
+                ModuleStatus::Satisfied => force_apply,
+                ModuleStatus::Pending { .. } => true,
+                ModuleStatus::Unknown { .. } => false,
+            };
+
+            if should_apply {
+                match module.apply(&ctx, &params).await {
                     Ok(result) => {
-                        if result.changed {
+                        if result.changed || force_apply {
                             *total_changed += 1;
+                            any_changed = true;
                         }
                         if let Some(ref var_name) = task.register {
                             vars.insert(var_name.clone(), result.output.trim().to_string());
@@ -298,17 +316,32 @@ impl NodeRunner {
                         });
                         return Err((step.name.clone(), e.to_string()));
                     }
-                },
-                ModuleStatus::Unknown { reason } => {
-                    let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
-                        host: self.host.name.clone(),
-                        module: task.module.clone(),
-                        resource: params.resource_name.clone(),
-                        error: format!("Check returned unknown: {}", reason),
-                    });
+                }
+            } else {
+                match status {
+                    ModuleStatus::Satisfied => {
+                        if let Some(ref var_name) = task.register {
+                            vars.insert(var_name.clone(), String::new());
+                        }
+                        let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
+                            host: self.host.name.clone(),
+                            module: task.module.clone(),
+                            resource: params.resource_name.clone(),
+                            changed: false,
+                        });
+                    }
+                    ModuleStatus::Unknown { reason } => {
+                        let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
+                            host: self.host.name.clone(),
+                            module: task.module.clone(),
+                            resource: params.resource_name.clone(),
+                            error: format!("Check returned unknown: {}", reason),
+                        });
+                    }
+                    ModuleStatus::Pending { .. } => unreachable!(),
                 }
             }
         }
-        Ok(())
+        Ok(any_changed)
     }
 }

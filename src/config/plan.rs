@@ -157,6 +157,28 @@ pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshE
         &mut seen,
     )?;
     plan.items = resolved;
+
+    // Validate step names are unique and subscribe references point to preceding steps
+    let mut seen_steps: Vec<String> = Vec::new();
+    for step in plan.steps() {
+        if seen_steps.contains(&step.name) {
+            return Err(GlideshError::ConfigParse {
+                message: format!("Duplicate step name: '{}'", step.name),
+            });
+        }
+        for sub in &step.subscribe {
+            if !seen_steps.contains(sub) {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "Step '{}' subscribes to '{}', which is not a preceding step",
+                        step.name, sub
+                    ),
+                });
+            }
+        }
+        seen_steps.push(step.name.clone());
+    }
+
     Ok(())
 }
 
@@ -360,6 +382,19 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
             }
         });
 
+    let subscribe: Vec<String> = node
+        .entries()
+        .iter()
+        .find(|e| e.name().map(|n| n.to_string()).as_deref() == Some("subscribe"))
+        .and_then(|e| e.value().as_string())
+        .map(|s| {
+            s.split(',')
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut tasks = Vec::new();
 
     if let Some(children) = node.children() {
@@ -372,6 +407,7 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         name,
         tasks,
         loop_source,
+        subscribe,
     })
 }
 
@@ -1214,6 +1250,141 @@ plan "test" {
             "got: {}",
             msg
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_subscribe() {
+        let input = r#"
+plan "test" {
+    step "Deploy config" {
+        shell "echo deploy"
+    }
+    step "Restart app" subscribe="Deploy config" {
+        shell "echo restart"
+    }
+}
+"#;
+        let plan = parse_plan(input).unwrap();
+        let steps = plan.steps();
+        assert!(steps[0].subscribe.is_empty());
+        assert_eq!(steps[1].subscribe, vec!["Deploy config"]);
+    }
+
+    #[test]
+    fn test_parse_subscribe_comma_separated() {
+        let input = r#"
+plan "test" {
+    step "Upload files" {
+        shell "echo upload"
+    }
+    step "Deploy config" {
+        shell "echo deploy"
+    }
+    step "Restart app" subscribe="Upload files, Deploy config" {
+        shell "echo restart"
+    }
+}
+"#;
+        let plan = parse_plan(input).unwrap();
+        let steps = plan.steps();
+        assert_eq!(steps[2].subscribe, vec!["Upload files", "Deploy config"]);
+    }
+
+    #[test]
+    fn test_subscribe_rejects_forward_reference() {
+        let input = r#"
+plan "test" {
+    step "Restart app" subscribe="Deploy config" {
+        shell "echo restart"
+    }
+    step "Deploy config" {
+        shell "echo deploy"
+    }
+}
+"#;
+        let mut plan = parse_plan(input).unwrap();
+        let dir = std::env::temp_dir().join(format!("glidesh_sub_fwd_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Deploy config"), "got: {}", msg);
+        assert!(msg.contains("not a preceding step"), "got: {}", msg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_subscribe_rejects_unknown_step() {
+        let input = r#"
+plan "test" {
+    step "Restart app" subscribe="Nonexistent" {
+        shell "echo restart"
+    }
+}
+"#;
+        let mut plan = parse_plan(input).unwrap();
+        let dir = std::env::temp_dir().join(format!("glidesh_sub_unk_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Nonexistent"), "got: {}", msg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_subscribe_rejects_duplicate_step_names() {
+        let input = r#"
+plan "test" {
+    step "Deploy" {
+        shell "echo first"
+    }
+    step "Deploy" {
+        shell "echo second"
+    }
+}
+"#;
+        let mut plan = parse_plan(input).unwrap();
+        let dir = std::env::temp_dir().join(format!("glidesh_sub_dup_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Duplicate step name"), "got: {}", msg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_subscribe_to_included_step() {
+        let dir = std::env::temp_dir().join(format!("glidesh_sub_inc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("setup.kdl"),
+            r#"plan "setup" {
+    step "Deploy config" {
+        shell "echo deploy"
+    }
+}"#,
+        )
+        .unwrap();
+
+        let plan_input = r#"
+plan "main" {
+    include "setup.kdl"
+    step "Restart app" subscribe="Deploy config" {
+        shell "echo restart"
+    }
+}
+"#;
+        let mut plan = parse_plan(plan_input).unwrap();
+        let result = resolve_includes(&mut plan, &dir);
+        assert!(result.is_ok(), "got: {}", result.unwrap_err());
+        let steps = plan.steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[1].subscribe, vec!["Deploy config"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
