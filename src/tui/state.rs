@@ -283,7 +283,6 @@ impl TuiState {
         }
     }
 
-    /// Write back the clamped scroll so up/down operate on real values, not usize::MAX.
     pub fn set_active_scroll(&mut self, value: usize) {
         match self.viewing_node {
             None => self.combined_scroll = value,

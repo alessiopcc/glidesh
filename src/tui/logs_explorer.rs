@@ -16,6 +16,7 @@ use ratatui::widgets::{
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 const COLOR_ACCENT: Color = Color::Rgb(99, 190, 101);
@@ -47,6 +48,7 @@ struct LogsExplorerState {
     node_scroll: usize,
     log_lines: Vec<String>,
     log_scroll: usize,
+    flash: Option<(String, std::time::Instant)>,
 }
 
 impl LogsExplorerState {
@@ -80,6 +82,7 @@ impl LogsExplorerState {
             node_scroll: 0,
             log_lines: Vec::new(),
             log_scroll: 0,
+            flash: None,
         }
     }
 
@@ -189,7 +192,6 @@ impl LogsExplorerState {
         } else {
             self.selected_runs.insert(self.selected_run);
         }
-        // Move down after toggling for faster multi-select
         if self.selected_run < self.runs.len() - 1 {
             self.selected_run += 1;
         }
@@ -197,7 +199,6 @@ impl LogsExplorerState {
 
     fn runs_to_delete(&self) -> Vec<usize> {
         if self.selected_runs.is_empty() {
-            // Delete the currently highlighted run
             if self.selected_run < self.runs.len() {
                 vec![self.selected_run]
             } else {
@@ -212,7 +213,6 @@ impl LogsExplorerState {
 
     fn delete_selected(&mut self) {
         let mut indices = self.runs_to_delete();
-        // Remove in reverse order so indices stay valid
         indices.sort();
         indices.reverse();
         for idx in indices {
@@ -223,13 +223,85 @@ impl LogsExplorerState {
         }
         self.selected_runs.clear();
         self.confirm_delete = false;
-        // Fix selected_run if it's now out of bounds
         if !self.runs.is_empty() {
             self.selected_run = self.selected_run.min(self.runs.len() - 1);
         } else {
             self.selected_run = 0;
         }
     }
+
+    fn current_log_path(&self) -> Option<PathBuf> {
+        if self.view != LogsView::NodeLog {
+            return None;
+        }
+        let node = self.node_names.get(self.selected_node)?;
+        let run = self.runs.get(self.selected_run)?;
+        Some(run.path.join(format!("{}.log", node)))
+    }
+
+    fn set_flash(&mut self, msg: &str) {
+        self.flash = Some((msg.to_string(), std::time::Instant::now()));
+    }
+
+    fn copy_to_clipboard(&mut self) {
+        let content = self.log_lines.join("\n");
+        let result = copy_text_to_clipboard(&content);
+        match result {
+            Ok(()) => self.set_flash("Copied to clipboard"),
+            Err(e) => self.set_flash(&format!("Copy failed: {}", e)),
+        }
+    }
+}
+
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("clip.exe");
+        c.stdin(std::process::Stdio::piped());
+        c
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("pbcopy");
+        c.stdin(std::process::Stdio::piped());
+        c
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = Command::new("xclip");
+        c.arg("-selection").arg("clipboard");
+        c.stdin(std::process::Stdio::piped());
+        c
+    };
+
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    if let Some(ref mut stdin) = child.stdin {
+        use std::io::Write;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    child.wait().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn open_in_editor(path: &std::path::Path) -> Result<(), String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+    Command::new(&editor)
+        .arg(path)
+        .status()
+        .map_err(|e| format!("{}: {}", editor, e))?;
+    Ok(())
 }
 
 fn render(frame: &mut Frame, state: &mut LogsExplorerState) {
@@ -285,7 +357,6 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width.min(area.width), height.min(area.height))
 }
 
-/// Adjust `scroll` so that `selected` is always visible within `visible` rows.
 fn ensure_visible(scroll: &mut usize, selected: usize, visible: usize) {
     if visible == 0 {
         return;
@@ -299,7 +370,7 @@ fn ensure_visible(scroll: &mut usize, selected: usize, visible: usize) {
 
 fn render_run_list(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState) {
     let selection_count = state.selected_runs.len();
-    let visible_height = area.height.saturating_sub(2) as usize; // borders
+    let visible_height = area.height.saturating_sub(2) as usize;
     ensure_visible(&mut state.run_scroll, state.selected_run, visible_height);
     let offset = state.run_scroll;
     let end = (offset + visible_height).min(state.runs.len());
@@ -419,7 +490,6 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
         )
         .bottom_margin(0);
 
-    // 2 for border, 1 for header row
     let visible_nodes = chunks[1].height.saturating_sub(3) as usize;
     ensure_visible(&mut state.node_scroll, state.selected_node, visible_nodes);
     let node_offset = state.node_scroll;
@@ -610,13 +680,22 @@ fn render_node_log(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState)
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
+    if let Some((ref msg, at)) = state.flash {
+        if at.elapsed() < std::time::Duration::from_secs(2) {
+            let paragraph =
+                Paragraph::new(format!(" {} ", msg)).style(Style::default().fg(COLOR_ACCENT));
+            frame.render_widget(paragraph, area);
+            return;
+        }
+    }
+
     let text = match state.view {
         LogsView::RunList => {
             " Enter view  Space select  d delete  q quit  \u{2191}\u{2193} navigate"
         }
         LogsView::RunDetail => " Enter view log  Esc back  q quit  \u{2191}\u{2193} navigate",
         LogsView::NodeLog => {
-            " Esc back  q quit  \u{2191}\u{2193}/j/k scroll  PgUp/PgDn page  Home/End top/bottom"
+            " Esc back  c copy  e editor  \u{2191}\u{2193}/j/k scroll  PgUp/PgDn page  q quit"
         }
     };
 
@@ -624,8 +703,6 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
     frame.render_widget(paragraph, area);
 }
 
-/// Launch the interactive logs explorer TUI.
-/// This is a synchronous (blocking) function -- all file I/O happens on demand.
 pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -670,6 +747,21 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
                             state.confirm_delete = true;
                         }
                     }
+                    KeyCode::Char('c') if state.view == LogsView::NodeLog => {
+                        state.copy_to_clipboard();
+                    }
+                    KeyCode::Char('e') if state.view == LogsView::NodeLog => {
+                        if let Some(path) = state.current_log_path() {
+                            terminal::disable_raw_mode()?;
+                            io::stdout().execute(LeaveAlternateScreen)?;
+                            if let Err(e) = open_in_editor(&path) {
+                                state.set_flash(&format!("Editor failed: {}", e));
+                            }
+                            terminal::enable_raw_mode()?;
+                            io::stdout().execute(EnterAlternateScreen)?;
+                            terminal.clear()?;
+                        }
+                    }
                     KeyCode::Esc | KeyCode::Backspace => state.go_back(),
                     KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),
@@ -682,7 +774,7 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
                     }
                     KeyCode::End | KeyCode::Char('G') => {
                         if state.view == LogsView::NodeLog {
-                            state.log_scroll = usize::MAX; // clamped in render
+                            state.log_scroll = usize::MAX;
                         }
                     }
                     _ => {}

@@ -21,13 +21,15 @@ glidesh run -i inventory.kdl -p deploy.kdl
 
 | Key | Action |
 |-----|--------|
-| Up/Down or j/k | Select node / scroll logs |
+| Up/Down or j/k | Select node / scroll logs (depending on focus) |
 | Enter | View selected node's logs |
 | Esc | Back to combined view |
 | Tab | Switch focus between nodes and logs |
 | PgUp/PgDn | Scroll logs by page |
 | g / G | Jump to top / bottom of logs |
 | q | Quit (confirms if still running) |
+
+When viewing a single node's logs (after pressing Enter), Tab switches focus between the node list and the log panel so you can scroll through the log. Press Esc to return to the combined view.
 
 ## Post-Run Shell Access
 

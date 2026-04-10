@@ -323,7 +323,6 @@ fn render_log_panel(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     let max_scroll = total_lines.saturating_sub(visible_height);
     let scroll = scroll_pos.min(max_scroll);
 
-    // Write clamped scroll back so scroll_log_up/down operate on real values
     state.set_active_scroll(scroll);
 
     let end = (scroll + visible_height).min(total_lines);
