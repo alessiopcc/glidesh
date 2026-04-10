@@ -9,7 +9,7 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::OpenFlags;
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn ssh_config() -> Arc<client::Config> {
@@ -29,7 +29,6 @@ pub struct CommandOutput {
 pub struct SshSession {
     handle: client::Handle<SshHandler>,
     host: String,
-    /// Hold the jump host handle alive for the lifetime of the tunneled session.
     _jump_handle: Option<client::Handle<SshHandler>>,
 }
 
@@ -42,17 +41,24 @@ impl SshSession {
         host_key_policy: HostKeyPolicy,
     ) -> Result<Self, GlideshError> {
         let config = ssh_config();
+        let host_key_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let handler = SshHandler {
             host: host.to_string(),
             port,
             host_key_policy,
+            host_key_error: Arc::clone(&host_key_error),
         };
 
         tracing::debug!("Connecting to {}:{}", host, port);
         let mut handle = client::connect(config, (host, port), handler)
             .await
-            .map_err(|e| GlideshError::SshConnection {
-                message: format!("Failed to connect to {}:{}: {}", host, port, e),
+            .map_err(|e| {
+                if let Some(reason) = host_key_error.lock().ok().and_then(|g| g.clone()) {
+                    return GlideshError::SshConnection { message: reason };
+                }
+                GlideshError::SshConnection {
+                    message: format!("Failed to connect to {}:{}: {}", host, port, e),
+                }
             })?;
 
         tracing::debug!("TCP connected, authenticating as '{}' with pubkey", user);
@@ -95,12 +101,13 @@ impl SshSession {
         host_key_policy: HostKeyPolicy,
         jump: &ResolvedJumpHost,
     ) -> Result<Self, GlideshError> {
-        // Connect and authenticate to the jump host
         let jump_config = ssh_config();
+        let jump_key_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let jump_handler = SshHandler {
             host: jump.address.clone(),
             port: jump.port,
             host_key_policy,
+            host_key_error: Arc::clone(&jump_key_error),
         };
 
         tracing::debug!("Connecting to jump host {}:{}", jump.address, jump.port);
@@ -110,11 +117,16 @@ impl SshSession {
             jump_handler,
         )
         .await
-        .map_err(|e| GlideshError::SshConnection {
-            message: format!(
-                "Failed to connect to jump host {}:{}: {}",
-                jump.address, jump.port, e
-            ),
+        .map_err(|e| {
+            if let Some(reason) = jump_key_error.lock().ok().and_then(|g| g.clone()) {
+                return GlideshError::SshConnection { message: reason };
+            }
+            GlideshError::SshConnection {
+                message: format!(
+                    "Failed to connect to jump host {}:{}: {}",
+                    jump.address, jump.port, e
+                ),
+            }
         })?;
 
         tracing::debug!("Jump host TCP connected, authenticating as '{}'", jump.user);
@@ -135,7 +147,6 @@ impl SshSession {
             });
         }
 
-        // Open a tunnel through the jump host to the target
         tracing::debug!("Opening tunnel through jump host to {}:{}", host, port);
         let channel = jump_handle
             .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
@@ -149,21 +160,27 @@ impl SshSession {
 
         let stream = channel.into_stream();
 
-        // Run SSH over the tunneled channel
         let target_config = ssh_config();
+        let target_key_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let target_handler = SshHandler {
             host: host.to_string(),
             port,
             host_key_policy,
+            host_key_error: Arc::clone(&target_key_error),
         };
 
         let mut handle = client::connect_stream(target_config, stream, target_handler)
             .await
-            .map_err(|e| GlideshError::SshConnection {
-                message: format!(
-                    "Failed SSH handshake through tunnel to {}:{}: {}",
-                    host, port, e
-                ),
+            .map_err(|e| {
+                if let Some(reason) = target_key_error.lock().ok().and_then(|g| g.clone()) {
+                    return GlideshError::SshConnection { message: reason };
+                }
+                GlideshError::SshConnection {
+                    message: format!(
+                        "Failed SSH handshake through tunnel to {}:{}: {}",
+                        host, port, e
+                    ),
+                }
             })?;
 
         tracing::debug!("Tunnel established, authenticating as '{}' on target", user);
