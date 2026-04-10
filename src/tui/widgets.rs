@@ -29,7 +29,7 @@ fn frame_color(state: &TuiState) -> Color {
     }
 }
 
-pub fn render(frame: &mut Frame, state: &TuiState) {
+pub fn render(frame: &mut Frame, state: &mut TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -292,8 +292,7 @@ fn line_style(line: &str) -> Style {
     }
 }
 
-fn render_log_panel(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let logs = state.active_logs();
+fn render_log_panel(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     let scroll_pos = state.active_scroll();
 
     let is_focused = state.focus == FocusPanel::Logs;
@@ -306,23 +305,31 @@ fn render_log_panel(frame: &mut Frame, area: Rect, state: &TuiState) {
     let inner_width = area.width.saturating_sub(3) as usize;
     let visible_height = area.height.saturating_sub(2) as usize;
 
-    let mut wrapped: Vec<(&str, Style)> = Vec::new();
-    for line in logs {
-        let style = line_style(line);
-        for sub in wrap_line(line, inner_width) {
-            wrapped.push((sub, style));
+    // Build wrapped lines owning their strings so we release the borrow on state
+    let wrapped: Vec<(String, Style)> = {
+        let logs = state.active_logs();
+        let mut out = Vec::new();
+        for line in logs {
+            let style = line_style(line);
+            for sub in wrap_line(line, inner_width) {
+                out.push((sub.to_owned(), style));
+            }
         }
-    }
+        out
+    };
 
     let total_lines = wrapped.len();
 
     let max_scroll = total_lines.saturating_sub(visible_height);
     let scroll = scroll_pos.min(max_scroll);
 
+    // Write clamped scroll back so scroll_log_up/down operate on real values
+    state.set_active_scroll(scroll);
+
     let end = (scroll + visible_height).min(total_lines);
     let items: Vec<ListItem> = wrapped[scroll..end]
         .iter()
-        .map(|(text, style)| ListItem::new(Line::from(Span::styled((*text).to_owned(), *style))))
+        .map(|(text, style)| ListItem::new(Line::from(Span::styled(text.clone(), *style))))
         .collect();
 
     let scroll_info = if total_lines > visible_height {
@@ -365,10 +372,10 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
     let text = if state.viewing_node.is_some() {
         match state.focus {
             FocusPanel::Nodes => {
-                " \u{2191}\u{2193} select node  Esc/Tab back  j/k scroll log  q quit "
+                " \u{2191}\u{2193} select node  Tab switch panel  Esc back  q quit "
             }
             FocusPanel::Logs => {
-                " \u{2191}\u{2193}/j/k scroll  PgUp/PgDn page  g/G top/bottom  Esc/Tab back  q quit "
+                " \u{2191}\u{2193}/j/k scroll  PgUp/PgDn page  g/G top/bottom  Tab switch panel  Esc back  q quit "
             }
         }
     } else if state.run_complete {

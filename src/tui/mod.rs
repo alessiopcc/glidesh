@@ -58,7 +58,7 @@ pub async fn run_tui(
         {
             let mut s = state.lock().unwrap();
             s.tick_spinner();
-            terminal.draw(|f| widgets::render(f, &s))?;
+            terminal.draw(|f| widgets::render(f, &mut s))?;
         }
 
         // Poll for keyboard events (16ms = ~60fps)
@@ -105,11 +105,7 @@ pub async fn run_tui(
                         }
                     }
                     KeyCode::Tab | KeyCode::BackTab => {
-                        if s.viewing_node.is_some() {
-                            s.exit_node_view();
-                        } else {
-                            s.toggle_focus();
-                        }
+                        s.toggle_focus();
                     }
                     KeyCode::Up => match s.focus {
                         FocusPanel::Nodes => s.prev_node(),
