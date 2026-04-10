@@ -381,21 +381,47 @@ impl Module for SystemdModule {
         let mut commands = Vec::new();
 
         if let Some(want_enabled) = desired_enabled {
-            if want_enabled {
+            let is_enabled = ctx
+                .ssh
+                .exec(&format!("systemctl is-enabled {} 2>/dev/null", unit))
+                .await?;
+            let enabled = is_enabled.stdout.trim() == "enabled";
+            if want_enabled && !enabled {
                 commands.push(format!("systemctl enable {}", unit));
-            } else {
+            } else if !want_enabled && enabled {
                 commands.push(format!("systemctl disable {}", unit));
             }
         }
+
+        let is_active = ctx
+            .ssh
+            .exec(&format!("systemctl is-active {} 2>/dev/null", unit))
+            .await?;
+        let active = is_active.stdout.trim() == "active";
 
         match desired_state {
             "started" if file_changed => {
                 commands.push(format!("systemctl restart {}", unit));
             }
-            "started" => commands.push(format!("systemctl start {}", unit)),
-            "stopped" => commands.push(format!("systemctl stop {}", unit)),
-            "restarted" => commands.push(format!("systemctl restart {}", unit)),
-            _ => unreachable!(),
+            "started" if !active => {
+                commands.push(format!("systemctl start {}", unit));
+            }
+            "stopped" if active => {
+                commands.push(format!("systemctl stop {}", unit));
+            }
+            "restarted" => {
+                commands.push(format!("systemctl restart {}", unit));
+            }
+            _ => {}
+        }
+
+        if commands.is_empty() {
+            return Ok(ModuleResult {
+                changed: false,
+                output: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            });
         }
 
         let combined = commands.join(" && ");
