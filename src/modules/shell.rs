@@ -5,6 +5,27 @@ use async_trait::async_trait;
 
 pub struct ShellModule;
 
+impl ShellModule {
+    fn resolve_command(params: &ModuleParams) -> Result<String, GlideshError> {
+        if let Some(cmd_list) = params.args.get("cmd").and_then(|v| v.as_list()) {
+            if cmd_list.is_empty() {
+                return Err(GlideshError::Module {
+                    module: "shell".to_string(),
+                    message: "cmd list must not be empty".to_string(),
+                });
+            }
+            Ok(cmd_list.join(" && "))
+        } else if !params.resource_name.is_empty() {
+            Ok(params.resource_name.clone())
+        } else {
+            Err(GlideshError::Module {
+                module: "shell".to_string(),
+                message: "shell requires a command (positional argument or cmd list)".to_string(),
+            })
+        }
+    }
+}
+
 #[async_trait]
 impl Module for ShellModule {
     fn name(&self) -> &str {
@@ -13,14 +34,28 @@ impl Module for ShellModule {
 
     async fn check(
         &self,
-        _ctx: &ModuleContext<'_>,
-        _params: &ModuleParams,
+        ctx: &ModuleContext<'_>,
+        params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
-        // Shell commands are always pending — we can't know if they need to run
-        // without running them (they are inherently non-idempotent).
-        Ok(ModuleStatus::Pending {
-            plan: format!("Run: {}", _params.resource_name),
-        })
+        let command = Self::resolve_command(params)?;
+
+        let gate = params.args.get("check").and_then(|v| v.as_str());
+
+        match gate {
+            Some(check_cmd) => {
+                let output = ctx.ssh.exec(check_cmd).await?;
+                if output.exit_code == 0 {
+                    Ok(ModuleStatus::Satisfied)
+                } else {
+                    Ok(ModuleStatus::Pending {
+                        plan: format!("Run: {}", command),
+                    })
+                }
+            }
+            None => Ok(ModuleStatus::Pending {
+                plan: format!("Run: {}", command),
+            }),
+        }
     }
 
     async fn apply(
@@ -28,16 +63,16 @@ impl Module for ShellModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleResult, GlideshError> {
+        let command = Self::resolve_command(params)?;
+
         if ctx.dry_run {
             return Ok(ModuleResult {
                 changed: false,
-                output: format!("[dry-run] Would run: {}", params.resource_name),
+                output: format!("[dry-run] Would run: {}", command),
                 stderr: String::new(),
                 exit_code: 0,
             });
         }
-
-        let command = &params.resource_name;
 
         let max_retries = params
             .args
@@ -53,7 +88,7 @@ impl Module for ShellModule {
         let mut last_output = None;
 
         for attempt in 1..=max_retries {
-            let output = ctx.ssh.exec(command).await?;
+            let output = ctx.ssh.exec(&command).await?;
 
             if output.exit_code == 0 {
                 return Ok(ModuleResult {
