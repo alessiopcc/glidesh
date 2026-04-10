@@ -10,9 +10,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, List, ListItem, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table,
+    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Row, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Table,
 };
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -37,9 +38,13 @@ struct LogsExplorerState {
     view: LogsView,
     runs: Vec<RunEntry>,
     selected_run: usize,
+    run_scroll: usize,
+    selected_runs: HashSet<usize>,
+    confirm_delete: bool,
     current_summary: Option<RunSummaryFile>,
     node_names: Vec<String>,
     selected_node: usize,
+    node_scroll: usize,
     log_lines: Vec<String>,
     log_scroll: usize,
 }
@@ -66,9 +71,13 @@ impl LogsExplorerState {
             view: LogsView::RunList,
             runs,
             selected_run: 0,
+            run_scroll: 0,
+            selected_runs: HashSet::new(),
+            confirm_delete: false,
             current_summary: None,
             node_names: Vec::new(),
             selected_node: 0,
+            node_scroll: 0,
             log_lines: Vec::new(),
             log_scroll: 0,
         }
@@ -170,9 +179,60 @@ impl LogsExplorerState {
             self.log_scroll += page_size;
         }
     }
+
+    fn toggle_selection(&mut self) {
+        if self.view != LogsView::RunList || self.runs.is_empty() {
+            return;
+        }
+        if self.selected_runs.contains(&self.selected_run) {
+            self.selected_runs.remove(&self.selected_run);
+        } else {
+            self.selected_runs.insert(self.selected_run);
+        }
+        // Move down after toggling for faster multi-select
+        if self.selected_run < self.runs.len() - 1 {
+            self.selected_run += 1;
+        }
+    }
+
+    fn runs_to_delete(&self) -> Vec<usize> {
+        if self.selected_runs.is_empty() {
+            // Delete the currently highlighted run
+            if self.selected_run < self.runs.len() {
+                vec![self.selected_run]
+            } else {
+                vec![]
+            }
+        } else {
+            let mut indices: Vec<usize> = self.selected_runs.iter().copied().collect();
+            indices.sort();
+            indices
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        let mut indices = self.runs_to_delete();
+        // Remove in reverse order so indices stay valid
+        indices.sort();
+        indices.reverse();
+        for idx in indices {
+            if idx < self.runs.len() {
+                let _ = storage::delete_run(&self.runs[idx].path);
+                self.runs.remove(idx);
+            }
+        }
+        self.selected_runs.clear();
+        self.confirm_delete = false;
+        // Fix selected_run if it's now out of bounds
+        if !self.runs.is_empty() {
+            self.selected_run = self.selected_run.min(self.runs.len() - 1);
+        } else {
+            self.selected_run = 0;
+        }
+    }
 }
 
-fn render(frame: &mut Frame, state: &LogsExplorerState) {
+fn render(frame: &mut Frame, state: &mut LogsExplorerState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -185,14 +245,70 @@ fn render(frame: &mut Frame, state: &LogsExplorerState) {
     }
 
     render_footer(frame, chunks[1], state);
+
+    if state.confirm_delete {
+        render_confirm_dialog(frame, state);
+    }
 }
 
-fn render_run_list(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
-    let items: Vec<ListItem> = state
-        .runs
+fn render_confirm_dialog(frame: &mut Frame, state: &LogsExplorerState) {
+    let count = state.runs_to_delete().len();
+    let msg = format!(
+        " Delete {} run{}? This cannot be undone. (y/n) ",
+        count,
+        if count == 1 { "" } else { "s" }
+    );
+    let width = (msg.len() as u16 + 4).min(frame.area().width);
+    let height = 3;
+    let area = centered_rect(width, height, frame.area());
+
+    frame.render_widget(Clear, area);
+    let dialog = Paragraph::new(Line::from(vec![Span::styled(
+        msg,
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Red))
+            .title(" Confirm Delete "),
+    );
+    frame.render_widget(dialog, area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+/// Adjust `scroll` so that `selected` is always visible within `visible` rows.
+fn ensure_visible(scroll: &mut usize, selected: usize, visible: usize) {
+    if visible == 0 {
+        return;
+    }
+    if selected < *scroll {
+        *scroll = selected;
+    } else if selected >= *scroll + visible {
+        *scroll = selected - visible + 1;
+    }
+}
+
+fn render_run_list(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState) {
+    let selection_count = state.selected_runs.len();
+    let visible_height = area.height.saturating_sub(2) as usize; // borders
+    ensure_visible(&mut state.run_scroll, state.selected_run, visible_height);
+    let offset = state.run_scroll;
+    let end = (offset + visible_height).min(state.runs.len());
+
+    let items: Vec<ListItem> = state.runs[offset..end]
         .iter()
         .enumerate()
-        .map(|(i, run)| {
+        .map(|(vi, run)| {
+            let i = offset + vi;
             let snippet = if let Some(ref summary) = run.summary {
                 let node_count = summary.nodes.len();
                 let ok = summary.nodes.values().filter(|n| n.status == "ok").count();
@@ -206,31 +322,66 @@ fn render_run_list(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
                 "  (no summary)".to_string()
             };
 
+            let is_selected = state.selected_runs.contains(&i);
+            let marker = if is_selected { "[x] " } else { "[ ] " };
+
             let style = if i == state.selected_run {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
             };
 
+            let marker_style = if is_selected {
+                style.fg(COLOR_ACCENT)
+            } else {
+                style.fg(Color::DarkGray)
+            };
+
             ListItem::new(Line::from(vec![
+                Span::styled(marker, marker_style),
                 Span::styled(&run.name, style),
                 Span::styled(snippet, style.fg(Color::DarkGray)),
             ]))
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_BORDER))
-            .title(" Runs (newest first) "),
-    );
+    let title = if selection_count > 0 {
+        format!(
+            " Runs (newest first) \u{2014} {} selected ",
+            selection_count
+        )
+    } else {
+        " Runs (newest first) ".to_string()
+    };
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(COLOR_BORDER))
+        .title(title);
+
+    let list = List::new(items).block(block);
     frame.render_widget(list, area);
+
+    if state.runs.len() > visible_height {
+        let scrollbar_area = Rect {
+            x: area.x + area.width - 1,
+            y: area.y + 1,
+            width: 1,
+            height: area.height.saturating_sub(2),
+        };
+        let mut scrollbar_state =
+            ScrollbarState::new(state.runs.len().saturating_sub(visible_height)).position(offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("\u{25b2}"))
+            .end_symbol(Some("\u{25bc}"))
+            .track_symbol(Some("\u{2591}"))
+            .thumb_symbol("\u{2588}");
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
-fn render_run_detail(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
+fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState) {
     let run = &state.runs[state.selected_run];
 
     let chunks = Layout::default()
@@ -268,11 +419,17 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
         )
         .bottom_margin(0);
 
-    let rows: Vec<Row> = state
-        .node_names
+    // 2 for border, 1 for header row
+    let visible_nodes = chunks[1].height.saturating_sub(3) as usize;
+    ensure_visible(&mut state.node_scroll, state.selected_node, visible_nodes);
+    let node_offset = state.node_scroll;
+    let node_end = (node_offset + visible_nodes).min(state.node_names.len());
+
+    let rows: Vec<Row> = state.node_names[node_offset..node_end]
         .iter()
         .enumerate()
-        .map(|(i, name)| {
+        .map(|(vi, name)| {
+            let i = node_offset + vi;
             let node_summary: Option<&NodeSummary> = state
                 .current_summary
                 .as_ref()
@@ -350,6 +507,24 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
     );
 
     frame.render_widget(table, chunks[1]);
+
+    if state.node_names.len() > visible_nodes {
+        let scrollbar_area = Rect {
+            x: chunks[1].x + chunks[1].width - 1,
+            y: chunks[1].y + 1,
+            width: 1,
+            height: chunks[1].height.saturating_sub(2),
+        };
+        let mut scrollbar_state =
+            ScrollbarState::new(state.node_names.len().saturating_sub(visible_nodes))
+                .position(node_offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("\u{25b2}"))
+            .end_symbol(Some("\u{25bc}"))
+            .track_symbol(Some("\u{2591}"))
+            .thumb_symbol("\u{2588}");
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 fn log_line_style(line: &str) -> Style {
@@ -375,7 +550,7 @@ fn log_line_style(line: &str) -> Style {
     }
 }
 
-fn render_node_log(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
+fn render_node_log(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState) {
     let node_name = &state.node_names[state.selected_node];
     let inner_width = area.width.saturating_sub(3) as usize;
     let visible_height = area.height.saturating_sub(2) as usize;
@@ -436,7 +611,9 @@ fn render_node_log(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
     let text = match state.view {
-        LogsView::RunList => " Enter view run  q quit  \u{2191}\u{2193} navigate",
+        LogsView::RunList => {
+            " Enter view  Space select  d delete  q quit  \u{2191}\u{2193} navigate"
+        }
         LogsView::RunDetail => " Enter view log  Esc back  q quit  \u{2191}\u{2193} navigate",
         LogsView::NodeLog => {
             " Esc back  q quit  \u{2191}\u{2193}/j/k scroll  PgUp/PgDn page  Home/End top/bottom"
@@ -460,13 +637,25 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
     loop {
         let visible_height = terminal.size()?.height.saturating_sub(3) as usize;
 
-        terminal.draw(|f| render(f, &state))?;
+        terminal.draw(|f| render(f, &mut state))?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                if state.confirm_delete {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            state.delete_selected();
+                        }
+                        _ => {
+                            state.confirm_delete = false;
+                        }
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -475,6 +664,12 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
                         LogsView::RunDetail => state.enter_node_log(),
                         LogsView::NodeLog => {}
                     },
+                    KeyCode::Char(' ') => state.toggle_selection(),
+                    KeyCode::Char('d') | KeyCode::Delete => {
+                        if state.view == LogsView::RunList && !state.runs.is_empty() {
+                            state.confirm_delete = true;
+                        }
+                    }
                     KeyCode::Esc | KeyCode::Backspace => state.go_back(),
                     KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),

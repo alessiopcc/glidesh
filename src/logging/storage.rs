@@ -63,3 +63,8 @@ pub fn read_node_log(run_dir: &Path, node: &str) -> Result<String, GlideshError>
     let content = fs::read_to_string(&path)?;
     Ok(content)
 }
+
+pub fn delete_run(run_dir: &Path) -> Result<(), GlideshError> {
+    fs::remove_dir_all(run_dir)?;
+    Ok(())
+}
