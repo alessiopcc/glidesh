@@ -651,7 +651,7 @@ plan "test" {
         let fp = parse_plan(input).unwrap();
         let task = &fp.steps()[0].tasks[0];
         assert_eq!(task.register, Some("available_disks".to_string()));
-        assert!(task.args.get("register").is_none());
+        assert!(!task.args.contains_key("register"));
     }
 
     #[test]
@@ -678,7 +678,7 @@ plan "test" {
         assert_eq!(task.module, "shell");
         assert!(task.resource.contains("lsblk"));
         assert_eq!(task.register, Some("available_disks".to_string()));
-        assert!(task.args.get("register").is_none());
+        assert!(!task.args.contains_key("register"));
     }
 
     #[test]
@@ -917,7 +917,7 @@ plan "parent" {
         assert_eq!(plan.vars.get("shared").unwrap(), "parent-version");
         // The child's unique var isn't merged into parent.vars
         // (vars merge happens at runtime in node_runner, not in resolve_includes)
-        assert!(plan.vars.get("from-child").is_none());
+        assert!(!plan.vars.contains_key("from-child"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -987,7 +987,7 @@ plan "test" {
 }
 "#;
         let fp = parse_plan(input).unwrap();
-        assert!(fp.vars.get("api-keys").is_none());
+        assert!(!fp.vars.contains_key("api-keys"));
         let keys = fp.structured_vars.get("api-keys").unwrap();
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].get("name").unwrap(), "k1");
@@ -1015,7 +1015,7 @@ plan "test" {
         let fp = parse_plan(input).unwrap();
         assert_eq!(fp.vars.get("simple-var").unwrap(), "hello");
         assert_eq!(fp.vars.get("port").unwrap(), "8080");
-        assert!(fp.vars.get("items").is_none());
+        assert!(!fp.vars.contains_key("items"));
         let items = fp.structured_vars.get("items").unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].get("key").unwrap(), "a");
@@ -1387,5 +1387,31 @@ plan "main" {
         assert_eq!(steps[1].subscribe, vec!["Deploy config"]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_shell_cmd_string() {
+        let input = r#"
+plan "test" {
+    step "Start container" {
+        shell {
+            check "docker ps --filter name=myapp --filter status=running -q | grep -q ."
+            cmd "docker run -d --name myapp nginx:latest"
+        }
+    }
+}
+"#;
+        let plan = parse_plan(input).unwrap();
+        let task = &plan.steps()[0].tasks[0];
+        assert_eq!(task.module, "shell");
+        assert_eq!(task.resource, "");
+        assert_eq!(
+            task.args.get("cmd").unwrap().as_str(),
+            Some("docker run -d --name myapp nginx:latest")
+        );
+        assert_eq!(
+            task.args.get("check").unwrap().as_str(),
+            Some("docker ps --filter name=myapp --filter status=running -q | grep -q .")
+        );
     }
 }

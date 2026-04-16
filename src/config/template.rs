@@ -45,11 +45,7 @@ pub fn render(
 fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, GlideshError> {
     let mut result = template.to_string();
 
-    loop {
-        let Some(for_start) = result.find("${for ") else {
-            break;
-        };
-
+    while let Some(for_start) = result.find("${for ") {
         let header_end =
             result[for_start..]
                 .find('}')
@@ -135,11 +131,7 @@ fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, Glid
 
         for item in items {
             let mut line = body.to_string();
-            // Replace all ${binding.field} references in this iteration
-            loop {
-                let Some(ref_start) = line.find(&binding_prefix) else {
-                    break;
-                };
+            while let Some(ref_start) = line.find(&binding_prefix) {
                 let ref_end =
                     line[ref_start..]
                         .find('}')

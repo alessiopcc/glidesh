@@ -237,10 +237,8 @@ impl SshSession {
                 russh::ChannelMsg::Data { ref data } => {
                     stdout.extend_from_slice(data);
                 }
-                russh::ChannelMsg::ExtendedData { ref data, ext } => {
-                    if ext == 1 {
-                        stderr.extend_from_slice(data);
-                    }
+                russh::ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                    stderr.extend_from_slice(data);
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = exit_status;
@@ -637,13 +635,11 @@ impl SshSession {
                         Some(Event::Paste(text)) => {
                             let _ = channel.data(text.as_bytes()).await;
                         }
-                        Some(Event::Resize(cols, rows)) => {
-                            if (cols, rows) != last_size {
-                                last_size = (cols, rows);
-                                let _ = channel
-                                    .window_change(cols as u32, rows as u32, 0, 0)
-                                    .await;
-                            }
+                        Some(Event::Resize(cols, rows)) if (cols, rows) != last_size => {
+                            last_size = (cols, rows);
+                            let _ = channel
+                                .window_change(cols as u32, rows as u32, 0, 0)
+                                .await;
                         }
                         None => break,
                         _ => {}

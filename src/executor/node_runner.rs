@@ -1,6 +1,6 @@
 use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::template::{TemplateData, interpolate_args};
-use glidesh::config::types::{LoopSource, Plan, ResolvedHost, Step};
+use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step};
 use glidesh::error::GlideshError;
 use glidesh::modules::context::ModuleContext;
 use glidesh::modules::detect::{OsInfo, detect_os};
@@ -250,9 +250,19 @@ impl NodeRunner {
             let interpolated_args = interpolate_args(&task.args, vars)
                 .map_err(|e| (step.name.clone(), e.to_string()))?;
 
+            let mut resource_name = glidesh::config::template::interpolate(&task.resource, vars)
+                .map_err(|e| (step.name.clone(), e.to_string()))?;
+
+            if resource_name.is_empty() {
+                match interpolated_args.get("cmd") {
+                    Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
+                    Some(ParamValue::String(s)) => resource_name = s.clone(),
+                    _ => {}
+                }
+            }
+
             let params = ModuleParams {
-                resource_name: glidesh::config::template::interpolate(&task.resource, vars)
-                    .map_err(|e| (step.name.clone(), e.to_string()))?,
+                resource_name,
                 args: interpolated_args,
             };
 

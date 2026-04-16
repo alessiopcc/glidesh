@@ -81,8 +81,7 @@ async fn test_register_then_loop() {
     vars.remove("item");
 
     assert_eq!(outputs, vec!["alpha", "beta", "gamma"]);
-    // item var should be cleaned up
-    assert!(vars.get("item").is_none());
+    assert!(!vars.contains_key("item"));
 }
 
 /// Test that empty registered output yields zero loop iterations.
