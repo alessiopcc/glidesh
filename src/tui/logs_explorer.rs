@@ -742,10 +742,10 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
                         LogsView::NodeLog => {}
                     },
                     KeyCode::Char(' ') => state.toggle_selection(),
-                    KeyCode::Char('d') | KeyCode::Delete => {
-                        if state.view == LogsView::RunList && !state.runs.is_empty() {
-                            state.confirm_delete = true;
-                        }
+                    KeyCode::Char('d') | KeyCode::Delete
+                        if state.view == LogsView::RunList && !state.runs.is_empty() =>
+                    {
+                        state.confirm_delete = true;
                     }
                     KeyCode::Char('c') if state.view == LogsView::NodeLog => {
                         state.copy_to_clipboard();
@@ -767,15 +767,11 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),
                     KeyCode::PageUp => state.page_up(visible_height),
                     KeyCode::PageDown => state.page_down(visible_height),
-                    KeyCode::Home | KeyCode::Char('g') => {
-                        if state.view == LogsView::NodeLog {
-                            state.log_scroll = 0;
-                        }
+                    KeyCode::Home | KeyCode::Char('g') if state.view == LogsView::NodeLog => {
+                        state.log_scroll = 0;
                     }
-                    KeyCode::End | KeyCode::Char('G') => {
-                        if state.view == LogsView::NodeLog {
-                            state.log_scroll = usize::MAX;
-                        }
+                    KeyCode::End | KeyCode::Char('G') if state.view == LogsView::NodeLog => {
+                        state.log_scroll = usize::MAX;
                     }
                     _ => {}
                 }

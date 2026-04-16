@@ -94,15 +94,13 @@ pub async fn run_tui(
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Enter => {
-                        if s.focus == FocusPanel::Nodes && s.viewing_node.is_none() {
-                            s.enter_node_view();
-                        }
+                    KeyCode::Enter
+                        if s.focus == FocusPanel::Nodes && s.viewing_node.is_none() =>
+                    {
+                        s.enter_node_view();
                     }
-                    KeyCode::Esc => {
-                        if s.viewing_node.is_some() {
-                            s.exit_node_view();
-                        }
+                    KeyCode::Esc if s.viewing_node.is_some() => {
+                        s.exit_node_view();
                     }
                     KeyCode::Tab | KeyCode::BackTab => {
                         s.toggle_focus();
