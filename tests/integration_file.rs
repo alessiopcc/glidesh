@@ -106,7 +106,7 @@ async fn test_file_upload_permissions() {
         .exec("stat -c '%a %U' /root/glidesh-test-perms.txt")
         .await
         .unwrap();
-    let parts: Vec<&str> = stat.stdout.trim().split_whitespace().collect();
+    let parts: Vec<&str> = stat.stdout.split_whitespace().collect();
     assert_eq!(parts[0], "644", "mode should be 644");
     assert_eq!(parts[1], "root", "owner should be root");
 }

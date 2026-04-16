@@ -253,11 +253,11 @@ impl NodeRunner {
             let mut resource_name = glidesh::config::template::interpolate(&task.resource, vars)
                 .map_err(|e| (step.name.clone(), e.to_string()))?;
 
-            // When resource_name is empty (e.g. shell with cmd list), derive a
-            // display name from the cmd arg so logs aren't blank.
             if resource_name.is_empty() {
-                if let Some(ParamValue::List(cmds)) = interpolated_args.get("cmd") {
-                    resource_name = cmds.join(" && ");
+                match interpolated_args.get("cmd") {
+                    Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
+                    Some(ParamValue::String(s)) => resource_name = s.clone(),
+                    _ => {}
                 }
             }
 
