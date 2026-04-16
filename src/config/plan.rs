@@ -1388,4 +1388,30 @@ plan "main" {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_shell_cmd_string() {
+        let input = r#"
+plan "test" {
+    step "Start container" {
+        shell {
+            check "docker ps --filter name=myapp --filter status=running -q | grep -q ."
+            cmd "docker run -d --name myapp nginx:latest"
+        }
+    }
+}
+"#;
+        let plan = parse_plan(input).unwrap();
+        let task = &plan.steps()[0].tasks[0];
+        assert_eq!(task.module, "shell");
+        assert_eq!(task.resource, "");
+        assert_eq!(
+            task.args.get("cmd").unwrap().as_str(),
+            Some("docker run -d --name myapp nginx:latest")
+        );
+        assert_eq!(
+            task.args.get("check").unwrap().as_str(),
+            Some("docker ps --filter name=myapp --filter status=running -q | grep -q .")
+        );
+    }
 }

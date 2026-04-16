@@ -7,20 +7,36 @@ pub struct ShellModule;
 
 impl ShellModule {
     fn resolve_command(params: &ModuleParams) -> Result<String, GlideshError> {
-        if let Some(cmd_list) = params.args.get("cmd").and_then(|v| v.as_list()) {
-            if cmd_list.is_empty() {
-                return Err(GlideshError::Module {
+        if let Some(cmd_val) = params.args.get("cmd") {
+            if let Some(cmd_list) = cmd_val.as_list() {
+                if cmd_list.is_empty() {
+                    return Err(GlideshError::Module {
+                        module: "shell".to_string(),
+                        message: "cmd list must not be empty".to_string(),
+                    });
+                }
+                Ok(cmd_list.join(" && "))
+            } else if let Some(cmd_str) = cmd_val.as_str() {
+                if cmd_str.is_empty() {
+                    return Err(GlideshError::Module {
+                        module: "shell".to_string(),
+                        message: "cmd must not be empty".to_string(),
+                    });
+                }
+                Ok(cmd_str.to_string())
+            } else {
+                Err(GlideshError::Module {
                     module: "shell".to_string(),
-                    message: "cmd list must not be empty".to_string(),
-                });
+                    message: "cmd must be a string or a list of strings".to_string(),
+                })
             }
-            Ok(cmd_list.join(" && "))
         } else if !params.resource_name.is_empty() {
             Ok(params.resource_name.clone())
         } else {
             Err(GlideshError::Module {
                 module: "shell".to_string(),
-                message: "shell requires a command (positional argument or cmd list)".to_string(),
+                message: "shell requires a command (positional argument, cmd string, or cmd list)"
+                    .to_string(),
             })
         }
     }

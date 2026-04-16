@@ -21,7 +21,7 @@ shell "curl -sf http://localhost:8080/health" {
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | *(positional)* | string | The command to execute (alternative to `cmd`) |
-| `cmd` | list | List of commands joined with `&&` (alternative to positional) |
+| `cmd` | string or list | Single command string, or list of commands joined with `&&` (alternative to positional) |
 | `check` | string | Gate command — if it exits 0 the step is skipped (already satisfied) |
 | `retries` | integer | Number of retry attempts on failure |
 | `delay` | integer | Seconds between retries |
@@ -39,9 +39,26 @@ step "Install package" {
 }
 ```
 
-## Multiline commands with `cmd`
+## Using `cmd` instead of positional
 
-For long command sequences, use the `cmd` list instead of a single positional string. The commands are joined with ` && `:
+The `cmd` parameter can be used as an alternative to the positional command string. It accepts either a single string or a list of commands (joined with ` && `).
+
+### Single command
+
+When combined with `check`, this provides a clean block syntax with no positional argument needed:
+
+```kdl
+step "Start valkey" {
+    shell {
+        check "docker ps --filter name=prophet-valkey --filter status=running -q | grep -q ."
+        cmd "docker run -d --name prophet-valkey --network prophet --restart always -p 6379:6379 -v prophet_valkey:/data valkey/valkey:8-alpine"
+    }
+}
+```
+
+### Command list (multiline)
+
+For long command sequences, use a list. The commands are joined with ` && `:
 
 ```kdl
 step "Add deadsnakes PPA" {
