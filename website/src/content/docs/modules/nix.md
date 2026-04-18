@@ -32,11 +32,18 @@ The module dispatches on the `action` parameter. Default is `"install"`.
 
 ### install (default)
 
-Install or remove Nix packages. Uses `nix profile install` with a fallback to `nix-env`.
+Install or remove Nix packages. For the default user profile, uses `nix profile install` with a fallback to `nix-env`. The idempotency check looks at **both** mechanisms, so a package installed via either is treated as satisfied.
 
 ```kdl
 nix "htop" install=#true
 nix "htop" state="absent"
+
+// Install into the multi-user default profile (visible to any user / systemd).
+// Typically requires connecting as root.
+nix "htop" install=#true profile="default"
+
+// Or an explicit profile path
+nix "htop" profile="/nix/var/nix/profiles/custom"
 ```
 
 | Parameter | Type | Description |
@@ -44,10 +51,17 @@ nix "htop" state="absent"
 | *(positional)* | string | Package name |
 | `state` | string | `"present"` (default) or `"absent"` |
 | `install` | boolean | Auto-install Nix runtime if missing |
+| `profile` | string | Target profile: `"user"` (default, `~/.nix-profile`), `"default"` or `"system"` (`/nix/var/nix/profiles/default`), or an explicit path |
+
+:::note
+Non-user profiles (`"default"` / `"system"` / custom path) are written with `nix profile --profile <path>` only — `nix-env` does not support `--profile` the same way. Writing to `/nix/var/nix/profiles/default` typically requires root; either SSH in as root or have your glidesh SSH user be `root`.
+:::
 
 ### shell
 
 Run a command inside an ephemeral Nix shell with specific packages available. Packages are only present for the duration of the command — nothing is permanently installed.
+
+The command is passed to `bash -c` inside the Nix shell, so pipes, redirections, variable expansion, and quoted arguments work as expected:
 
 ```kdl
 nix "python3 -c 'print(42)'" {
@@ -57,12 +71,18 @@ nix "python3 -c 'print(42)'" {
         - "curl"
     }
 }
+
+// Pipes, redirects, and shell syntax are preserved
+nix "curl -sf https://example.com | jq . > /tmp/out.json" {
+    action "shell"
+    packages { - "curl"; - "jq" }
+}
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| *(positional)* | string | Command to run |
-| `packages` | list | Nix packages to make available |
+| *(positional)* | string | Command to run (interpreted by `bash -c`) |
+| `packages` | list | Nix packages to make available. Entries containing `#` are treated as explicit flake refs (e.g. `"github:user/repo#tool"`); bare names become `nixpkgs#<name>`. |
 | `install` | boolean | Auto-install Nix runtime if missing |
 
 ### build
@@ -206,12 +226,12 @@ systemd "mytool" state="started" enabled=#true
 **Pin the store path** (reproducible but requires a unit rewrite on every upgrade) — resolve with `readlink -f` and write the exact `/nix/store/<hash>-mytool-<ver>/bin/mytool` path into the unit.
 
 :::note
-Per-user Nix profiles (under `$HOME/.nix-profile`) are only visible to that user. If your systemd service runs as `root`, either install into the multi-user default profile (`/nix/var/nix/profiles/default`) or set `User=<installing-user>` on the service.
+Per-user Nix profiles (under `$HOME/.nix-profile`) are only visible to that user. If your systemd service runs as `root`, install into the multi-user default profile with `profile="default"` (requires root SSH), or set `User=<installing-user>` on the service.
 :::
 
 ## Idempotency
 
-- **install:** Checks if the package is already installed before acting.
+- **install:** Checks if the package is already installed before acting. For the user profile the check matches either a `nix profile` or a legacy `nix-env` install; for a non-user profile (`profile="default"` / custom path) only the profile manifest is consulted.
 - **shell:** Always runs (imperative command).
 - **build:** Always rebuilds (cannot cheaply determine if the derivation changed).
 - **channel:** Checks if the channel already exists.
