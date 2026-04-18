@@ -1,5 +1,3 @@
-#![allow(clippy::needless_return, clippy::collapsible_match)]
-
 use crate::tui::tunnel_store::{self, SavedTunnel};
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -113,6 +111,25 @@ impl TunnelEntry {
             .as_ref()
             .map(|k| k.accepts().load(Ordering::Relaxed))
             .unwrap_or(0)
+    }
+
+    fn from_saved(
+        spec: &SavedTunnel,
+        via_host_name: String,
+        status: String,
+        kind: Option<TunnelKind>,
+    ) -> Self {
+        Self {
+            direction: spec.direction,
+            via_host_name,
+            local_port: spec.local_port,
+            remote_host: spec.remote_host.clone(),
+            remote_port: spec.remote_port,
+            remote_bind_addr: spec.bind_addr.clone(),
+            saved: true,
+            status,
+            kind,
+        }
     }
 }
 
@@ -311,48 +328,25 @@ pub async fn run(
     for spec in saved {
         let host_idx = state.hosts.iter().position(|h| h.name == spec.via);
         let Some(host_idx) = host_idx else {
-            state.tunnels.push(TunnelEntry {
-                direction: spec.direction,
-                via_host_name: spec.via.clone(),
-                local_port: spec.local_port,
-                remote_host: spec.remote_host.clone(),
-                remote_port: spec.remote_port,
-                remote_bind_addr: spec.bind_addr.clone(),
-                saved: true,
-                status: format!("Host '{}' not in inventory", spec.via),
-                kind: None,
-            });
+            state.tunnels.push(TunnelEntry::from_saved(
+                &spec,
+                spec.via.clone(),
+                format!("Host '{}' not in inventory", spec.via),
+                None,
+            ));
             continue;
         };
         let host = state.hosts[host_idx].clone();
-        match open_tunnel(&pool, &host, &spec).await {
-            Ok(kind) => {
-                state.tunnels.push(TunnelEntry {
-                    direction: spec.direction,
-                    via_host_name: host.name.clone(),
-                    local_port: spec.local_port,
-                    remote_host: spec.remote_host.clone(),
-                    remote_port: spec.remote_port,
-                    remote_bind_addr: spec.bind_addr.clone(),
-                    saved: true,
-                    status: "active".to_string(),
-                    kind: Some(kind),
-                });
-            }
-            Err(e) => {
-                state.tunnels.push(TunnelEntry {
-                    direction: spec.direction,
-                    via_host_name: host.name.clone(),
-                    local_port: spec.local_port,
-                    remote_host: spec.remote_host.clone(),
-                    remote_port: spec.remote_port,
-                    remote_bind_addr: spec.bind_addr.clone(),
-                    saved: true,
-                    status: format!("error: {}", e),
-                    kind: None,
-                });
-            }
-        }
+        let (status, kind) = match open_tunnel(&pool, &host, &spec).await {
+            Ok(kind) => ("active".to_string(), Some(kind)),
+            Err(e) => (format!("error: {}", e), None),
+        };
+        state.tunnels.push(TunnelEntry::from_saved(
+            &spec,
+            host.name.clone(),
+            status,
+            kind,
+        ));
     }
 
     terminal::enable_raw_mode()?;
@@ -430,21 +424,18 @@ async fn event_loop(
         }
 
         // Global keys.
+        let quit_requested = matches!(key.code, KeyCode::Char('q'))
+            || (matches!(key.code, KeyCode::Char('c'))
+                && key.modifiers.contains(KeyModifiers::CONTROL));
+        if quit_requested {
+            if state.tunnels.iter().any(|t| t.kind.is_some()) {
+                state.confirm_quit = true;
+            } else {
+                return Ok(());
+            }
+            continue;
+        }
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if state.tunnels.iter().any(|t| t.kind.is_some()) {
-                    state.confirm_quit = true;
-                } else {
-                    return Ok(());
-                }
-            }
-            KeyCode::Char('q') => {
-                if state.tunnels.iter().any(|t| t.kind.is_some()) {
-                    state.confirm_quit = true;
-                } else {
-                    return Ok(());
-                }
-            }
             KeyCode::Tab => {
                 state.focus = match state.focus {
                     Focus::Tree => Focus::Tunnels,
@@ -468,15 +459,11 @@ async fn handle_tree_key(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> io::Result<()> {
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            if state.cursor > 0 {
-                state.cursor -= 1;
-            }
+        KeyCode::Up | KeyCode::Char('k') if state.cursor > 0 => {
+            state.cursor -= 1;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if state.cursor + 1 < state.rows.len() {
-                state.cursor += 1;
-            }
+        KeyCode::Down | KeyCode::Char('j') if state.cursor + 1 < state.rows.len() => {
+            state.cursor += 1;
         }
         KeyCode::Left => {
             if let Some(TreeRow::Group(gi)) = state.rows.get(state.cursor) {
@@ -561,15 +548,14 @@ async fn handle_tree_key(
             }
         }
         KeyCode::Char('t') => {
-            let Some(host_idx) = state.current_host_idx() else {
+            if state.current_host_idx().is_none() {
                 state.set_flash("move cursor to a host to open a tunnel");
                 return Ok(());
-            };
+            }
             if state.selection.len() > 1 {
                 state.set_flash("tunnels require a single host (clear selection with Esc)");
                 return Ok(());
             }
-            let _ = host_idx;
             state.dialog = Some(TunnelDialog::default());
         }
         KeyCode::Char('r') => {
@@ -647,15 +633,11 @@ async fn run_plan(
 
 async fn handle_tunnels_key(state: &mut ConsoleState, key: KeyEvent) {
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            if state.tunnel_cursor > 0 {
-                state.tunnel_cursor -= 1;
-            }
+        KeyCode::Up | KeyCode::Char('k') if state.tunnel_cursor > 0 => {
+            state.tunnel_cursor -= 1;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if state.tunnel_cursor + 1 < state.tunnels.len() {
-                state.tunnel_cursor += 1;
-            }
+        KeyCode::Down | KeyCode::Char('j') if state.tunnel_cursor + 1 < state.tunnels.len() => {
+            state.tunnel_cursor += 1;
         }
         KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d') | KeyCode::Char('x') => {
             if let Some(t) = state.tunnels.get(state.tunnel_cursor) {
@@ -679,7 +661,6 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
     match key.code {
         KeyCode::Esc => {
             state.dialog = None;
-            return;
         }
         KeyCode::Tab => {
             dialog.field = match dialog.field {
@@ -690,7 +671,6 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                 DialogField::Reverse => DialogField::Save,
                 DialogField::Save => DialogField::LocalPort,
             };
-            return;
         }
         KeyCode::BackTab => {
             dialog.field = match dialog.field {
@@ -701,7 +681,6 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                 DialogField::Reverse => DialogField::BindAddr,
                 DialogField::Save => DialogField::Reverse,
             };
-            return;
         }
         KeyCode::Char(' ') if matches!(dialog.field, DialogField::Reverse | DialogField::Save) => {
             match dialog.field {
@@ -709,7 +688,6 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                 DialogField::Save => dialog.save = !dialog.save,
                 _ => {}
             }
-            return;
         }
         KeyCode::Enter => {
             let local_port: u16 = match dialog.local_port.trim().parse() {
@@ -749,14 +727,11 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
 
             // Release mut borrow on dialog before touching state.
             let _ = dialog;
-            let host_idx = match state.current_host_idx() {
-                Some(i) => i,
-                None => {
-                    if let Some(d) = state.dialog.as_mut() {
-                        d.error = Some("cursor not on a host".to_string());
-                    }
-                    return;
+            let Some(host_idx) = state.current_host_idx() else {
+                if let Some(d) = state.dialog.as_mut() {
+                    d.error = Some("cursor not on a host".to_string());
                 }
+                return;
             };
             let host = state.hosts[host_idx].clone();
             let spec = SavedTunnel {
@@ -795,43 +770,27 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                     }
                 }
             }
-            return;
         }
-        KeyCode::Backspace => {
-            match dialog.field {
-                DialogField::LocalPort => {
-                    dialog.local_port.pop();
-                }
-                DialogField::RemoteHost => {
-                    dialog.remote_host.pop();
-                }
-                DialogField::RemotePort => {
-                    dialog.remote_port.pop();
-                }
-                DialogField::BindAddr => {
-                    dialog.bind_addr.pop();
-                }
-                _ => {}
-            }
-            return;
-        }
-        KeyCode::Char(c) => match dialog.field {
+        KeyCode::Backspace => match dialog.field {
             DialogField::LocalPort => {
-                if c.is_ascii_digit() {
-                    dialog.local_port.push(c);
-                }
+                dialog.local_port.pop();
             }
             DialogField::RemoteHost => {
-                dialog.remote_host.push(c);
+                dialog.remote_host.pop();
             }
             DialogField::RemotePort => {
-                if c.is_ascii_digit() {
-                    dialog.remote_port.push(c);
-                }
+                dialog.remote_port.pop();
             }
             DialogField::BindAddr => {
-                dialog.bind_addr.push(c);
+                dialog.bind_addr.pop();
             }
+            _ => {}
+        },
+        KeyCode::Char(c) => match dialog.field {
+            DialogField::LocalPort if c.is_ascii_digit() => dialog.local_port.push(c),
+            DialogField::RemoteHost => dialog.remote_host.push(c),
+            DialogField::RemotePort if c.is_ascii_digit() => dialog.remote_port.push(c),
+            DialogField::BindAddr => dialog.bind_addr.push(c),
             _ => {}
         },
         _ => {}
