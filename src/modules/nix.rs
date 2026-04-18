@@ -65,6 +65,102 @@ impl NixModule {
             .unwrap_or("install")
     }
 
+    /// POSIX single-quote escape: wrap in `'…'`, replacing embedded `'` with `'\''`.
+    fn shell_escape(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    /// Resolve the `profile=` parameter to a `--profile <path>` fragment (with
+    /// leading space), or empty for the default user profile.
+    ///
+    /// Accepted values:
+    /// - `"user"` (default, or missing) → empty string (user profile `~/.nix-profile`)
+    /// - `"default"` or `"system"` → `/nix/var/nix/profiles/default`
+    /// - any other string → treated as an explicit profile path
+    fn profile_arg(params: &ModuleParams) -> String {
+        let profile = params
+            .args
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user");
+        match profile {
+            "user" => String::new(),
+            "default" | "system" => " --profile /nix/var/nix/profiles/default".to_string(),
+            other => format!(" --profile {}", Self::shell_escape(other)),
+        }
+    }
+
+    /// Build the check command for `action="install"`.
+    ///
+    /// For the user profile (default), match either a `nix profile` install *or*
+    /// a legacy `nix-env` install — either is a satisfactory "installed" state
+    /// and avoids the false-Pending that older versions of this module produced
+    /// when apply used `nix profile` but check only looked at `nix-env`.
+    ///
+    /// For a non-user profile, only `nix profile` is applicable (`nix-env`
+    /// doesn't accept `--profile`), so we check only that.
+    fn build_check_install_cmd(package: &str, profile_arg: &str) -> String {
+        let pkg_q = Self::shell_escape(package);
+        if profile_arg.is_empty() {
+            format!(
+                "nix profile list 2>/dev/null | grep -qw {pkg} || nix-env -q {pkg} 2>/dev/null | grep -qw {pkg}",
+                pkg = pkg_q
+            )
+        } else {
+            format!(
+                "nix profile list{profile} 2>/dev/null | grep -qw {pkg}",
+                profile = profile_arg,
+                pkg = pkg_q
+            )
+        }
+    }
+
+    /// Build the install/remove command for `action="install"`.
+    ///
+    /// For the user profile, try `nix profile` first and fall back to `nix-env`
+    /// (legacy). For a non-user profile, only `nix profile` is used (`nix-env`
+    /// doesn't support `--profile`).
+    fn build_apply_install_cmd(package: &str, desired_state: &str, profile_arg: &str) -> String {
+        let pkg_q = Self::shell_escape(package);
+        let flake_ref = Self::shell_escape(&format!("nixpkgs#{}", package));
+        let nix_env_attr = Self::shell_escape(&format!("nixpkgs.{}", package));
+        let is_user = profile_arg.is_empty();
+
+        match desired_state {
+            "present" => {
+                if is_user {
+                    format!(
+                        "nix profile install {flake} 2>/dev/null || nix-env -iA {attr}",
+                        flake = flake_ref,
+                        attr = nix_env_attr
+                    )
+                } else {
+                    format!(
+                        "nix profile install{profile} {flake}",
+                        profile = profile_arg,
+                        flake = flake_ref
+                    )
+                }
+            }
+            "absent" => {
+                if is_user {
+                    format!(
+                        "nix profile remove {flake} 2>/dev/null || nix-env -e {pkg}",
+                        flake = flake_ref,
+                        pkg = pkg_q
+                    )
+                } else {
+                    format!(
+                        "nix profile remove{profile} {flake}",
+                        profile = profile_arg,
+                        flake = flake_ref
+                    )
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
     async fn check_install(
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
@@ -76,10 +172,8 @@ impl NixModule {
             .and_then(|v| v.as_str())
             .unwrap_or("present");
 
-        let check_cmd = format!(
-            "nix-env -q '{}' 2>/dev/null | grep -qw '{}'",
-            package, package
-        );
+        let profile_arg = Self::profile_arg(params);
+        let check_cmd = Self::build_check_install_cmd(package, &profile_arg);
         let output = ctx.ssh.exec(&check_cmd).await?;
         let is_installed = output.exit_code == 0;
 
@@ -108,6 +202,13 @@ impl NixModule {
             .and_then(|v| v.as_str())
             .unwrap_or("present");
 
+        if !matches!(desired_state, "present" | "absent") {
+            return Err(GlideshError::Module {
+                module: "nix".to_string(),
+                message: format!("Unknown state: {}", desired_state),
+            });
+        }
+
         if ctx.dry_run {
             return Ok(ModuleResult {
                 changed: false,
@@ -117,27 +218,8 @@ impl NixModule {
             });
         }
 
-        let cmd = match desired_state {
-            "present" => {
-                // Try nix profile first, fall back to nix-env
-                format!(
-                    "nix profile install 'nixpkgs#{}' 2>/dev/null || nix-env -iA nixpkgs.{}",
-                    package, package
-                )
-            }
-            "absent" => {
-                format!(
-                    "nix profile remove 'nixpkgs#{}' 2>/dev/null || nix-env -e '{}'",
-                    package, package
-                )
-            }
-            _ => {
-                return Err(GlideshError::Module {
-                    module: "nix".to_string(),
-                    message: format!("Unknown state: {}", desired_state),
-                });
-            }
-        };
+        let profile_arg = Self::profile_arg(params);
+        let cmd = Self::build_apply_install_cmd(package, desired_state, &profile_arg);
 
         let output = ctx.ssh.exec(&cmd).await?;
 
@@ -168,6 +250,32 @@ impl NixModule {
         })
     }
 
+    /// Build the `nix shell … --command bash -c '<cmd>'` string for `action="shell"`.
+    ///
+    /// Wrapping the user command in `bash -c` keeps multi-word commands, pipes,
+    /// redirections, and quoted arguments intact — the earlier implementation
+    /// concatenated after `--command` without escaping, which only worked for
+    /// trivial single-word invocations.
+    fn build_shell_cmd(command: &str, packages: &[String]) -> String {
+        let pkg_args: Vec<String> = packages
+            .iter()
+            .map(|p| {
+                let flake_ref = if p.contains('#') {
+                    p.clone()
+                } else {
+                    format!("nixpkgs#{}", p)
+                };
+                Self::shell_escape(&flake_ref)
+            })
+            .collect();
+
+        format!(
+            "nix shell {} --command bash -c {}",
+            pkg_args.join(" "),
+            Self::shell_escape(command)
+        )
+    }
+
     async fn apply_shell(
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
@@ -192,18 +300,7 @@ impl NixModule {
             });
         }
 
-        let pkg_args: Vec<String> = packages
-            .iter()
-            .map(|p| {
-                if p.contains('#') {
-                    p.clone()
-                } else {
-                    format!("nixpkgs#{}", p)
-                }
-            })
-            .collect();
-
-        let cmd = format!("nix shell {} --command {}", pkg_args.join(" "), command);
+        let cmd = Self::build_shell_cmd(command, packages);
 
         let output = ctx.ssh.exec(&cmd).await?;
 
@@ -578,5 +675,159 @@ mod tests {
             args,
         };
         assert_eq!(NixModule::get_action(&params), "shell");
+    }
+
+    fn params_with(args: &[(&str, crate::config::types::ParamValue)]) -> ModuleParams {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in args {
+            map.insert((*k).to_string(), v.clone());
+        }
+        ModuleParams {
+            resource_name: String::new(),
+            args: map,
+        }
+    }
+
+    #[test]
+    fn shell_escape_wraps_in_single_quotes() {
+        assert_eq!(NixModule::shell_escape("ripgrep"), "'ripgrep'");
+    }
+
+    #[test]
+    fn shell_escape_escapes_embedded_quotes() {
+        assert_eq!(NixModule::shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn profile_arg_default_is_user_profile() {
+        let p = params_with(&[]);
+        assert_eq!(NixModule::profile_arg(&p), "");
+    }
+
+    #[test]
+    fn profile_arg_user_is_empty() {
+        let p = params_with(&[(
+            "profile",
+            crate::config::types::ParamValue::String("user".to_string()),
+        )]);
+        assert_eq!(NixModule::profile_arg(&p), "");
+    }
+
+    #[test]
+    fn profile_arg_default_maps_to_system_path() {
+        let p = params_with(&[(
+            "profile",
+            crate::config::types::ParamValue::String("default".to_string()),
+        )]);
+        assert_eq!(
+            NixModule::profile_arg(&p),
+            " --profile /nix/var/nix/profiles/default"
+        );
+    }
+
+    #[test]
+    fn profile_arg_system_alias() {
+        let p = params_with(&[(
+            "profile",
+            crate::config::types::ParamValue::String("system".to_string()),
+        )]);
+        assert_eq!(
+            NixModule::profile_arg(&p),
+            " --profile /nix/var/nix/profiles/default"
+        );
+    }
+
+    #[test]
+    fn profile_arg_custom_path_is_shell_escaped() {
+        let p = params_with(&[(
+            "profile",
+            crate::config::types::ParamValue::String("/opt/my profile".to_string()),
+        )]);
+        assert_eq!(NixModule::profile_arg(&p), " --profile '/opt/my profile'");
+    }
+
+    #[test]
+    fn check_install_user_profile_matches_both_mechanisms() {
+        let cmd = NixModule::build_check_install_cmd("ripgrep", "");
+        assert!(cmd.contains("nix profile list"));
+        assert!(cmd.contains("nix-env -q"));
+        assert!(cmd.contains("'ripgrep'"));
+    }
+
+    #[test]
+    fn check_install_system_profile_only_uses_nix_profile() {
+        let cmd = NixModule::build_check_install_cmd(
+            "ripgrep",
+            " --profile /nix/var/nix/profiles/default",
+        );
+        assert!(cmd.contains("nix profile list --profile /nix/var/nix/profiles/default"));
+        assert!(!cmd.contains("nix-env"));
+    }
+
+    #[test]
+    fn apply_install_user_profile_tries_profile_then_env() {
+        let cmd = NixModule::build_apply_install_cmd("htop", "present", "");
+        assert!(cmd.contains("nix profile install 'nixpkgs#htop'"));
+        assert!(cmd.contains("nix-env -iA 'nixpkgs.htop'"));
+    }
+
+    #[test]
+    fn apply_install_system_profile_uses_profile_flag() {
+        let cmd = NixModule::build_apply_install_cmd(
+            "htop",
+            "present",
+            " --profile /nix/var/nix/profiles/default",
+        );
+        assert_eq!(
+            cmd,
+            "nix profile install --profile /nix/var/nix/profiles/default 'nixpkgs#htop'"
+        );
+        assert!(!cmd.contains("nix-env"));
+    }
+
+    #[test]
+    fn apply_install_absent_user_profile() {
+        let cmd = NixModule::build_apply_install_cmd("htop", "absent", "");
+        assert!(cmd.contains("nix profile remove 'nixpkgs#htop'"));
+        assert!(cmd.contains("nix-env -e 'htop'"));
+    }
+
+    #[test]
+    fn build_shell_cmd_wraps_in_bash_c() {
+        let cmd = NixModule::build_shell_cmd(
+            "echo hello world",
+            &["python3".to_string(), "jq".to_string()],
+        );
+        assert_eq!(
+            cmd,
+            "nix shell 'nixpkgs#python3' 'nixpkgs#jq' --command bash -c 'echo hello world'"
+        );
+    }
+
+    #[test]
+    fn build_shell_cmd_escapes_single_quotes_in_command() {
+        let cmd = NixModule::build_shell_cmd("echo 'hi'", &["coreutils".to_string()]);
+        assert_eq!(
+            cmd,
+            "nix shell 'nixpkgs#coreutils' --command bash -c 'echo '\\''hi'\\'''"
+        );
+    }
+
+    #[test]
+    fn build_shell_cmd_preserves_explicit_flake_refs() {
+        let cmd = NixModule::build_shell_cmd("true", &["github:user/repo#tool".to_string()]);
+        assert!(cmd.contains("'github:user/repo#tool'"));
+        assert!(!cmd.contains("nixpkgs#github:"));
+    }
+
+    #[test]
+    fn build_shell_cmd_preserves_pipes_and_redirects() {
+        let cmd = NixModule::build_shell_cmd(
+            "curl -sf http://x | jq . > /tmp/out",
+            &["curl".to_string(), "jq".to_string()],
+        );
+        // The full command including pipes/redirects lives inside the single-quoted
+        // bash -c argument, so bash (not the outer shell) tokenizes it.
+        assert!(cmd.contains("bash -c 'curl -sf http://x | jq . > /tmp/out'"));
     }
 }
