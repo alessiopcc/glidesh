@@ -1,16 +1,27 @@
 use async_trait::async_trait;
+use russh::Channel;
 use russh::client;
 use ssh_key::PublicKey;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 use super::HostKeyPolicy;
+
+pub type ForwardRegistry =
+    Arc<Mutex<HashMap<(String, u16), mpsc::UnboundedSender<Channel<client::Msg>>>>>;
+
+pub fn new_forward_registry() -> ForwardRegistry {
+    Arc::new(Mutex::new(HashMap::new()))
+}
 
 pub struct SshHandler {
     pub host: String,
     pub port: u16,
     pub host_key_policy: HostKeyPolicy,
     pub host_key_error: Arc<Mutex<Option<String>>>,
+    pub forward_registry: ForwardRegistry,
 }
 
 /// Returns the path to the user's known_hosts file.
@@ -103,5 +114,32 @@ impl client::Handler for SshHandler {
                 Ok(false)
             }
         }
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let key = (connected_address.to_string(), connected_port as u16);
+        let tx = self
+            .forward_registry
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&key).cloned());
+        if let Some(tx) = tx {
+            let _ = tx.send(channel);
+        } else {
+            tracing::warn!(
+                "received forwarded-tcpip for {}:{} with no active registration; dropping",
+                connected_address,
+                connected_port
+            );
+        }
+        Ok(())
     }
 }

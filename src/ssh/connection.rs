@@ -1,8 +1,9 @@
 use crate::config::types::ResolvedJumpHost;
 use crate::error::GlideshError;
 use crate::ssh::HostKeyPolicy;
-use crate::ssh::handler::SshHandler;
+use crate::ssh::handler::{ForwardRegistry, SshHandler, new_forward_registry};
 use crossterm::event::{self, Event, KeyModifiers};
+use russh::Channel;
 use russh::client;
 use russh_keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
@@ -11,6 +12,7 @@ use russh_sftp::protocol::OpenFlags;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 fn ssh_config() -> Arc<client::Config> {
     Arc::new(client::Config {
@@ -27,9 +29,10 @@ pub struct CommandOutput {
 }
 
 pub struct SshSession {
-    handle: client::Handle<SshHandler>,
+    handle: tokio::sync::Mutex<client::Handle<SshHandler>>,
     host: String,
-    _jump_handle: Option<client::Handle<SshHandler>>,
+    _jump_handle: tokio::sync::Mutex<Option<client::Handle<SshHandler>>>,
+    forward_registry: ForwardRegistry,
 }
 
 impl SshSession {
@@ -42,11 +45,13 @@ impl SshSession {
     ) -> Result<Self, GlideshError> {
         let config = ssh_config();
         let host_key_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let forward_registry = new_forward_registry();
         let handler = SshHandler {
             host: host.to_string(),
             port,
             host_key_policy,
             host_key_error: Arc::clone(&host_key_error),
+            forward_registry: Arc::clone(&forward_registry),
         };
 
         tracing::debug!("Connecting to {}:{}", host, port);
@@ -82,9 +87,10 @@ impl SshSession {
         }
 
         Ok(SshSession {
-            handle,
+            handle: tokio::sync::Mutex::new(handle),
             host: host.to_string(),
-            _jump_handle: None,
+            _jump_handle: tokio::sync::Mutex::new(None),
+            forward_registry,
         })
     }
 
@@ -103,11 +109,13 @@ impl SshSession {
     ) -> Result<Self, GlideshError> {
         let jump_config = ssh_config();
         let jump_key_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let jump_forward_registry = new_forward_registry();
         let jump_handler = SshHandler {
             host: jump.address.clone(),
             port: jump.port,
             host_key_policy,
             host_key_error: Arc::clone(&jump_key_error),
+            forward_registry: Arc::clone(&jump_forward_registry),
         };
 
         tracing::debug!("Connecting to jump host {}:{}", jump.address, jump.port);
@@ -162,11 +170,13 @@ impl SshSession {
 
         let target_config = ssh_config();
         let target_key_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let forward_registry = new_forward_registry();
         let target_handler = SshHandler {
             host: host.to_string(),
             port,
             host_key_policy,
             host_key_error: Arc::clone(&target_key_error),
+            forward_registry: Arc::clone(&forward_registry),
         };
 
         let mut handle = client::connect_stream(target_config, stream, target_handler)
@@ -202,20 +212,91 @@ impl SshSession {
         }
 
         Ok(SshSession {
-            handle,
+            handle: tokio::sync::Mutex::new(handle),
             host: host.to_string(),
-            _jump_handle: Some(jump_handle),
+            _jump_handle: tokio::sync::Mutex::new(Some(jump_handle)),
+            forward_registry,
         })
     }
 
+    /// Open an outgoing TCP forward channel through this SSH session (-L style source side).
+    pub async fn open_direct_tcpip(
+        &self,
+        remote_host: &str,
+        remote_port: u32,
+        originator_addr: &str,
+        originator_port: u32,
+    ) -> Result<Channel<client::Msg>, GlideshError> {
+        let guard = self.handle.lock().await;
+        guard
+            .channel_open_direct_tcpip(remote_host, remote_port, originator_addr, originator_port)
+            .await
+            .map_err(|e| GlideshError::SshChannel {
+                message: format!(
+                    "Failed to open direct-tcpip to {}:{} via {}: {}",
+                    remote_host, remote_port, self.host, e
+                ),
+            })
+    }
+
+    /// Request the remote sshd to bind `bind_addr:bind_port` and forward incoming connections
+    /// back to us as SSH channels. Returns a receiver that yields each incoming channel.
+    pub async fn tcpip_forward(
+        &self,
+        bind_addr: &str,
+        bind_port: u16,
+    ) -> Result<mpsc::UnboundedReceiver<Channel<client::Msg>>, GlideshError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        {
+            let mut reg = self
+                .forward_registry
+                .lock()
+                .map_err(|_| GlideshError::Other("forward registry mutex poisoned".to_string()))?;
+            reg.insert((bind_addr.to_string(), bind_port), tx);
+        }
+
+        let mut guard = self.handle.lock().await;
+        if let Err(e) = guard.tcpip_forward(bind_addr, bind_port as u32).await {
+            drop(guard);
+            if let Ok(mut reg) = self.forward_registry.lock() {
+                reg.remove(&(bind_addr.to_string(), bind_port));
+            }
+            return Err(GlideshError::SshChannel {
+                message: format!(
+                    "tcpip-forward request for {}:{} failed: {}",
+                    bind_addr, bind_port, e
+                ),
+            });
+        }
+        Ok(rx)
+    }
+
+    pub async fn cancel_tcpip_forward(
+        &self,
+        bind_addr: &str,
+        bind_port: u16,
+    ) -> Result<(), GlideshError> {
+        let guard = self.handle.lock().await;
+        let _ = guard
+            .cancel_tcpip_forward(bind_addr, bind_port as u32)
+            .await;
+        drop(guard);
+        if let Ok(mut reg) = self.forward_registry.lock() {
+            reg.remove(&(bind_addr.to_string(), bind_port));
+        }
+        Ok(())
+    }
+
     pub async fn exec(&self, command: &str) -> Result<CommandOutput, GlideshError> {
+        let guard = self.handle.lock().await;
         let mut channel =
-            self.handle
+            guard
                 .channel_open_session()
                 .await
                 .map_err(|e| GlideshError::SshChannel {
                     message: format!("Failed to open channel on {}: {}", self.host, e),
                 })?;
+        drop(guard);
 
         channel
             .exec(true, command)
@@ -255,13 +336,14 @@ impl SshSession {
     }
 
     async fn sftp(&self) -> Result<SftpSession, GlideshError> {
-        let channel =
-            self.handle
-                .channel_open_session()
-                .await
-                .map_err(|e| GlideshError::SshChannel {
-                    message: format!("Failed to open SFTP channel on {}: {}", self.host, e),
-                })?;
+        let guard = self.handle.lock().await;
+        let channel = guard
+            .channel_open_session()
+            .await
+            .map_err(|e| GlideshError::SshChannel {
+                message: format!("Failed to open SFTP channel on {}: {}", self.host, e),
+            })?;
+        drop(guard);
 
         channel
             .request_subsystem(true, "sftp")
@@ -537,13 +619,15 @@ impl SshSession {
     pub async fn interactive_shell(&self) -> Result<u32, GlideshError> {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
+        let guard = self.handle.lock().await;
         let mut channel =
-            self.handle
+            guard
                 .channel_open_session()
                 .await
                 .map_err(|e| GlideshError::SshChannel {
                     message: format!("Failed to open session on {}: {}", self.host, e),
                 })?;
+        drop(guard);
 
         channel
             .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
@@ -655,14 +739,15 @@ impl SshSession {
     }
 
     pub async fn close(self) -> Result<(), GlideshError> {
-        self.handle
+        let handle = self.handle.into_inner();
+        handle
             .disconnect(russh::Disconnect::ByApplication, "session closed", "en")
             .await
             .map_err(|e| GlideshError::SshConnection {
                 message: format!("Error closing connection to {}: {}", self.host, e),
             })?;
 
-        if let Some(jump_handle) = self._jump_handle {
+        if let Some(jump_handle) = self._jump_handle.into_inner() {
             jump_handle
                 .disconnect(russh::Disconnect::ByApplication, "session closed", "en")
                 .await

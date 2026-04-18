@@ -9,7 +9,7 @@ use std::path::PathBuf;
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -25,6 +25,28 @@ pub enum Commands {
 
     /// Open an interactive shell or run a command on target hosts
     Shell(ShellArgs),
+
+    /// Open the interactive connection console (groups, shells, tunnels)
+    Console(ConsoleArgs),
+}
+
+#[derive(Parser, Debug, Default)]
+pub struct ConsoleArgs {
+    /// Path to the inventory file (defaults to ./inventory.kdl)
+    #[arg(short, long)]
+    pub inventory: Option<PathBuf>,
+
+    /// SSH private key path
+    #[arg(short, long)]
+    pub key: Option<PathBuf>,
+
+    /// Skip SSH host key verification
+    #[arg(long)]
+    pub no_host_key_check: bool,
+
+    /// Accept and save new host keys to known_hosts
+    #[arg(long)]
+    pub accept_new_host_key: bool,
 }
 
 #[derive(Parser, Debug)]

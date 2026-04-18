@@ -29,10 +29,12 @@ async fn main() -> miette::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Run(args) => cmd_run(args).await?,
-        Commands::Logs(args) => cmd_logs(args)?,
-        Commands::Validate(args) => cmd_validate(args)?,
-        Commands::Shell(args) => cmd_shell(args).await?,
+        Some(Commands::Run(args)) => cmd_run(args).await?,
+        Some(Commands::Logs(args)) => cmd_logs(args)?,
+        Some(Commands::Validate(args)) => cmd_validate(args)?,
+        Some(Commands::Shell(args)) => cmd_shell(args).await?,
+        Some(Commands::Console(args)) => cmd_console(args).await?,
+        None => cmd_console(cli::ConsoleArgs::default()).await?,
     }
 
     Ok(())
@@ -638,6 +640,63 @@ fn load_key_from_path(
         Arc::new(key_pair),
         hash_alg,
     )?)
+}
+
+async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
+    if !tui::is_tty() {
+        return Err(GlideshError::Other(
+            "`glidesh console` requires a TTY. Use `glidesh run` for scripted execution."
+                .to_string(),
+        ));
+    }
+
+    let inv_path = match args.inventory {
+        Some(p) => p,
+        None => {
+            let default = PathBuf::from("inventory.kdl");
+            if default.exists() {
+                default
+            } else {
+                return Err(GlideshError::Other(
+                    "No inventory file found. Create ./inventory.kdl or pass --inventory <path>."
+                        .to_string(),
+                ));
+            }
+        }
+    };
+
+    let inv_content = std::fs::read_to_string(&inv_path).map_err(|e| {
+        GlideshError::Other(format!(
+            "Failed to read inventory '{}': {}",
+            inv_path.display(),
+            e
+        ))
+    })?;
+    let inventory = config::parse_inventory(&inv_content)?;
+
+    let all_hosts = inventory.resolve_targets(None);
+    if all_hosts.is_empty() {
+        return Err(GlideshError::NoTargets);
+    }
+
+    let key_path = if let Some(ref k) = args.key {
+        expand_tilde(k)
+    } else if let Some(inv_key) = all_hosts.first().and_then(|h| h.vars.get("ssh-key")) {
+        expand_tilde(&PathBuf::from(inv_key))
+    } else {
+        expand_tilde(&default_ssh_key())
+    };
+    let key = load_key_from_path(&key_path)?;
+
+    let host_key_policy = HostKeyPolicy {
+        verify: !args.no_host_key_check,
+        accept_new: args.accept_new_host_key,
+    };
+
+    tui::console::run(&inv_path, &inventory, key, host_key_policy)
+        .await
+        .map_err(|e| GlideshError::Other(format!("Console TUI error: {}", e)))?;
+    Ok(())
 }
 
 async fn cmd_shell(args: cli::ShellArgs) -> Result<(), GlideshError> {
