@@ -332,7 +332,7 @@ impl NixModule {
             .and_then(|v| v.as_str())
             .unwrap_or("result");
 
-        let check_cmd = format!("test -L '{}'", out_link);
+        let check_cmd = format!("test -L {}", Self::shell_escape(out_link));
         let output = ctx.ssh.exec(&check_cmd).await?;
 
         if output.exit_code == 0 {
@@ -368,7 +368,11 @@ impl NixModule {
             });
         }
 
-        let cmd = format!("nix build '{}' -o '{}'", derivation, out_link);
+        let cmd = format!(
+            "nix build {} -o {}",
+            Self::shell_escape(derivation),
+            Self::shell_escape(out_link)
+        );
         let output = ctx.ssh.exec(&cmd).await?;
 
         if output.exit_code != 0 {
@@ -401,8 +405,8 @@ impl NixModule {
             .unwrap_or("present");
 
         let check_cmd = format!(
-            "nix-channel --list 2>/dev/null | grep -qw '{}'",
-            channel_name
+            "nix-channel --list 2>/dev/null | grep -qw {}",
+            Self::shell_escape(channel_name)
         );
         let output = ctx.ssh.exec(&check_cmd).await?;
         let exists = output.exit_code == 0;
@@ -452,9 +456,13 @@ impl NixModule {
                         message: "Channel action with state=\"present\" requires 'url' parameter"
                             .to_string(),
                     })?;
-                format!("nix-channel --add '{}' '{}'", url, channel_name)
+                format!(
+                    "nix-channel --add {} {}",
+                    Self::shell_escape(url),
+                    Self::shell_escape(channel_name)
+                )
             }
-            "absent" => format!("nix-channel --remove '{}'", channel_name),
+            "absent" => format!("nix-channel --remove {}", Self::shell_escape(channel_name)),
             _ => {
                 return Err(GlideshError::Module {
                     module: "nix".to_string(),
@@ -527,9 +535,13 @@ impl NixModule {
         }
 
         let cmd = if let Some(input) = params.args.get("input").and_then(|v| v.as_str()) {
-            format!("cd '{}' && nix flake update '{}'", flake_dir, input)
+            format!(
+                "cd {} && nix flake update {}",
+                Self::shell_escape(flake_dir),
+                Self::shell_escape(input)
+            )
         } else {
-            format!("cd '{}' && nix flake update", flake_dir)
+            format!("cd {} && nix flake update", Self::shell_escape(flake_dir))
         };
 
         let output = ctx.ssh.exec(&cmd).await?;
@@ -575,7 +587,10 @@ impl NixModule {
         }
 
         let cmd = if let Some(older_than) = params.args.get("older-than").and_then(|v| v.as_str()) {
-            format!("nix-collect-garbage --delete-older-than '{}'", older_than)
+            format!(
+                "nix-collect-garbage --delete-older-than {}",
+                Self::shell_escape(older_than)
+            )
         } else {
             "nix-collect-garbage -d".to_string()
         };

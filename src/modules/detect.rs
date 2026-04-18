@@ -1,6 +1,11 @@
 use crate::error::GlideshError;
 use crate::ssh::SshSession;
 
+/// POSIX single-quote escape: wrap in `'…'`, replacing embedded `'` with `'\''`.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OsInfo {
     pub id: String,
@@ -78,7 +83,7 @@ impl PkgManager {
             PkgManager::Nix => {
                 let cmds: Vec<String> = packages
                     .iter()
-                    .map(|p| format!("nix-env -iA nixpkgs.{}", p))
+                    .map(|p| format!("nix-env -iA {}", shell_escape(&format!("nixpkgs.{}", p))))
                     .collect();
                 cmds.join(" && ")
             }
@@ -94,7 +99,10 @@ impl PkgManager {
             PkgManager::Pacman => format!("pacman -R --noconfirm {}", pkgs),
             PkgManager::Apk => format!("apk del {}", pkgs),
             PkgManager::Zypper => format!("zypper remove -y {}", pkgs),
-            PkgManager::Nix => format!("nix-env -e {}", pkgs),
+            PkgManager::Nix => {
+                let escaped: Vec<String> = packages.iter().map(|p| shell_escape(p)).collect();
+                format!("nix-env -e {}", escaped.join(" "))
+            }
         }
     }
 
@@ -109,10 +117,8 @@ impl PkgManager {
             PkgManager::Apk => format!("apk info -e {} >/dev/null 2>&1", package),
             PkgManager::Zypper => format!("rpm -q {} >/dev/null 2>&1", package),
             PkgManager::Nix => {
-                format!(
-                    "nix-env -q '{}' 2>/dev/null | grep -qw '{}'",
-                    package, package
-                )
+                let pkg_q = shell_escape(package);
+                format!("nix-env -q {pkg} 2>/dev/null | grep -qw {pkg}", pkg = pkg_q)
             }
         }
     }
