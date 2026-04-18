@@ -29,10 +29,11 @@ async fn main() -> miette::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Run(args) => cmd_run(args).await?,
-        Commands::Logs(args) => cmd_logs(args)?,
-        Commands::Validate(args) => cmd_validate(args)?,
-        Commands::Shell(args) => cmd_shell(args).await?,
+        Some(Commands::Run(args)) => cmd_run(args).await?,
+        Some(Commands::Logs(args)) => cmd_logs(args)?,
+        Some(Commands::Validate(args)) => cmd_validate(args)?,
+        Some(Commands::Console(args)) => cmd_console(args).await?,
+        None => cmd_console(cli::ConsoleArgs::default()).await?,
     }
 
     Ok(())
@@ -640,95 +641,128 @@ fn load_key_from_path(
     )?)
 }
 
-async fn cmd_shell(args: cli::ShellArgs) -> Result<(), GlideshError> {
+async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
+    let inv_path = match args.inventory {
+        Some(p) => p,
+        None => {
+            let default = PathBuf::from("inventory.kdl");
+            if default.exists() {
+                default
+            } else {
+                return Err(GlideshError::Other(
+                    "No inventory file found. Create ./inventory.kdl or pass --inventory <path>."
+                        .to_string(),
+                ));
+            }
+        }
+    };
+
+    let inv_content = std::fs::read_to_string(&inv_path).map_err(|e| {
+        GlideshError::Other(format!(
+            "Failed to read inventory '{}': {}",
+            inv_path.display(),
+            e
+        ))
+    })?;
+    let inventory = config::parse_inventory(&inv_content)?;
+
     let host_key_policy = HostKeyPolicy {
         verify: !args.no_host_key_check,
         accept_new: args.accept_new_host_key,
     };
 
-    let hosts = resolve_shell_hosts(&args)?;
-    let key = load_shell_key(&args, &hosts)?;
+    let shell_mode = args.target.is_some() || args.command.is_some();
 
-    match (hosts.len(), &args.command) {
-        // Single host + command: run and print output directly
-        (1, Some(command)) => {
-            let host = &hosts[0];
-            let session = connect_host(host, &key, host_key_policy).await?;
-            let output = session.exec(command).await?;
-            if !output.stdout.is_empty() {
-                print!("{}", output.stdout);
+    if shell_mode {
+        let hosts = inventory.resolve_targets(args.target.as_deref());
+        if hosts.is_empty() {
+            return Err(GlideshError::NoTargets);
+        }
+        let key = resolve_key(args.key.as_deref(), hosts.first().map(|h| &h.vars))?;
+
+        match (hosts.len(), &args.command) {
+            (1, Some(command)) => {
+                let host = &hosts[0];
+                let session = connect_host(host, &key, host_key_policy).await?;
+                let output = session.exec(command).await?;
+                if !output.stdout.is_empty() {
+                    print!("{}", output.stdout);
+                }
+                if !output.stderr.is_empty() {
+                    eprint!("{}", output.stderr);
+                }
+                let exit_code = output.exit_code;
+                session.close().await?;
+                if exit_code != 0 {
+                    return Err(GlideshError::SshCommand {
+                        exit_code,
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                    });
+                }
             }
-            if !output.stderr.is_empty() {
-                eprint!("{}", output.stderr);
+            (1, None) => {
+                let host = &hosts[0];
+                eprintln!(
+                    "Opening shell to {}@{}:{}",
+                    host.user, host.address, host.port
+                );
+                let session = connect_host(host, &key, host_key_policy).await?;
+                let exit_code = session.interactive_shell().await?;
+                session.close().await?;
+                if exit_code != 0 {
+                    std::process::exit(exit_code as i32);
+                }
             }
-            let exit_code = output.exit_code;
-            session.close().await?;
-            if exit_code != 0 {
-                return Err(GlideshError::SshCommand {
-                    exit_code,
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                });
+            (_, Some(command)) => {
+                run_command_on_hosts(&hosts, command, &key, host_key_policy, args.concurrency)
+                    .await?;
+            }
+            (_, None) => {
+                tui::run_shell_tui(&hosts, &key, host_key_policy, args.concurrency).await?;
             }
         }
-        // Single host, no command: interactive shell
-        (1, None) => {
-            let host = &hosts[0];
-            eprintln!(
-                "Opening shell to {}@{}:{}",
-                host.user, host.address, host.port
-            );
-            let session = connect_host(host, &key, host_key_policy).await?;
-            let exit_code = session.interactive_shell().await?;
-            session.close().await?;
-            if exit_code != 0 {
-                std::process::exit(exit_code as i32);
-            }
-        }
-        // Multiple hosts + command: run concurrently with prefixed output
-        (_, Some(command)) => {
-            run_command_on_hosts(&hosts, command, &key, host_key_policy, args.concurrency).await?;
-        }
-        // Multiple hosts, no command: interactive TUI shell
-        (_, None) => {
-            tui::run_shell_tui(&hosts, &key, host_key_policy, args.concurrency).await?;
-        }
+        return Ok(());
     }
 
+    if !tui::is_tty() {
+        return Err(GlideshError::Other(
+            "`glidesh console` requires a TTY. Use `glidesh run` or pass --target/--command for scripted execution."
+                .to_string(),
+        ));
+    }
+
+    let all_hosts = inventory.resolve_targets(None);
+    if all_hosts.is_empty() {
+        return Err(GlideshError::NoTargets);
+    }
+    let key_path = resolve_key_path(args.key.as_deref(), all_hosts.first().map(|h| &h.vars));
+    let key = load_key_from_path(&key_path)?;
+
+    tui::console::run(&inv_path, &inventory, key, key_path, host_key_policy)
+        .await
+        .map_err(|e| GlideshError::Other(format!("Console TUI error: {}", e)))?;
     Ok(())
 }
 
-fn resolve_shell_hosts(
-    args: &cli::ShellArgs,
-) -> Result<Vec<config::types::ResolvedHost>, GlideshError> {
-    let inv_content = std::fs::read_to_string(&args.inventory).map_err(|e| {
-        GlideshError::Other(format!(
-            "Failed to read inventory '{}': {}",
-            args.inventory.display(),
-            e
-        ))
-    })?;
-    let inventory = config::parse_inventory(&inv_content)?;
-    let resolved = inventory.resolve_targets(args.target.as_deref());
-
-    if resolved.is_empty() {
-        return Err(GlideshError::NoTargets);
-    }
-    Ok(resolved)
-}
-
-fn load_shell_key(
-    args: &cli::ShellArgs,
-    hosts: &[config::types::ResolvedHost],
-) -> Result<russh_keys::key::PrivateKeyWithHashAlg, GlideshError> {
-    let key_path = if let Some(ref k) = args.key {
+fn resolve_key_path(
+    cli_key: Option<&std::path::Path>,
+    inv_vars: Option<&HashMap<String, String>>,
+) -> PathBuf {
+    if let Some(k) = cli_key {
         expand_tilde(k)
-    } else if let Some(inv_key) = hosts.first().and_then(|h| h.vars.get("ssh-key")) {
+    } else if let Some(inv_key) = inv_vars.and_then(|v| v.get("ssh-key")) {
         expand_tilde(&PathBuf::from(inv_key))
     } else {
         expand_tilde(&default_ssh_key())
-    };
-    load_key_from_path(&key_path)
+    }
+}
+
+fn resolve_key(
+    cli_key: Option<&std::path::Path>,
+    inv_vars: Option<&HashMap<String, String>>,
+) -> Result<russh_keys::key::PrivateKeyWithHashAlg, GlideshError> {
+    load_key_from_path(&resolve_key_path(cli_key, inv_vars))
 }
 
 async fn connect_host(

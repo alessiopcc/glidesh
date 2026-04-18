@@ -1,6 +1,8 @@
+pub mod console;
 pub mod logs_explorer;
 pub mod shell_tui;
 pub mod state;
+pub mod tunnel_store;
 pub mod widgets;
 
 pub use logs_explorer::run_logs_tui;

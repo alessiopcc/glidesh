@@ -27,7 +27,13 @@ export default defineConfig({
 						{ label: 'Logs', slug: 'concepts/logs' },
 					],
 				},
-				{ label: 'CLI Reference', slug: 'cli' },
+				{
+					label: 'CLI Reference',
+					items: [
+						{ label: 'Overview', slug: 'cli' },
+						{ label: 'Console', slug: 'cli/console' },
+					],
+				},
 				{
 					label: 'Modules',
 					items: [
