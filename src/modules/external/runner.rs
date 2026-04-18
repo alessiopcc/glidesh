@@ -453,6 +453,7 @@ mod tests {
                 pkg_manager: crate::modules::detect::PkgManager::Apt,
                 init_system: crate::modules::detect::InitSystem::Systemd,
                 container_runtime: None,
+                nix_installed: false,
             },
             vars: &std::collections::HashMap::new(),
             dry_run: false,

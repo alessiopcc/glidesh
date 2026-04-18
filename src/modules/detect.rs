@@ -9,6 +9,7 @@ pub struct OsInfo {
     pub pkg_manager: PkgManager,
     pub init_system: InitSystem,
     pub container_runtime: Option<ContainerRuntime>,
+    pub nix_installed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -19,6 +20,7 @@ pub enum OsFamily {
     Arch,
     Alpine,
     Suse,
+    NixOS,
     Unknown(String),
 }
 
@@ -31,6 +33,7 @@ pub enum PkgManager {
     Pacman,
     Apk,
     Zypper,
+    Nix,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -57,6 +60,7 @@ impl PkgManager {
             PkgManager::Pacman => "pacman -Sy",
             PkgManager::Apk => "apk update -q",
             PkgManager::Zypper => "zypper refresh -q",
+            PkgManager::Nix => "true",
         }
     }
 
@@ -71,6 +75,13 @@ impl PkgManager {
             PkgManager::Pacman => format!("pacman -S --noconfirm {}", pkgs),
             PkgManager::Apk => format!("apk add {}", pkgs),
             PkgManager::Zypper => format!("zypper install -y {}", pkgs),
+            PkgManager::Nix => {
+                let cmds: Vec<String> = packages
+                    .iter()
+                    .map(|p| format!("nix-env -iA nixpkgs.{}", p))
+                    .collect();
+                cmds.join(" && ")
+            }
         }
     }
 
@@ -83,6 +94,7 @@ impl PkgManager {
             PkgManager::Pacman => format!("pacman -R --noconfirm {}", pkgs),
             PkgManager::Apk => format!("apk del {}", pkgs),
             PkgManager::Zypper => format!("zypper remove -y {}", pkgs),
+            PkgManager::Nix => format!("nix-env -e {}", pkgs),
         }
     }
 
@@ -96,6 +108,12 @@ impl PkgManager {
             PkgManager::Pacman => format!("pacman -Q {} >/dev/null 2>&1", package),
             PkgManager::Apk => format!("apk info -e {} >/dev/null 2>&1", package),
             PkgManager::Zypper => format!("rpm -q {} >/dev/null 2>&1", package),
+            PkgManager::Nix => {
+                format!(
+                    "nix-env -q '{}' 2>/dev/null | grep -qw '{}'",
+                    package, package
+                )
+            }
         }
     }
 }
@@ -124,6 +142,7 @@ pub async fn detect_os(ssh: &SshSession) -> Result<OsInfo, GlideshError> {
     let init_system = detect_init_system(&family);
 
     let container_runtime = detect_container_runtime(ssh).await?;
+    let nix_installed = detect_nix(ssh).await?;
 
     Ok(OsInfo {
         id,
@@ -132,12 +151,15 @@ pub async fn detect_os(ssh: &SshSession) -> Result<OsInfo, GlideshError> {
         pkg_manager,
         init_system,
         container_runtime,
+        nix_installed,
     })
 }
 
 fn detect_family(id: &str, id_like: &str) -> OsFamily {
     let check = |s: &str| -> Option<OsFamily> {
-        if s.contains("debian") || s == "ubuntu" || s == "raspbian" || s == "linuxmint" {
+        if s == "nixos" {
+            Some(OsFamily::NixOS)
+        } else if s.contains("debian") || s == "ubuntu" || s == "raspbian" || s == "linuxmint" {
             Some(OsFamily::Debian)
         } else if s.contains("rhel")
             || s.contains("fedora")
@@ -180,6 +202,7 @@ fn detect_pkg_manager(family: &OsFamily, id: &str, version: &str) -> PkgManager 
         OsFamily::Arch => PkgManager::Pacman,
         OsFamily::Alpine => PkgManager::Apk,
         OsFamily::Suse => PkgManager::Zypper,
+        OsFamily::NixOS => PkgManager::Nix,
         OsFamily::Unknown(_) => PkgManager::Apt, // fallback
     }
 }
@@ -188,8 +211,13 @@ fn detect_init_system(family: &OsFamily) -> InitSystem {
     match family {
         OsFamily::Alpine => InitSystem::OpenRc,
         OsFamily::Unknown(_) => InitSystem::Unknown,
-        _ => InitSystem::Systemd,
+        _ => InitSystem::Systemd, // NixOS, Debian, RedHat, Arch, Suse all use systemd
     }
+}
+
+async fn detect_nix(ssh: &SshSession) -> Result<bool, GlideshError> {
+    let output = ssh.exec("which nix 2>/dev/null").await?;
+    Ok(output.exit_code == 0)
 }
 
 async fn detect_container_runtime(

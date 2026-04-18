@@ -4,6 +4,7 @@ pub mod detect;
 pub mod disk;
 pub mod external;
 pub mod file;
+pub mod nix;
 pub mod package;
 pub mod shell;
 pub mod systemd;
@@ -78,6 +79,7 @@ impl ModuleRegistry {
         registry.register_builtin(Box::new(container::ContainerModule));
         registry.register_builtin(Box::new(file::FileModule));
         registry.register_builtin(Box::new(disk::DiskModule));
+        registry.register_builtin(Box::new(nix::NixModule));
         registry
     }
 
