@@ -21,20 +21,22 @@ glidesh
 ## Layout
 
 ```
-┌─ glidesh console — inventory.kdl  [4 hosts, 2 tunnels] ────────────────┐
-│ ▾ web    (3)                          ┌─ Plan ───────────────────────┐ │
-│    [✓] web-1   deploy@10.0.1.10:22    │ Target: web                  │ │
-│    [ ] web-2   deploy@10.0.1.11:22    │ Plan:   plans/deploy.kdl     │ │
-│    [ ] web-3   deploy@10.0.1.12:22    │                              │ │
-│ ▾ db     (1)                          │ Press r to run               │ │
-│    [ ] db-1    postgres@10.0.2.20:22  └──────────────────────────────┘ │
-├────────────────────────────────────────────────────────────────────────┤
-│ Dir Local           Via      Remote          Accepts Saved Status      │
-│ L   127.0.0.1:8080  web-1    localhost:80    14      ✓     active      │
-│ R   127.0.0.1:5432  db-1     127.0.0.1:5432  3             active      │
-└────────────────────────────────────────────────────────────────────────┘
+┌─ glidesh console — inventory.kdl  [4 hosts, 2 tunnels] ────────────────────┐
+│ ▾ web    (3)                          ┌─ Plan ───────────────────────┐     │
+│    [✓] web-1   deploy@10.0.1.10:22    │ Target: web                  │     │
+│    [ ] web-2   deploy@10.0.1.11:22    │ Plan:   plans/deploy.kdl     │     │
+│    [ ] web-3   deploy@10.0.1.12:22    │                              │     │
+│ ▾ db     (1)                          │ Press r to run               │     │
+│    [ ] db-1    postgres@10.0.2.20:22  └──────────────────────────────┘     │
+├────────────────────────────────────────────────────────────────────────────┤
+│ Dir Listen                  Via    Forwards to     Accepts Saved Status    │
+│ L   127.0.0.1:8080          web-1  localhost:80    14      ✓     active    │
+│ R   127.0.0.1:5433 (remote) db-1   127.0.0.1:5432  3             active    │
+└────────────────────────────────────────────────────────────────────────────┘
  ↑↓ nav  Space select  Enter/s shell  t tunnel  r run  Tab focus  d kill  q quit
 ```
+
+The **Listen** column is the side that accepts incoming connections (your local box for `-L`, the remote sshd for `-R`). The **Forwards to** column is the destination the bytes get delivered to.
 
 - **Top-left**: collapsible group → host tree, with multi-select markers
 - **Top-right**: plan associated with the focused row (group plan, host plan, or none)
@@ -72,6 +74,8 @@ When killing a **saved** tunnel, the console asks whether to also delete the sav
 - `Esc` — cancel
 
 ### Tunnel dialog
+
+Fields cycle in this order: `Local port`, `Remote host`, `Remote port`, `Bind addr R`, `Reverse (-R)`, `Save`. The `Bind addr R` field is pre-filled with `127.0.0.1` and only applies when `Reverse` is checked.
 
 | Key | Action |
 |-----|--------|
@@ -129,18 +133,19 @@ ssh -L <local>:<remote-host>:<remote-port> user@<via-host>
 
 ### Opening a reverse forward (`-R`)
 
-The remote sshd listens on `0.0.0.0:<remote-port>` and forwards incoming connections back through the SSH session to `<remote-host>:<local-port>` on your local machine (typically `127.0.0.1:<local-port>`).
+The remote sshd listens on `<bind-addr>:<remote-port>` and forwards incoming connections back through the SSH session to `<remote-host>:<local-port>` on your local machine (typically `127.0.0.1:<local-port>`).
 
 1. Move the cursor to the host
 2. Press `t`
 3. Fill in `Local port` (where to forward back to locally), `Remote host` (usually `127.0.0.1`), `Remote port` (the port sshd binds remotely)
-4. Check `Reverse`
-5. Press `Enter`
+4. Set `Bind addr R` if you want a non-default remote bind address. The field is pre-filled with `127.0.0.1` (loopback only — safest); override with `0.0.0.0` to accept connections on every remote interface (and only if the server's `GatewayPorts` allows it).
+5. Check `Reverse`
+6. Press `Enter`
 
 Equivalent to:
 
 ```
-ssh -R <remote-port>:<remote-host>:<local-port> user@<via-host>
+ssh -R <bind-addr>:<remote-port>:<remote-host>:<local-port> user@<via-host>
 ```
 
 > **Note**: reverse forwards require the remote sshd to allow them — check `GatewayPorts` and `AllowTcpForwarding` in the server's `sshd_config`.
@@ -161,8 +166,10 @@ Format:
 
 ```kdl
 tunnel via="web-1" direction="L" local-port=8080 remote-host="localhost" remote-port=80
-tunnel via="db-1" direction="R" local-port=5432 remote-host="127.0.0.1" remote-port=5433
+tunnel via="db-1" direction="R" local-port=5432 remote-host="127.0.0.1" remote-port=5433 bind-addr="127.0.0.1"
 ```
+
+`bind-addr` is only emitted for `-R` entries (default `127.0.0.1` when missing — `-L` ignores the field).
 
 On every console launch, glidesh reads this file and re-opens each saved tunnel against the inventory. Any spec whose `via` host is missing or whose connection fails appears in the table with an `Error` status — the rest still come up. Add the file to `.gitignore` if you want the specs to stay personal.
 

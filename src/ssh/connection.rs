@@ -246,20 +246,29 @@ impl SshSession {
         bind_addr: &str,
         bind_port: u16,
     ) -> Result<mpsc::UnboundedReceiver<Channel<client::Msg>>, GlideshError> {
+        let key = (bind_addr.to_string(), bind_port);
         let (tx, rx) = mpsc::unbounded_channel();
         {
             let mut reg = self
                 .forward_registry
                 .lock()
                 .map_err(|_| GlideshError::Other("forward registry mutex poisoned".to_string()))?;
-            reg.insert((bind_addr.to_string(), bind_port), tx);
+            if reg.contains_key(&key) {
+                return Err(GlideshError::SshChannel {
+                    message: format!(
+                        "tcpip-forward for {}:{} is already registered",
+                        bind_addr, bind_port
+                    ),
+                });
+            }
+            reg.insert(key.clone(), tx);
         }
 
         let mut guard = self.handle.lock().await;
         if let Err(e) = guard.tcpip_forward(bind_addr, bind_port as u32).await {
             drop(guard);
             if let Ok(mut reg) = self.forward_registry.lock() {
-                reg.remove(&(bind_addr.to_string(), bind_port));
+                reg.remove(&key);
             }
             return Err(GlideshError::SshChannel {
                 message: format!(

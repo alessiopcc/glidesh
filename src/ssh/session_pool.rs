@@ -6,11 +6,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// A per-address cache of live SSH sessions. Used by the console TUI so
+type Slot = Arc<Mutex<Option<Arc<SshSession>>>>;
+
+/// A per-host cache of live SSH sessions. Used by the console TUI so
 /// long-running tunnels survive across shell entries and can share one
 /// underlying SSH connection with other features.
 pub struct SessionPool {
-    inner: Mutex<HashMap<String, Arc<SshSession>>>,
+    inner: Mutex<HashMap<String, Slot>>,
     key: PrivateKeyWithHashAlg,
     policy: HostKeyPolicy,
 }
@@ -28,16 +30,30 @@ impl SessionPool {
         &self,
         host: &ResolvedHost,
     ) -> Result<Arc<SshSession>, GlideshError> {
-        let addr_key = format!("{}@{}:{}", host.user, host.address, host.port);
+        let key = pool_key(host);
 
-        {
-            let guard = self.inner.lock().await;
-            if let Some(s) = guard.get(&addr_key) {
-                return Ok(Arc::clone(s));
-            }
+        let slot: Slot = {
+            let mut guard = self.inner.lock().await;
+            Arc::clone(
+                guard
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(None))),
+            )
+        };
+
+        let mut slot_guard = slot.lock().await;
+        if let Some(s) = slot_guard.as_ref() {
+            return Ok(Arc::clone(s));
         }
 
-        let session = match &host.jump {
+        let session = self.connect_one(host).await?;
+        let arc = Arc::new(session);
+        *slot_guard = Some(Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    async fn connect_one(&self, host: &ResolvedHost) -> Result<SshSession, GlideshError> {
+        match &host.jump {
             Some(jump) => {
                 SshSession::connect_via_jump(
                     &host.address,
@@ -47,23 +63,32 @@ impl SessionPool {
                     self.policy,
                     jump,
                 )
-                .await?
+                .await
             }
             None => {
                 SshSession::connect(&host.address, host.port, &host.user, &self.key, self.policy)
-                    .await?
+                    .await
             }
-        };
-        let arc = Arc::new(session);
-
-        let mut guard = self.inner.lock().await;
-        guard.entry(addr_key).or_insert_with(|| Arc::clone(&arc));
-        Ok(arc)
+        }
     }
 
     pub async fn remove(&self, host: &ResolvedHost) {
-        let addr_key = format!("{}@{}:{}", host.user, host.address, host.port);
-        let mut guard = self.inner.lock().await;
-        guard.remove(&addr_key);
+        let key = pool_key(host);
+        let slot = {
+            let mut guard = self.inner.lock().await;
+            guard.remove(&key)
+        };
+        if let Some(slot) = slot {
+            let mut g = slot.lock().await;
+            *g = None;
+        }
+    }
+}
+
+fn pool_key(host: &ResolvedHost) -> String {
+    let base = format!("{}@{}:{}", host.user, host.address, host.port);
+    match &host.jump {
+        Some(j) => format!("{}|via={}@{}:{}", base, j.user, j.address, j.port),
+        None => base,
     }
 }

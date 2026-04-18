@@ -18,7 +18,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table};
 use russh_keys::key::PrivateKeyWithHashAlg;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,6 +36,7 @@ enum DialogField {
     LocalPort,
     RemoteHost,
     RemotePort,
+    BindAddr,
     Reverse,
     Save,
 }
@@ -44,6 +45,7 @@ struct TunnelDialog {
     local_port: String,
     remote_host: String,
     remote_port: String,
+    bind_addr: String,
     reverse: bool,
     save: bool,
     field: DialogField,
@@ -56,6 +58,7 @@ impl Default for TunnelDialog {
             local_port: String::new(),
             remote_host: String::new(),
             remote_port: String::new(),
+            bind_addr: "127.0.0.1".to_string(),
             reverse: false,
             save: false,
             field: DialogField::LocalPort,
@@ -98,6 +101,7 @@ struct TunnelEntry {
     local_port: u16,
     remote_host: String,
     remote_port: u16,
+    remote_bind_addr: String, // only meaningful for Reverse
     saved: bool,
     status: String,
     kind: Option<TunnelKind>,
@@ -143,11 +147,16 @@ impl ConsoleState {
         let mut groups: Vec<GroupView> = Vec::new();
 
         let all = inv.resolve_targets(None);
+        let by_name: HashMap<&str, usize> = all
+            .iter()
+            .enumerate()
+            .map(|(i, rh)| (rh.name.as_str(), i))
+            .collect();
         let mut seen: HashSet<String> = HashSet::new();
         for group in &inv.groups {
             let mut idxs = Vec::new();
             for h in &group.hosts {
-                if let Some((i, _)) = all.iter().enumerate().find(|(_, rh)| rh.name == h.name) {
+                if let Some(&i) = by_name.get(h.name.as_str()) {
                     if seen.insert(h.name.clone()) {
                         hosts.push(all[i].clone());
                         host_plans.push(h.plan.clone());
@@ -165,7 +174,7 @@ impl ConsoleState {
         }
         let mut ungrouped_idxs = Vec::new();
         for h in &inv.ungrouped_hosts {
-            if let Some((i, _)) = all.iter().enumerate().find(|(_, rh)| rh.name == h.name) {
+            if let Some(&i) = by_name.get(h.name.as_str()) {
                 if seen.insert(h.name.clone()) {
                     hosts.push(all[i].clone());
                     host_plans.push(h.plan.clone());
@@ -308,6 +317,7 @@ pub async fn run(
                 local_port: spec.local_port,
                 remote_host: spec.remote_host.clone(),
                 remote_port: spec.remote_port,
+                remote_bind_addr: spec.bind_addr.clone(),
                 saved: true,
                 status: format!("Host '{}' not in inventory", spec.via),
                 kind: None,
@@ -323,6 +333,7 @@ pub async fn run(
                     local_port: spec.local_port,
                     remote_host: spec.remote_host.clone(),
                     remote_port: spec.remote_port,
+                    remote_bind_addr: spec.bind_addr.clone(),
                     saved: true,
                     status: "active".to_string(),
                     kind: Some(kind),
@@ -335,6 +346,7 @@ pub async fn run(
                     local_port: spec.local_port,
                     remote_host: spec.remote_host.clone(),
                     remote_port: spec.remote_port,
+                    remote_bind_addr: spec.bind_addr.clone(),
                     saved: true,
                     status: format!("error: {}", e),
                     kind: None,
@@ -353,8 +365,8 @@ pub async fn run(
     terminal::disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
 
-    // Cancel any non-saved tunnels on exit (saved ones we still cancel
-    // at runtime — they'll reopen on next launch from the spec file).
+    // Cancel every running tunnel on exit. Saved specs are intentionally
+    // not removed from disk here — they reopen on next launch.
     for t in &state.tunnels {
         if let Some(kind) = &t.kind {
             match kind {
@@ -561,14 +573,14 @@ async fn handle_tree_key(
             state.dialog = Some(TunnelDialog::default());
         }
         KeyCode::Char('r') => {
-            run_plan(state, terminal)?;
+            run_plan(state, terminal).await?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn run_plan(
+async fn run_plan(
     state: &mut ConsoleState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> io::Result<()> {
@@ -596,7 +608,7 @@ fn run_plan(
     terminal::disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
 
-    let mut cmd = std::process::Command::new(&exe);
+    let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("run")
         .arg("-i")
         .arg(&state.inventory_path)
@@ -612,10 +624,14 @@ fn run_plan(
     if state.host_key_policy.accept_new {
         cmd.arg("--accept-new-host-key");
     }
-    let status = cmd.status();
+    let status = cmd.status().await;
 
     println!("\nPress any key to return to console...\r");
+    // Re-enable raw mode so crossterm sees the keypress immediately rather than
+    // requiring Enter (cooked-mode behavior).
+    let _ = terminal::enable_raw_mode();
     let _ = event::read();
+    let _ = terminal::disable_raw_mode();
 
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
@@ -669,7 +685,8 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
             dialog.field = match dialog.field {
                 DialogField::LocalPort => DialogField::RemoteHost,
                 DialogField::RemoteHost => DialogField::RemotePort,
-                DialogField::RemotePort => DialogField::Reverse,
+                DialogField::RemotePort => DialogField::BindAddr,
+                DialogField::BindAddr => DialogField::Reverse,
                 DialogField::Reverse => DialogField::Save,
                 DialogField::Save => DialogField::LocalPort,
             };
@@ -680,7 +697,8 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                 DialogField::LocalPort => DialogField::Save,
                 DialogField::RemoteHost => DialogField::LocalPort,
                 DialogField::RemotePort => DialogField::RemoteHost,
-                DialogField::Reverse => DialogField::RemotePort,
+                DialogField::BindAddr => DialogField::RemotePort,
+                DialogField::Reverse => DialogField::BindAddr,
                 DialogField::Save => DialogField::Reverse,
             };
             return;
@@ -720,6 +738,14 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
             } else {
                 TunnelDirection::Local
             };
+            let mut bind_addr = dialog.bind_addr.trim().to_string();
+            if bind_addr.is_empty() {
+                bind_addr = "127.0.0.1".to_string();
+            }
+            if reverse && bind_addr.is_empty() {
+                dialog.error = Some("bind address required for -R".to_string());
+                return;
+            }
 
             // Release mut borrow on dialog before touching state.
             let _ = dialog;
@@ -739,6 +765,7 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                 local_port,
                 remote_host: remote_host.clone(),
                 remote_port,
+                bind_addr: bind_addr.clone(),
             };
 
             match open_tunnel(pool, &host, &spec).await {
@@ -749,6 +776,7 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                         local_port,
                         remote_host: remote_host.clone(),
                         remote_port,
+                        remote_bind_addr: bind_addr.clone(),
                         saved: save,
                         status: "active".to_string(),
                         kind: Some(kind),
@@ -780,6 +808,9 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                 DialogField::RemotePort => {
                     dialog.remote_port.pop();
                 }
+                DialogField::BindAddr => {
+                    dialog.bind_addr.pop();
+                }
                 _ => {}
             }
             return;
@@ -797,6 +828,9 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                 if c.is_ascii_digit() {
                     dialog.remote_port.push(c);
                 }
+            }
+            DialogField::BindAddr => {
+                dialog.bind_addr.push(c);
             }
             _ => {}
         },
@@ -826,6 +860,7 @@ async fn open_tunnel(
             let rf = start_reverse_forward(
                 Arc::clone(&session),
                 host.name.clone(),
+                spec.bind_addr.clone(),
                 spec.remote_port, // sshd binds this port on remote
                 spec.remote_host.clone(),
                 spec.local_port,
@@ -990,7 +1025,13 @@ fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) 
     frame.render_widget(block, area);
 
     let header = Row::new(vec![
-        "Dir", "Local", "Via", "Remote", "Accepts", "Saved", "Status",
+        "Dir",
+        "Listen",
+        "Via",
+        "Forwards to",
+        "Accepts",
+        "Saved",
+        "Status",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -1003,6 +1044,20 @@ fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) 
                 TunnelDirection::Local => "L",
                 TunnelDirection::Reverse => "R",
             };
+            // For -L: listener on the local box at 127.0.0.1:local_port,
+            //         forwards to remote_host:remote_port reachable from the via host.
+            // For -R: listener on the via host at bind_addr:remote_port,
+            //         forwards back to local remote_host:local_port.
+            let (listen, forwards_to) = match t.direction {
+                TunnelDirection::Local => (
+                    format!("127.0.0.1:{}", t.local_port),
+                    format!("{}:{}", t.remote_host, t.remote_port),
+                ),
+                TunnelDirection::Reverse => (
+                    format!("{}:{} (remote)", t.remote_bind_addr, t.remote_port),
+                    format!("{}:{}", t.remote_host, t.local_port),
+                ),
+            };
             let saved = if t.saved { "✓" } else { " " };
             let style = if i == state.tunnel_cursor && state.focus == Focus::Tunnels {
                 Style::default()
@@ -1013,9 +1068,9 @@ fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) 
             };
             Row::new(vec![
                 Cell::from(dir),
-                Cell::from(format!("127.0.0.1:{}", t.local_port)),
+                Cell::from(listen),
                 Cell::from(t.via_host_name.clone()),
-                Cell::from(format!("{}:{}", t.remote_host, t.remote_port)),
+                Cell::from(forwards_to),
                 Cell::from(t.accept_count().to_string()),
                 Cell::from(saved),
                 Cell::from(t.status.clone()),
@@ -1025,13 +1080,13 @@ fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) 
         .collect();
 
     let widths = [
-        Constraint::Length(4),
-        Constraint::Length(20),
-        Constraint::Length(18),
-        Constraint::Length(24),
-        Constraint::Length(8),
-        Constraint::Length(6),
-        Constraint::Min(10),
+        Constraint::Length(4),  // Dir
+        Constraint::Length(28), // Listen
+        Constraint::Length(18), // Via
+        Constraint::Length(24), // Forwards to
+        Constraint::Length(8),  // Accepts
+        Constraint::Length(6),  // Saved
+        Constraint::Min(10),    // Status
     ];
     let table = Table::new(rows, widths).header(header);
     frame.render_widget(table, inner);
@@ -1098,7 +1153,7 @@ fn render_dialog(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
         return;
     };
     let w = 60u16.min(area.width.saturating_sub(4));
-    let h = 13u16.min(area.height.saturating_sub(4));
+    let h = 15u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect::new(x, y, w, h);
@@ -1108,26 +1163,19 @@ fn render_dialog(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
     frame.render_widget(block, rect);
 
     let fields = [
-        ("Local port ", &d.local_port, DialogField::LocalPort, false),
-        (
-            "Remote host",
-            &d.remote_host,
-            DialogField::RemoteHost,
-            false,
-        ),
-        (
-            "Remote port",
-            &d.remote_port,
-            DialogField::RemotePort,
-            false,
-        ),
+        ("Local port ", &d.local_port, DialogField::LocalPort),
+        ("Remote host", &d.remote_host, DialogField::RemoteHost),
+        ("Remote port", &d.remote_port, DialogField::RemotePort),
+        ("Bind addr R", &d.bind_addr, DialogField::BindAddr),
     ];
     let mut lines: Vec<Line> = Vec::new();
-    for (label, val, f, _) in &fields {
+    for (label, val, f) in &fields {
         let focus = d.field == *f;
         let cursor = if focus { "_" } else { "" };
         let style = if focus {
             Style::default().fg(Color::Yellow)
+        } else if matches!(f, DialogField::BindAddr) && !d.reverse {
+            Style::default().fg(Color::DarkGray)
         } else {
             Style::default()
         };

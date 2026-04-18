@@ -41,6 +41,34 @@ glidesh console [OPTIONS]
 | multiple hosts resolved | — | Broadcast group shell TUI |
 | any        | set         | Run command, stream `[hostname]`-prefixed output |
 
+### Examples
+
+Interactive PTY on a single host:
+
+```bash
+glidesh console -i inventory.kdl -t web-1
+```
+
+Run a command across a group, stream prefixed output:
+
+```bash
+glidesh console -i inventory.kdl -t web -c "df -h /"
+```
+
+```
+[web-1] /dev/sda1  50G  40G  10G  80% /
+[web-2] /dev/sda1  50G  25G  25G  50% /
+[web-3] /dev/sda1  50G  45G   5G  90% /
+```
+
+Broadcast TUI across a group (no `-c`):
+
+```bash
+glidesh console -i inventory.kdl -t web
+```
+
+The console resolves SSH keys using the same [resolution order](#ssh-key-resolution) as `run`.
+
 ## `glidesh run`
 
 Execute a plan against target hosts.
@@ -134,34 +162,6 @@ glidesh logs --last
 glidesh logs --last --node web-1
 glidesh logs --run 20250115_143022_setup
 ```
-
-### Examples
-
-Interactive PTY on a single host:
-
-```bash
-glidesh console -i inventory.kdl -t web-1
-```
-
-Run a command across a group, stream prefixed output:
-
-```bash
-glidesh console -i inventory.kdl -t web -c "df -h /"
-```
-
-```
-[web-1] /dev/sda1  50G  40G  10G  80% /
-[web-2] /dev/sda1  50G  25G  25G  50% /
-[web-3] /dev/sda1  50G  45G   5G  90% /
-```
-
-Broadcast TUI across a group (no `-c`):
-
-```bash
-glidesh console -i inventory.kdl -t web
-```
-
-The console resolves SSH keys using the same [resolution order](#ssh-key-resolution) as `run`.
 
 ## `glidesh validate`
 
