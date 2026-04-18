@@ -1,7 +1,6 @@
 use crate::error::GlideshError;
 use crate::ssh::SshSession;
 
-/// POSIX single-quote escape: wrap in `'…'`, replacing embedded `'` with `'\''`.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -222,10 +221,8 @@ fn detect_init_system(family: &OsFamily) -> InitSystem {
 }
 
 async fn detect_nix(ssh: &SshSession) -> Result<bool, GlideshError> {
-    // SSH non-interactive sessions don't source /etc/profile or ~/.profile, so
-    // `which nix` (and `command -v nix`) can fail even when Nix is installed —
-    // the Nix profile scripts are what add it to PATH. Check the common
-    // absolute paths first to avoid false negatives.
+    // Nix's PATH entry comes from /etc/profile, which SSH non-interactive
+    // sessions don't source — so `command -v nix` alone gives false negatives.
     let output = ssh
         .exec(
             "[ -x /nix/var/nix/profiles/default/bin/nix ] \

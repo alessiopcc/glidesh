@@ -8,30 +8,42 @@ pub struct NixModule;
 const NIX_INSTALLER_URL: &str = "https://install.determinate.systems/nix";
 
 impl NixModule {
-    /// Ensure Nix is available on the target. If not installed and `install=#true`,
-    /// auto-install via the Determinate Systems installer.
-    async fn ensure_nix(
-        ctx: &ModuleContext<'_>,
-        params: &ModuleParams,
-    ) -> Result<(), GlideshError> {
+    // `OsInfo` is detected once at connection time, so `nix_installed` can be
+    // stale after an earlier task in the same run auto-installs Nix. Re-probe
+    // live when the cached flag is false.
+    async fn nix_available(ctx: &ModuleContext<'_>) -> Result<bool, GlideshError> {
         if ctx.os_info.nix_installed {
-            return Ok(());
+            return Ok(true);
         }
+        let output = ctx
+            .ssh
+            .exec(
+                "[ -x /nix/var/nix/profiles/default/bin/nix ] \
+                 || [ -x \"$HOME/.nix-profile/bin/nix\" ] \
+                 || command -v nix >/dev/null 2>&1",
+            )
+            .await?;
+        Ok(output.exit_code == 0)
+    }
 
-        let should_install = params
+    fn install_requested(params: &ModuleParams) -> bool {
+        params
             .args
             .get("install")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(false)
+    }
 
-        if !should_install {
-            return Err(GlideshError::Module {
-                module: "nix".to_string(),
-                message: "Nix is not installed on the target. Set install=#true to auto-install."
-                    .to_string(),
-            });
+    fn nix_missing_error() -> GlideshError {
+        GlideshError::Module {
+            module: "nix".to_string(),
+            message: "Nix is not installed on the target. Set install=#true to auto-install."
+                .to_string(),
         }
+    }
 
+    // Call only from `apply()` — `check()` must remain side-effect-free.
+    async fn install_nix(ctx: &ModuleContext<'_>) -> Result<(), GlideshError> {
         if ctx.dry_run {
             return Ok(());
         }
@@ -65,18 +77,12 @@ impl NixModule {
             .unwrap_or("install")
     }
 
-    /// POSIX single-quote escape: wrap in `'…'`, replacing embedded `'` with `'\''`.
     fn shell_escape(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 
-    /// Resolve the `profile=` parameter to a `--profile <path>` fragment (with
-    /// leading space), or empty for the default user profile.
-    ///
-    /// Accepted values:
-    /// - `"user"` (default, or missing) → empty string (user profile `~/.nix-profile`)
-    /// - `"default"` or `"system"` → `/nix/var/nix/profiles/default`
-    /// - any other string → treated as an explicit profile path
+    /// Resolves `profile=`: `"user"` (default) → empty; `"default"`/`"system"`
+    /// → `/nix/var/nix/profiles/default`; any other string → explicit path.
     fn profile_arg(params: &ModuleParams) -> String {
         let profile = params
             .args
@@ -90,15 +96,9 @@ impl NixModule {
         }
     }
 
-    /// Build the check command for `action="install"`.
-    ///
-    /// For the user profile (default), match either a `nix profile` install *or*
-    /// a legacy `nix-env` install — either is a satisfactory "installed" state
-    /// and avoids the false-Pending that older versions of this module produced
-    /// when apply used `nix profile` but check only looked at `nix-env`.
-    ///
-    /// For a non-user profile, only `nix profile` is applicable (`nix-env`
-    /// doesn't accept `--profile`), so we check only that.
+    // Matches both `nix profile` and legacy `nix-env` installs for the user
+    // profile (either is a satisfactory "installed" state). `nix-env` does not
+    // accept `--profile`, so non-user profiles only check `nix profile`.
     fn build_check_install_cmd(package: &str, profile_arg: &str) -> String {
         let pkg_q = Self::shell_escape(package);
         if profile_arg.is_empty() {
@@ -115,11 +115,8 @@ impl NixModule {
         }
     }
 
-    /// Build the install/remove command for `action="install"`.
-    ///
-    /// For the user profile, try `nix profile` first and fall back to `nix-env`
-    /// (legacy). For a non-user profile, only `nix profile` is used (`nix-env`
-    /// doesn't support `--profile`).
+    // Non-user profiles skip the `nix-env` fallback: `nix-env` doesn't accept
+    // `--profile` as `nix profile` does.
     fn build_apply_install_cmd(package: &str, desired_state: &str, profile_arg: &str) -> String {
         let pkg_q = Self::shell_escape(package);
         let flake_ref = Self::shell_escape(&format!("nixpkgs#{}", package));
@@ -250,12 +247,8 @@ impl NixModule {
         })
     }
 
-    /// Build the `nix shell … --command bash -c '<cmd>'` string for `action="shell"`.
-    ///
-    /// Wrapping the user command in `bash -c` keeps multi-word commands, pipes,
-    /// redirections, and quoted arguments intact — the earlier implementation
-    /// concatenated after `--command` without escaping, which only worked for
-    /// trivial single-word invocations.
+    // Wrap in `bash -c '<escaped>'` so pipes, redirects, and quoted args in
+    // the user command are preserved (rather than tokenized by `nix shell`).
     fn build_shell_cmd(command: &str, packages: &[String]) -> String {
         let pkg_args: Vec<String> = packages
             .iter()
@@ -627,7 +620,18 @@ impl Module for NixModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
-        Self::ensure_nix(ctx, params).await?;
+        if !Self::nix_available(ctx).await? {
+            if !Self::install_requested(params) {
+                return Err(Self::nix_missing_error());
+            }
+            return Ok(ModuleStatus::Pending {
+                plan: format!(
+                    "Install Nix, then perform {} action on {}",
+                    Self::get_action(params),
+                    params.resource_name
+                ),
+            });
+        }
 
         match Self::get_action(params) {
             "install" => Self::check_install(ctx, params).await,
@@ -648,7 +652,12 @@ impl Module for NixModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleResult, GlideshError> {
-        Self::ensure_nix(ctx, params).await?;
+        if !Self::nix_available(ctx).await? {
+            if !Self::install_requested(params) {
+                return Err(Self::nix_missing_error());
+            }
+            Self::install_nix(ctx).await?;
+        }
 
         match Self::get_action(params) {
             "install" => Self::apply_install(ctx, params).await,

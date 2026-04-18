@@ -49,9 +49,8 @@ impl ShellModule {
             .unwrap_or(false)
     }
 
-    /// Wrap `cmd` in a POSIX login shell so `/etc/profile` and `~/.profile`
-    /// are sourced — picks up Nix, asdf, nvm, rustup, and similar tools whose
-    /// PATH entries are normally only added for login shells.
+    // A login shell sources /etc/profile and ~/.profile, which is where Nix,
+    // asdf, nvm, rustup, etc. inject their PATH entries.
     fn wrap_login(cmd: &str) -> String {
         let escaped = cmd.replace('\'', "'\\''");
         format!("sh -l -c '{}'", escaped)
