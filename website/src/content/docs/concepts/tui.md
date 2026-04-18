@@ -1,9 +1,13 @@
 ---
 title: TUI
-description: Terminal user interface for plan execution, post-run debugging, and interactive group shells.
+description: Terminal user interfaces for plan execution, post-run debugging, the connection console, and interactive group shells.
 ---
 
-glidesh provides a terminal UI that replaces raw log output with a live dashboard. It activates automatically when running in an interactive terminal.
+glidesh ships several terminal UIs, each suited to a different workflow:
+
+- **[Console](/cli/console/)** — opened by `glidesh` with no subcommand (or `glidesh console`). Browse groups/hosts, open shells, manage SSH local and reverse port forwards. Saved tunnels auto-reopen across sessions.
+- **Plan Execution TUI** — opens during `glidesh run` to show live progress, per-node logs, and a post-run shell.
+- **Interactive Group Shell** — opens during `glidesh shell -t <group>` to broadcast commands across multiple hosts.
 
 ## Plan Execution TUI
 

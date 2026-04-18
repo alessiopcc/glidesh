@@ -3,6 +3,32 @@ title: CLI Reference
 description: Complete command reference for glidesh.
 ---
 
+## `glidesh` (no subcommand)
+
+Running `glidesh` with no subcommand opens the [interactive console](/cli/console/) against `./inventory.kdl` if one exists in the current directory. Equivalent to `glidesh console`.
+
+```bash
+cd my-fleet/
+glidesh                       # opens the console TUI
+```
+
+If no inventory is present in the working directory, glidesh exits with an error suggesting `--inventory <path>`.
+
+## `glidesh console`
+
+Open the interactive connection console — browse groups/hosts, open shells, and manage SSH tunnels. See the dedicated [Console](/cli/console/) page for full details.
+
+```
+glidesh console [OPTIONS]
+```
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--inventory <PATH>` | `-i` | Path to the inventory file | `./inventory.kdl` |
+| `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
+| `--no-host-key-check` | — | Skip SSH host key verification | `false` |
+| `--accept-new-host-key` | — | Accept and save unknown host keys | `false` |
+
 ## `glidesh run`
 
 Execute a plan against target hosts.
