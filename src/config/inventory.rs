@@ -384,6 +384,33 @@ group "db" {
     }
 
     #[test]
+    fn test_resolve_targets_group_host_format() {
+        let input = r#"
+group "web" {
+    host "web-1" "10.0.0.1"
+    host "web-2" "10.0.0.2"
+}
+group "db" {
+    host "db-1" "10.0.1.1"
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let resolved = inv.resolve_targets(Some("web:web-1"));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].address, "10.0.0.1");
+
+        let resolved = inv.resolve_targets(Some("db:db-1"));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].address, "10.0.1.1");
+
+        let resolved = inv.resolve_targets(Some("web:missing"));
+        assert!(resolved.is_empty());
+
+        let resolved = inv.resolve_targets(Some("missing:web-1"));
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
     fn test_group_plan_attribute() {
         let input = r#"
 group "web" plan="web-plan.kdl" {

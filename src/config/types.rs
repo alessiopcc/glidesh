@@ -42,8 +42,9 @@ pub struct Inventory {
 }
 
 impl Inventory {
-    /// Resolve hosts matching a target filter (group name or host name).
-    /// If target is None, return all hosts.
+    /// Resolve hosts matching a target filter.
+    /// Accepted forms: `None` (all hosts), `"name"` (group or host name),
+    /// or `"group:host"` (specific host within a specific group).
     pub fn resolve_targets(&self, target: Option<&str>) -> Vec<ResolvedHost> {
         let mut hosts = Vec::new();
 
@@ -59,6 +60,23 @@ impl Inventory {
                 }
             }
             Some(target) => {
+                if let Some((g_name, h_name)) = target.split_once(':') {
+                    for group in &self.groups {
+                        if group.name == g_name {
+                            for host in &group.hosts {
+                                if host.name == h_name {
+                                    hosts.push(self.resolve_host(
+                                        host,
+                                        Some(&group.vars),
+                                        group.jump.as_ref(),
+                                    ));
+                                    return hosts;
+                                }
+                            }
+                        }
+                    }
+                    return hosts;
+                }
                 // Try group match first
                 for group in &self.groups {
                     if group.name == target {
