@@ -74,6 +74,8 @@ struct GroupView {
     name: String,
     host_idxs: Vec<usize>, // indices into ConsoleState.hosts
     expanded: bool,
+    plan: Option<String>,
+    is_real: bool, // false for the "(ungrouped)" pseudo-group
 }
 
 enum TunnelKind {
@@ -113,6 +115,7 @@ impl TunnelEntry {
 struct ConsoleState {
     inventory_path: PathBuf,
     hosts: Vec<ResolvedHost>,
+    host_plans: Vec<Option<String>>, // parallel to `hosts`
     groups: Vec<GroupView>,
     rows: Vec<TreeRow>,
     cursor: usize,
@@ -124,15 +127,22 @@ struct ConsoleState {
     confirm_quit: bool,
     confirm_kill: Option<usize>,
     flash: Option<(String, std::time::Instant)>,
+    ssh_key_path: PathBuf,
+    host_key_policy: HostKeyPolicy,
 }
 
 impl ConsoleState {
-    fn new(inventory_path: PathBuf, inv: &Inventory) -> Self {
+    fn new(
+        inventory_path: PathBuf,
+        inv: &Inventory,
+        ssh_key_path: PathBuf,
+        host_key_policy: HostKeyPolicy,
+    ) -> Self {
         let mut hosts: Vec<ResolvedHost> = Vec::new();
+        let mut host_plans: Vec<Option<String>> = Vec::new();
         let mut groups: Vec<GroupView> = Vec::new();
 
         let all = inv.resolve_targets(None);
-        // Build group views preserving inventory order.
         let mut seen: HashSet<String> = HashSet::new();
         for group in &inv.groups {
             let mut idxs = Vec::new();
@@ -140,6 +150,7 @@ impl ConsoleState {
                 if let Some((i, _)) = all.iter().enumerate().find(|(_, rh)| rh.name == h.name) {
                     if seen.insert(h.name.clone()) {
                         hosts.push(all[i].clone());
+                        host_plans.push(h.plan.clone());
                         idxs.push(hosts.len() - 1);
                     }
                 }
@@ -148,14 +159,16 @@ impl ConsoleState {
                 name: group.name.clone(),
                 host_idxs: idxs,
                 expanded: true,
+                plan: group.plan.clone(),
+                is_real: true,
             });
         }
-        // Ungrouped hosts collected into a pseudo-group.
         let mut ungrouped_idxs = Vec::new();
         for h in &inv.ungrouped_hosts {
             if let Some((i, _)) = all.iter().enumerate().find(|(_, rh)| rh.name == h.name) {
                 if seen.insert(h.name.clone()) {
                     hosts.push(all[i].clone());
+                    host_plans.push(h.plan.clone());
                     ungrouped_idxs.push(hosts.len() - 1);
                 }
             }
@@ -165,12 +178,15 @@ impl ConsoleState {
                 name: "(ungrouped)".to_string(),
                 host_idxs: ungrouped_idxs,
                 expanded: true,
+                plan: None,
+                is_real: false,
             });
         }
 
         let mut state = Self {
             inventory_path,
             hosts,
+            host_plans,
             groups,
             rows: Vec::new(),
             cursor: 0,
@@ -182,9 +198,34 @@ impl ConsoleState {
             confirm_quit: false,
             confirm_kill: None,
             flash: None,
+            ssh_key_path,
+            host_key_policy,
         };
         state.recompute_rows();
         state
+    }
+
+    /// Plan associated with the cursor row, plus the target filter to pass to `glidesh run`.
+    fn current_plan(&self) -> Option<(String, String)> {
+        match self.rows.get(self.cursor)? {
+            TreeRow::Group(gi) => {
+                let g = &self.groups[*gi];
+                let plan = g.plan.clone()?;
+                Some((plan, g.name.clone()))
+            }
+            TreeRow::Host(gi, hi) => {
+                let host_idx = self.groups[*gi].host_idxs.get(*hi).copied()?;
+                if let Some(plan) = self.host_plans.get(host_idx).cloned().flatten() {
+                    return Some((plan, self.hosts[host_idx].name.clone()));
+                }
+                let g = &self.groups[*gi];
+                if !g.is_real {
+                    return None;
+                }
+                let plan = g.plan.clone()?;
+                Some((plan, format!("{}:{}", g.name, self.hosts[host_idx].name)))
+            }
+        }
     }
 
     fn recompute_rows(&mut self) {
@@ -245,9 +286,15 @@ pub async fn run(
     inventory_path: &Path,
     inventory: &Inventory,
     ssh_key: PrivateKeyWithHashAlg,
+    ssh_key_path: PathBuf,
     policy: HostKeyPolicy,
 ) -> io::Result<()> {
-    let mut state = ConsoleState::new(inventory_path.to_path_buf(), inventory);
+    let mut state = ConsoleState::new(
+        inventory_path.to_path_buf(),
+        inventory,
+        ssh_key_path,
+        policy,
+    );
     let pool = Arc::new(SessionPool::new(ssh_key.clone(), policy));
 
     // Auto-open saved tunnels.
@@ -513,7 +560,71 @@ async fn handle_tree_key(
             let _ = host_idx;
             state.dialog = Some(TunnelDialog::default());
         }
+        KeyCode::Char('r') => {
+            run_plan(state, terminal)?;
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+fn run_plan(
+    state: &mut ConsoleState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> io::Result<()> {
+    let Some((plan_rel, target)) = state.current_plan() else {
+        state.set_flash("no plan associated with this row");
+        return Ok(());
+    };
+    let inv_dir = state
+        .inventory_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let plan_path = if Path::new(&plan_rel).is_absolute() {
+        PathBuf::from(&plan_rel)
+    } else {
+        inv_dir.join(&plan_rel)
+    };
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            state.set_flash(format!("locate exe: {}", e));
+            return Ok(());
+        }
+    };
+
+    terminal::disable_raw_mode()?;
+    io::stdout().execute(LeaveAlternateScreen)?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("run")
+        .arg("-i")
+        .arg(&state.inventory_path)
+        .arg("-p")
+        .arg(&plan_path)
+        .arg("-t")
+        .arg(&target)
+        .arg("-k")
+        .arg(&state.ssh_key_path);
+    if !state.host_key_policy.verify {
+        cmd.arg("--no-host-key-check");
+    }
+    if state.host_key_policy.accept_new {
+        cmd.arg("--accept-new-host-key");
+    }
+    let status = cmd.status();
+
+    println!("\nPress any key to return to console...\r");
+    let _ = event::read();
+
+    terminal::enable_raw_mode()?;
+    io::stdout().execute(EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    match status {
+        Ok(s) if s.success() => state.set_flash(format!("plan '{}' completed", plan_rel)),
+        Ok(s) => state.set_flash(format!("plan '{}' exited: {}", plan_rel, s)),
+        Err(e) => state.set_flash(format!("failed to spawn run: {}", e)),
     }
     Ok(())
 }
@@ -779,8 +890,14 @@ fn render(frame: &mut ratatui::Frame, state: &ConsoleState) {
         ])
         .split(area);
 
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(chunks[1]);
+
     render_header(frame, chunks[0], state);
-    render_tree(frame, chunks[1], state);
+    render_tree(frame, top[0], state);
+    render_plan_panel(frame, top[1], state);
     render_tunnels(frame, chunks[2], state);
     render_footer(frame, chunks[3], state);
 
@@ -920,8 +1037,51 @@ fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) 
     frame.render_widget(table, inner);
 }
 
+fn render_plan_panel(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
+    let block = Block::default().borders(Borders::ALL).title(" Plan ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line> = match state.current_plan() {
+        Some((plan, target)) => vec![
+            Line::from(vec![
+                Span::styled("Target: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(target, Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("Plan:   ", Style::default().fg(Color::DarkGray)),
+                Span::raw(plan),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press r to run",
+                Style::default().fg(Color::Yellow),
+            )),
+        ],
+        None => match state.rows.get(state.cursor) {
+            Some(_) => vec![
+                Line::from(Span::styled(
+                    "(no plan associated)",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Set plan=\"...\" on the group or",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "host in the inventory.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ],
+            None => vec![Line::from("")],
+        },
+    };
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
-    let base = "↑↓ nav  Space select  Enter/s shell  t tunnel  Tab focus  d kill  q quit";
+    let base = "↑↓ nav  Space select  Enter/s shell  t tunnel  r run  Tab focus  d kill  q quit";
     let text = if let Some(msg) = state.flash_text() {
         format!(" {}  |  {}", base, msg)
     } else {

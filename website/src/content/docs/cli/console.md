@@ -21,23 +21,24 @@ glidesh
 ## Layout
 
 ```
-┌─ glidesh console — inventory.kdl  [4 hosts, 2 tunnels] ──────────┐
-│ ▾ web    (3)                                                     │
-│    [✓] web-1   deploy@10.0.1.10:22                               │
-│    [ ] web-2   deploy@10.0.1.11:22                               │
-│    [ ] web-3   deploy@10.0.1.12:22                               │
-│ ▾ db     (1)                                                     │
-│    [ ] db-1    postgres@10.0.2.20:22                             │
-├──────────────────────────────────────────────────────────────────┤
-│ Dir Local           Via      Remote          Accepts Saved Status│
-│ L   127.0.0.1:8080  web-1    localhost:80    14      ✓     active│
-│ R   127.0.0.1:5432  db-1     127.0.0.1:5432  3             active│
-└──────────────────────────────────────────────────────────────────┘
- ↑↓ nav  Space select  Enter/s shell  t tunnel  Tab focus  d kill  q quit
+┌─ glidesh console — inventory.kdl  [4 hosts, 2 tunnels] ────────────────┐
+│ ▾ web    (3)                          ┌─ Plan ───────────────────────┐ │
+│    [✓] web-1   deploy@10.0.1.10:22    │ Target: web                  │ │
+│    [ ] web-2   deploy@10.0.1.11:22    │ Plan:   plans/deploy.kdl     │ │
+│    [ ] web-3   deploy@10.0.1.12:22    │                              │ │
+│ ▾ db     (1)                          │ Press r to run               │ │
+│    [ ] db-1    postgres@10.0.2.20:22  └──────────────────────────────┘ │
+├────────────────────────────────────────────────────────────────────────┤
+│ Dir Local           Via      Remote          Accepts Saved Status      │
+│ L   127.0.0.1:8080  web-1    localhost:80    14      ✓     active      │
+│ R   127.0.0.1:5432  db-1     127.0.0.1:5432  3             active      │
+└────────────────────────────────────────────────────────────────────────┘
+ ↑↓ nav  Space select  Enter/s shell  t tunnel  r run  Tab focus  d kill  q quit
 ```
 
-- **Top half**: collapsible group → host tree, with multi-select markers
-- **Bottom half**: live table of active tunnels (direction, local port, via-host, remote target, accept count, saved flag, status)
+- **Top-left**: collapsible group → host tree, with multi-select markers
+- **Top-right**: plan associated with the focused row (group plan, host plan, or none)
+- **Bottom**: live table of active tunnels (direction, local port, via-host, remote target, accept count, saved flag, status)
 - **Footer**: keybindings + transient flash messages (errors, status updates)
 
 ## Keybindings
@@ -52,6 +53,7 @@ glidesh
 | `Esc` | Clear all selections |
 | `Enter` or `s` | Open shell — single host = interactive PTY, group / multi-select = broadcast TUI |
 | `t` | Open the tunnel-creation dialog (cursor must be on a host) |
+| `r` | Run the plan shown in the right panel (`glidesh run` is invoked with the resolved target filter). The console suspends while the plan runs. |
 | `Tab` | Switch focus to the tunnel table |
 | `q` or `Ctrl+C` | Quit (confirms if any tunnels are active) |
 
@@ -84,15 +86,28 @@ When killing a **saved** tunnel, the console asks whether to also delete the sav
 
 ### Single host
 
-When the cursor is on a single host (or exactly one host is selected), pressing `Enter`/`s` opens a full PTY shell — same as `glidesh shell -t <host>`. The console TUI is suspended while the shell runs; type `exit` (or Ctrl+D) to return.
+When the cursor is on a single host (or exactly one host is selected), pressing `Enter`/`s` opens a full PTY shell — same as `glidesh console -t <host>`. The console TUI is suspended while the shell runs; type `exit` (or Ctrl+D) to return.
 
 ### Group or multi-select
 
-When a group is focused or multiple hosts are selected, the console launches the broadcast multi-host TUI (the same UI as `glidesh shell -t <group>` without `-c`). You type a command once and it runs concurrently on every selected host with `[hostname]`-prefixed output.
+When a group is focused or multiple hosts are selected, the console launches the broadcast multi-host TUI (the same UI as `glidesh console -t <group>` without `-c`). You type a command once and it runs concurrently on every selected host with `[hostname]`-prefixed output.
 
 ### Tunnels keep running
 
 Background tunnel tasks are independent of the foreground shell. Tunnels stay open and continue to accept connections while you are inside a shell session.
+
+## Plans
+
+The right-side **Plan** panel shows the plan associated with whatever the cursor is on:
+
+| Cursor on | Plan source | Target filter passed to `glidesh run` |
+|-----------|-------------|---------------------------------------|
+| A group with `plan="..."` | the group's plan | the group name |
+| A host inside a group | the host's own `plan="..."` if set, otherwise the group's plan | the host name (own plan) or `group:host` (group plan) |
+| An ungrouped host with `plan="..."` | the host's plan | the host name |
+| Anything without an associated plan | — | (panel shows "no plan associated") |
+
+Press `r` to run it. The console suspends, `glidesh run -i <inv> -p <plan> -t <target>` is spawned with inherited stdio (so the run TUI takes over the terminal), and you return to the console after pressing a key. Tunnels stay open in the background. SSH key path and host-key flags are forwarded from the console invocation.
 
 ## Tunnels
 
@@ -182,4 +197,4 @@ The console requires a TTY. If stdout is piped or redirected, `glidesh console` 
 `glidesh console` requires a TTY. Use `glidesh run` for scripted execution.
 ```
 
-For automation, use `glidesh run` or `glidesh shell -c "..."` instead.
+For automation, use `glidesh run` or `glidesh console -t <name> -c "..."` instead — the latter runs without a TTY when `--command` is set.

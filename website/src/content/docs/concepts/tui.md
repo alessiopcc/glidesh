@@ -5,9 +5,9 @@ description: Terminal user interfaces for plan execution, post-run debugging, th
 
 glidesh ships several terminal UIs, each suited to a different workflow:
 
-- **[Console](/cli/console/)** — opened by `glidesh` with no subcommand (or `glidesh console`). Browse groups/hosts, open shells, manage SSH local and reverse port forwards. Saved tunnels auto-reopen across sessions.
+- **[Console](/cli/console/)** — opened by `glidesh` with no subcommand (or `glidesh console`) when no `--target`/`--command` is given. Browse groups/hosts, open shells, manage SSH local and reverse port forwards. Saved tunnels auto-reopen across sessions.
 - **Plan Execution TUI** — opens during `glidesh run` to show live progress, per-node logs, and a post-run shell.
-- **Interactive Group Shell** — opens during `glidesh shell -t <group>` to broadcast commands across multiple hosts.
+- **Interactive Group Shell** — opens via `glidesh console -t <group>` (no `-c`) to broadcast commands across multiple hosts.
 
 ## Plan Execution TUI
 
@@ -55,10 +55,10 @@ Shell access respects jump host configuration. If a host was reached through a b
 
 ## Interactive Group Shell (TUI)
 
-The `glidesh shell` command opens a dedicated TUI when targeting multiple hosts without `-c`:
+The `glidesh console` command opens a dedicated broadcast TUI when targeting multiple hosts without `-c`:
 
 ```bash
-glidesh shell -i inventory.kdl -t web
+glidesh console -i inventory.kdl -t web
 ```
 
 This TUI has two panels:
@@ -106,10 +106,10 @@ Hosts: 2 total, 2 ok, 0 failed, 4 changed
 
 The TUI is disabled automatically when stdout is not a TTY (e.g., when piping to a file or running in a non-interactive shell). You do not need `--no-tui` in most CI environments.
 
-### `glidesh shell -c` in CI
+### `glidesh console -c` in CI
 
 For running commands across hosts in CI, use the `-c` flag — it always produces plain text output regardless of TTY:
 
 ```bash
-glidesh shell -i inventory.kdl -t web -c "systemctl status myapp" --no-host-key-check
+glidesh console -i inventory.kdl -t web -c "systemctl status myapp" --no-host-key-check
 ```

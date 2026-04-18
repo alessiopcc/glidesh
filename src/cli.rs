@@ -23,10 +23,7 @@ pub enum Commands {
     /// Validate configuration files
     Validate(ValidateArgs),
 
-    /// Open an interactive shell or run a command on target hosts
-    Shell(ShellArgs),
-
-    /// Open the interactive connection console (groups, shells, tunnels)
+    /// Connection console: TUI when no target/command, otherwise shell or one-shot exec
     Console(ConsoleArgs),
 }
 
@@ -36,9 +33,21 @@ pub struct ConsoleArgs {
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
 
+    /// Target filter: group name, host name, or group:hostname
+    #[arg(short, long)]
+    pub target: Option<String>,
+
+    /// Command to run (if set, skips TUI and executes on resolved targets)
+    #[arg(short, long)]
+    pub command: Option<String>,
+
     /// SSH private key path
     #[arg(short, long)]
     pub key: Option<PathBuf>,
+
+    /// Max concurrent hosts when running a command (minimum 1)
+    #[arg(long, default_value = "10", value_parser = parse_concurrency)]
+    pub concurrency: usize,
 
     /// Skip SSH host key verification
     #[arg(long)]
@@ -121,37 +130,6 @@ pub struct LogsArgs {
     /// Specific run directory
     #[arg(long)]
     pub run: Option<String>,
-}
-
-#[derive(Parser, Debug)]
-pub struct ShellArgs {
-    /// Path to the inventory file
-    #[arg(short, long)]
-    pub inventory: PathBuf,
-
-    /// Target filter: group name, host name, or group:hostname
-    #[arg(short, long)]
-    pub target: Option<String>,
-
-    /// Command to run (if omitted, opens interactive shell for single host)
-    #[arg(short, long)]
-    pub command: Option<String>,
-
-    /// SSH private key path
-    #[arg(short, long)]
-    pub key: Option<PathBuf>,
-
-    /// Max concurrent hosts (minimum 1)
-    #[arg(long, default_value = "10", value_parser = parse_concurrency)]
-    pub concurrency: usize,
-
-    /// Skip SSH host key verification
-    #[arg(long)]
-    pub no_host_key_check: bool,
-
-    /// Accept and save new host keys to known_hosts
-    #[arg(long)]
-    pub accept_new_host_key: bool,
 }
 
 #[derive(Parser, Debug)]

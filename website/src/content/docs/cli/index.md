@@ -16,7 +16,7 @@ If no inventory is present in the working directory, glidesh exits with an error
 
 ## `glidesh console`
 
-Open the interactive connection console — browse groups/hosts, open shells, and manage SSH tunnels. See the dedicated [Console](/cli/console/) page for full details.
+Connection console: opens the interactive TUI when invoked with no `--target` and no `--command`; otherwise behaves like a shell — interactive PTY for a single host, broadcast TUI for multiple hosts, or one-shot exec when `--command` is set. See the dedicated [Console](/cli/console/) page for full details on the TUI.
 
 ```
 glidesh console [OPTIONS]
@@ -25,9 +25,21 @@ glidesh console [OPTIONS]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--inventory <PATH>` | `-i` | Path to the inventory file | `./inventory.kdl` |
+| `--target <NAME>` | `-t` | Target filter: group name, host name, or group:hostname | — |
+| `--command <CMD>` | `-c` | Command to run (skips the TUI; runs on resolved targets) | — |
 | `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
+| `--concurrency <N>` | — | Max concurrent hosts when running a command (minimum 1) | `10` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys | `false` |
+
+### Mode selection
+
+| `--target` | `--command` | Behavior |
+|------------|-------------|----------|
+| —          | —           | Console TUI (requires a TTY) |
+| single host resolved | — | Interactive PTY shell |
+| multiple hosts resolved | — | Broadcast group shell TUI |
+| any        | set         | Run command, stream `[hostname]`-prefixed output |
 
 ## `glidesh run`
 
@@ -123,42 +135,18 @@ glidesh logs --last --node web-1
 glidesh logs --run 20250115_143022_setup
 ```
 
-## `glidesh shell`
+### Examples
 
-Open an interactive shell or run commands directly on inventory hosts — no plan file needed.
-
-```
-glidesh shell [OPTIONS] --inventory <PATH>
-```
-
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--inventory <PATH>` | `-i` | Path to the inventory file | *(required)* |
-| `--target <NAME>` | `-t` | Target filter: group name, host name, or group:hostname | — |
-| `--command <CMD>` | `-c` | Command to run (skip interactive mode) | — |
-| `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
-| `--concurrency <N>` | — | Max concurrent hosts (minimum 1) | `10` |
-| `--no-host-key-check` | — | Skip SSH host key verification | `false` |
-| `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
-
-The `shell` command resolves SSH keys using the same [resolution order](#ssh-key-resolution) as `run`.
-
-### Interactive shell (single host)
-
-Target a single host to open a full PTY shell session:
+Interactive PTY on a single host:
 
 ```bash
-glidesh shell -i inventory.kdl -t web-1
+glidesh console -i inventory.kdl -t web-1
 ```
 
-This works exactly like SSH — you get a remote terminal and can run commands interactively. Type `exit` to disconnect.
-
-### Run a command across hosts
-
-Use `-c` to run a command on one or more hosts. Output is streamed with `[hostname]` prefixes:
+Run a command across a group, stream prefixed output:
 
 ```bash
-glidesh shell -i inventory.kdl -t web -c "df -h /"
+glidesh console -i inventory.kdl -t web -c "df -h /"
 ```
 
 ```
@@ -167,21 +155,13 @@ glidesh shell -i inventory.kdl -t web -c "df -h /"
 [web-3] /dev/sda1  50G  45G   5G  90% /
 ```
 
-Run on every host in the inventory:
+Broadcast TUI across a group (no `-c`):
 
 ```bash
-glidesh shell -i inventory.kdl -c "uptime"
+glidesh console -i inventory.kdl -t web
 ```
 
-### Interactive group shell (TUI)
-
-When targeting multiple hosts without `-c`, glidesh opens a TUI with a command input bar:
-
-```bash
-glidesh shell -i inventory.kdl -t web
-```
-
-Type a command and press Enter — it runs on all targeted hosts concurrently and streams `[hostname]`-prefixed results in real time. Press Ctrl+D to exit.
+The console resolves SSH keys using the same [resolution order](#ssh-key-resolution) as `run`.
 
 ## `glidesh validate`
 
