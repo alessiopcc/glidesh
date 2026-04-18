@@ -222,7 +222,17 @@ fn detect_init_system(family: &OsFamily) -> InitSystem {
 }
 
 async fn detect_nix(ssh: &SshSession) -> Result<bool, GlideshError> {
-    let output = ssh.exec("which nix 2>/dev/null").await?;
+    // SSH non-interactive sessions don't source /etc/profile or ~/.profile, so
+    // `which nix` (and `command -v nix`) can fail even when Nix is installed —
+    // the Nix profile scripts are what add it to PATH. Check the common
+    // absolute paths first to avoid false negatives.
+    let output = ssh
+        .exec(
+            "[ -x /nix/var/nix/profiles/default/bin/nix ] \
+             || [ -x \"$HOME/.nix-profile/bin/nix\" ] \
+             || command -v nix >/dev/null 2>&1",
+        )
+        .await?;
     Ok(output.exit_code == 0)
 }
 
