@@ -17,6 +17,9 @@ pub struct OsInfo {
     pub pkg_manager: PkgManager,
     pub init_system: InitSystem,
     pub container_runtime: Option<ContainerRuntime>,
+    // Skip when false so the external-plugin JSON wire format is unchanged for
+    // non-NixOS hosts — only hosts with Nix present emit this new field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nix_installed: bool,
 }
 
