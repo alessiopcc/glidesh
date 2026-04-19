@@ -53,6 +53,14 @@ A multi-group setup with web, app, and database tiers. Uses plan includes for sh
 
 [View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/multi-tier)
 
+## nix-deploy
+
+Install packages via Nix on any distribution, run commands in ephemeral Nix shells, manage channels, and garbage collect the store.
+
+**Modules used:** nix
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/nix-deploy)
+
 ## external-module
 
 Use an external plugin to set the system MOTD. Demonstrates the `external` keyword and the JSON-over-stdio plugin protocol with a simple Python module.

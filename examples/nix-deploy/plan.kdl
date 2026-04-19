@@ -1,0 +1,29 @@
+plan "nix-deploy" {
+    step "Install packages with Nix" {
+        nix "htop" install=#true
+        nix "ripgrep" install=#true
+    }
+
+    step "Run command in Nix shell" {
+        nix "python3 -c 'import sys; print(sys.version)'" {
+            action "shell"
+            packages {
+                - "python3"
+            }
+        }
+    }
+
+    step "Manage channel" {
+        nix "nixpkgs-unstable" {
+            action "channel"
+            url "https://nixos.org/channels/nixpkgs-unstable"
+        }
+    }
+
+    step "Cleanup Nix store" {
+        nix "store-gc" {
+            action "gc"
+            older-than "30d"
+        }
+    }
+}

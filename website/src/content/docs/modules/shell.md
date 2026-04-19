@@ -25,6 +25,7 @@ shell "curl -sf http://localhost:8080/health" {
 | `check` | string | Gate command — if it exits 0 the step is skipped (already satisfied) |
 | `retries` | integer | Number of retry attempts on failure |
 | `delay` | integer | Seconds between retries |
+| `login` | boolean | Run the command (and `check` gate) inside a POSIX login shell so `/etc/profile` and `~/.profile` are sourced |
 
 ## Conditional execution with `check`
 
@@ -79,6 +80,28 @@ This is equivalent to:
 ```kdl
 shell "apt-get update -qq && apt-get install -y software-properties-common && add-apt-repository -y ppa:deadsnakes/ppa && apt-get update -qq"
 ```
+
+## Login shell environment (`login=#true`)
+
+SSH non-interactive sessions start with a minimal environment. Profile scripts in `/etc/profile`, `/etc/profile.d/*.sh`, and `~/.profile` — which is where **Nix**, **asdf**, **nvm**, **rustup**, and similar tools inject their `PATH` entries — are **not** sourced by default. That means a command like `shell "rg foo"` will often fail with `command not found` even though the tool is installed.
+
+Set `login=#true` to wrap the command (and the `check` gate) in `sh -l -c '…'`, which forces the remote to read those profile scripts:
+
+```kdl
+// Nix-installed tool
+shell "rg TODO ./src" login=#true
+
+// With a check gate
+shell {
+    cmd "mytool --refresh"
+    check "command -v mytool"
+    login #true
+}
+```
+
+Use this whenever the tool lives in a user profile or uses shims (`~/.nix-profile/bin`, `~/.asdf/shims`, `~/.nvm/versions/...`). You do **not** need it for tools in system paths like `/usr/bin` or `/usr/local/bin`.
+
+See also the [nix module](/modules/nix/) for higher-level package/shell/build operations that set up their own Nix environment.
 
 ## Idempotency
 
