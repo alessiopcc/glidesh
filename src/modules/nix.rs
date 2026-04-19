@@ -55,8 +55,15 @@ impl NixModule {
         tracing::info!("Installing Nix via Determinate Systems installer");
 
         let cmd = format!(
-            "curl -sSf -L {} | sh -s -- install --no-confirm",
-            NIX_INSTALLER_URL
+            "if command -v curl >/dev/null 2>&1; then \
+               curl -sSf -L '{url}' | sh -s -- install --no-confirm; \
+             elif command -v wget >/dev/null 2>&1; then \
+               wget -qO- '{url}' | sh -s -- install --no-confirm; \
+             else \
+               echo 'Nix auto-install requires curl or wget on the target.' >&2; \
+               exit 127; \
+             fi",
+            url = NIX_INSTALLER_URL
         );
         let output = ctx.ssh.exec(&cmd).await?;
 
