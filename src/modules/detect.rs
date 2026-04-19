@@ -5,6 +5,10 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// Nix commands live in profile-script paths that non-login SSH shells don't
+// pick up. `PkgManager::Nix` prepends this so `nix-env` is resolvable.
+const NIX_PATH_PREFIX: &str = "export PATH=/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:/run/current-system/sw/bin:$PATH";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OsInfo {
     pub id: String,
@@ -84,7 +88,7 @@ impl PkgManager {
                     .iter()
                     .map(|p| format!("nix-env -iA {}", shell_escape(&format!("nixpkgs.{}", p))))
                     .collect();
-                cmds.join(" && ")
+                format!("{}; {}", NIX_PATH_PREFIX, cmds.join(" && "))
             }
         }
     }
@@ -100,7 +104,7 @@ impl PkgManager {
             PkgManager::Zypper => format!("zypper remove -y {}", pkgs),
             PkgManager::Nix => {
                 let escaped: Vec<String> = packages.iter().map(|p| shell_escape(p)).collect();
-                format!("nix-env -e {}", escaped.join(" "))
+                format!("{}; nix-env -e {}", NIX_PATH_PREFIX, escaped.join(" "))
             }
         }
     }
@@ -117,7 +121,11 @@ impl PkgManager {
             PkgManager::Zypper => format!("rpm -q {} >/dev/null 2>&1", package),
             PkgManager::Nix => {
                 let pkg_q = shell_escape(package);
-                format!("nix-env -q {pkg} 2>/dev/null | grep -qw {pkg}", pkg = pkg_q)
+                format!(
+                    "{}; nix-env -q {pkg} 2>/dev/null | grep -qw {pkg}",
+                    NIX_PATH_PREFIX,
+                    pkg = pkg_q
+                )
             }
         }
     }

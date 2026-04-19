@@ -7,6 +7,10 @@ pub struct NixModule;
 
 const NIX_INSTALLER_URL: &str = "https://install.determinate.systems/nix";
 
+// Nix binaries live in profile-script paths that non-login SSH shells don't
+// pick up. Prepending this keeps `nix`/`nix-env`/`nix-channel` resolvable.
+const NIX_PATH_PREFIX: &str = "export PATH=/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:/run/current-system/sw/bin:$PATH";
+
 impl NixModule {
     // `OsInfo` is detected once at connection time, so `nix_installed` can be
     // stale after an earlier task in the same run auto-installs Nix. Re-probe
@@ -75,6 +79,10 @@ impl NixModule {
             .get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("install")
+    }
+
+    fn with_nix_path(cmd: &str) -> String {
+        format!("{}; {}", NIX_PATH_PREFIX, cmd)
     }
 
     fn shell_escape(s: &str) -> String {
@@ -171,7 +179,7 @@ impl NixModule {
 
         let profile_arg = Self::profile_arg(params);
         let check_cmd = Self::build_check_install_cmd(package, &profile_arg);
-        let output = ctx.ssh.exec(&check_cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&check_cmd)).await?;
         let is_installed = output.exit_code == 0;
 
         match (desired_state, is_installed) {
@@ -218,7 +226,7 @@ impl NixModule {
         let profile_arg = Self::profile_arg(params);
         let cmd = Self::build_apply_install_cmd(package, desired_state, &profile_arg);
 
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -295,7 +303,7 @@ impl NixModule {
 
         let cmd = Self::build_shell_cmd(command, packages);
 
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -366,7 +374,7 @@ impl NixModule {
             Self::shell_escape(derivation),
             Self::shell_escape(out_link)
         );
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -401,7 +409,7 @@ impl NixModule {
             "nix-channel --list 2>/dev/null | grep -qw {}",
             Self::shell_escape(channel_name)
         );
-        let output = ctx.ssh.exec(&check_cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&check_cmd)).await?;
         let exists = output.exit_code == 0;
 
         match (desired_state, exists) {
@@ -464,7 +472,7 @@ impl NixModule {
             }
         };
 
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -483,7 +491,10 @@ impl NixModule {
             .unwrap_or(true);
 
         if should_update {
-            let update_output = ctx.ssh.exec("nix-channel --update").await?;
+            let update_output = ctx
+                .ssh
+                .exec(&Self::with_nix_path("nix-channel --update"))
+                .await?;
             if update_output.exit_code != 0 {
                 return Err(GlideshError::Module {
                     module: "nix".to_string(),
@@ -537,7 +548,7 @@ impl NixModule {
             format!("cd {} && nix flake update", Self::shell_escape(flake_dir))
         };
 
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -588,7 +599,7 @@ impl NixModule {
             "nix-collect-garbage -d".to_string()
         };
 
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
