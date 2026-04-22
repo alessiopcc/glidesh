@@ -32,7 +32,7 @@ step "Write the same token everywhere" {
 | *(positional)* | string | Descriptive label for logs |
 | `cmd` | string or list | Single command, or list joined with `&&` |
 | `on` | string | Inventory host name to run on; default runs on the controller |
-| `login` | boolean | Wrap command in `sh -l -c '…'` (only meaningful with `on=`) |
+| `login` | boolean | Wrap command in `sh -l -c '…'` on the remote target (requires `on=`; rejected for controller-local execution) |
 
 ## Semantics
 

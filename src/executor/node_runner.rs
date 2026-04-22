@@ -394,8 +394,16 @@ impl NodeRunner {
     ) -> Result<bool, (String, String)> {
         let interpolated_args =
             interpolate_args(&task.args, vars).map_err(|e| (step.name.clone(), e.to_string()))?;
-        let resource_name = glidesh::config::template::interpolate(&task.resource, vars)
+        let mut resource_name = glidesh::config::template::interpolate(&task.resource, vars)
             .map_err(|e| (step.name.clone(), e.to_string()))?;
+
+        if resource_name.is_empty() {
+            match interpolated_args.get("cmd") {
+                Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
+                Some(ParamValue::String(s)) => resource_name = s.clone(),
+                _ => {}
+            }
+        }
 
         let params = ModuleParams {
             resource_name: resource_name.clone(),
@@ -434,14 +442,17 @@ impl NodeRunner {
                 if let Some(ref var_name) = task.register {
                     vars.insert(var_name.clone(), out.stdout.trim().to_string());
                 }
-                *total_changed += 1;
+                let changed = !self.dry_run;
+                if changed {
+                    *total_changed += 1;
+                }
                 let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                     host: self.host.name.clone(),
                     module: task.module.clone(),
                     resource: resource_name,
-                    changed: true,
+                    changed,
                 });
-                Ok(true)
+                Ok(changed)
             }
             Err(msg) => {
                 let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {

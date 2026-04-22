@@ -32,17 +32,30 @@ pub async fn run_host_task(
     dry_run: bool,
 ) -> Result<HostOutput, GlideshError> {
     let raw = resolve_cmd_from_params(params, MODULE_NAME)?;
-    let command = if login_enabled(params) {
-        wrap_login(&raw)
-    } else {
-        raw
-    };
 
     let on = params
         .args
         .get("on")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // `login=` sources profile scripts on the remote target via `sh -l -c`.
+    // It has no meaning for controller-local execution (and on Windows the
+    // local path uses `cmd /C`, where `sh -l -c` would fail). Reject rather
+    // than silently ignore, so plans with a mistaken `login=true` on a
+    // local `host` task get a clear error.
+    if login_enabled(params) && on.is_none() {
+        return Err(GlideshError::Module {
+            module: MODULE_NAME.to_string(),
+            message: "login=true requires on=\"<host>\" — it only applies to remote execution"
+                .to_string(),
+        });
+    }
+    let command = if on.is_some() && login_enabled(params) {
+        wrap_login(&raw)
+    } else {
+        raw
+    };
 
     if dry_run {
         let where_ = on.as_deref().unwrap_or("<local>");
@@ -260,6 +273,28 @@ mod tests {
         assert_eq!(out.exit_code, 0);
         assert!(out.stdout.contains("[dry-run]"));
         assert!(out.stdout.contains("echo dry"));
+    }
+
+    #[tokio::test]
+    async fn login_without_on_is_rejected() {
+        let p = params(
+            "gen",
+            &[
+                ("cmd", ParamValue::String("echo x".to_string())),
+                ("login", ParamValue::Bool(true)),
+            ],
+        );
+        let err = run_host_task(&p, &[], &dummy_key(), dummy_policy(), false)
+            .await
+            .unwrap_err();
+        match err {
+            GlideshError::Module { module, message } => {
+                assert_eq!(module, "host");
+                assert!(message.contains("login=true"));
+                assert!(message.contains("on="));
+            }
+            _ => panic!("expected Module error"),
+        }
     }
 
     #[tokio::test]
