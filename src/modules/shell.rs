@@ -40,6 +40,21 @@ impl ShellModule {
             })
         }
     }
+
+    fn login_enabled(params: &ModuleParams) -> bool {
+        params
+            .args
+            .get("login")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    // A login shell sources /etc/profile and ~/.profile, which is where Nix,
+    // asdf, nvm, rustup, etc. inject their PATH entries.
+    fn wrap_login(cmd: &str) -> String {
+        let escaped = cmd.replace('\'', "'\\''");
+        format!("sh -l -c '{}'", escaped)
+    }
 }
 
 #[async_trait]
@@ -59,7 +74,12 @@ impl Module for ShellModule {
 
         match gate {
             Some(check_cmd) => {
-                let output = ctx.ssh.exec(check_cmd).await?;
+                let gate_cmd = if Self::login_enabled(params) {
+                    Self::wrap_login(check_cmd)
+                } else {
+                    check_cmd.to_string()
+                };
+                let output = ctx.ssh.exec(&gate_cmd).await?;
                 if output.exit_code == 0 {
                     Ok(ModuleStatus::Satisfied)
                 } else {
@@ -79,7 +99,12 @@ impl Module for ShellModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleResult, GlideshError> {
-        let command = Self::resolve_command(params)?;
+        let raw = Self::resolve_command(params)?;
+        let command = if Self::login_enabled(params) {
+            Self::wrap_login(&raw)
+        } else {
+            raw
+        };
 
         if ctx.dry_run {
             return Ok(ModuleResult {
@@ -130,5 +155,47 @@ impl Module for ShellModule {
                 command, output.exit_code, max_retries, output.stdout, output.stderr
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::ParamValue;
+
+    fn params_with(args: &[(&str, ParamValue)]) -> ModuleParams {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in args {
+            map.insert((*k).to_string(), v.clone());
+        }
+        ModuleParams {
+            resource_name: String::new(),
+            args: map,
+        }
+    }
+
+    #[test]
+    fn login_disabled_by_default() {
+        let p = params_with(&[]);
+        assert!(!ShellModule::login_enabled(&p));
+    }
+
+    #[test]
+    fn login_enabled_when_true() {
+        let p = params_with(&[("login", ParamValue::Bool(true))]);
+        assert!(ShellModule::login_enabled(&p));
+    }
+
+    #[test]
+    fn wrap_login_wraps_in_sh_l_c() {
+        assert_eq!(ShellModule::wrap_login("rg foo"), "sh -l -c 'rg foo'");
+    }
+
+    #[test]
+    fn wrap_login_escapes_single_quotes() {
+        assert_eq!(
+            ShellModule::wrap_login("echo 'hi'"),
+            "sh -l -c 'echo '\\''hi'\\'''"
+        );
     }
 }

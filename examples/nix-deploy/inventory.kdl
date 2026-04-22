@@ -1,0 +1,8 @@
+vars {
+    deploy-user "admin"
+}
+
+group "servers" {
+    host "web1" "192.168.1.10" user="root"
+    host "web2" "192.168.1.11" user="root"
+}

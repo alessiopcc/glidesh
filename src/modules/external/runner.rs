@@ -453,6 +453,7 @@ mod tests {
                 pkg_manager: crate::modules::detect::PkgManager::Apt,
                 init_system: crate::modules::detect::InitSystem::Systemd,
                 container_runtime: None,
+                nix_installed: false,
             },
             vars: &std::collections::HashMap::new(),
             dry_run: false,
@@ -461,5 +462,8 @@ mod tests {
         assert!(json.contains("\"method\":\"check\""));
         assert!(json.contains("\"resource_name\":\"test\""));
         assert!(json.contains("\"family\":\"debian\""));
+        // `nix_installed: false` must be omitted so the wire format stays
+        // unchanged for non-Nix hosts (protocol v1 compatibility).
+        assert!(!json.contains("nix_installed"));
     }
 }

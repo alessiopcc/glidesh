@@ -42,6 +42,7 @@ export default defineConfig({
 						{ label: 'disk', slug: 'modules/disk' },
 						{ label: 'external', slug: 'modules/external' },
 						{ label: 'file', slug: 'modules/file' },
+						{ label: 'nix', slug: 'modules/nix' },
 						{ label: 'package', slug: 'modules/package' },
 						{ label: 'shell', slug: 'modules/shell' },
 						{ label: 'systemd', slug: 'modules/systemd' },

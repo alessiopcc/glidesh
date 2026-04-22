@@ -35,6 +35,7 @@ Because modules check before acting, plans are safe to run repeatedly. If a pack
 | [container](/modules/container/) | Manage containers (Docker/Podman) |
 | [file](/modules/file/) | Transfer files, templates, and fetch |
 | [disk](/modules/disk/) | Format and mount block devices |
+| [nix](/modules/nix/) | Cross-distro Nix packages and environments |
 
 ### External
 

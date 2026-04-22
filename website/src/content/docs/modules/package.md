@@ -30,8 +30,13 @@ package "telnet" state="absent"
 | `pacman` | Arch Linux |
 | `apk` | Alpine Linux |
 | `zypper` | openSUSE |
+| `nix` | NixOS |
 
 The package manager is detected automatically based on the target host's OS.
+
+> For installing Nix packages on non-NixOS distributions, use the [nix](/modules/nix/) module instead.
+>
+> On NixOS, `package` installs into the invoking user's profile (via `nix-env`), not system-wide configuration in `/etc/nixos/configuration.nix`. For system-wide installs, edit the NixOS configuration directly or use the `nix` module with an explicit `profile=`.
 
 ## Idempotency
 

@@ -2,6 +2,7 @@ use crate::config::types::ResolvedJumpHost;
 use crate::error::GlideshError;
 use crate::ssh::HostKeyPolicy;
 use crate::ssh::handler::{ForwardRegistry, SshHandler, new_forward_registry};
+use crate::util::shell_escape;
 use crossterm::event::{self, Event, KeyModifiers};
 use russh::Channel;
 use russh::client;
@@ -770,11 +771,6 @@ impl SshSession {
 
         Ok(())
     }
-}
-
-/// Escape a string for safe use in shell commands by wrapping in single quotes.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Convert a crossterm key event into the byte sequence expected by a remote terminal.
