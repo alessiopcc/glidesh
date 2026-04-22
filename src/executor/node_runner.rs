@@ -1,9 +1,11 @@
+use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::template::{TemplateData, interpolate_args};
 use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step};
 use glidesh::error::GlideshError;
 use glidesh::modules::context::ModuleContext;
 use glidesh::modules::detect::{OsInfo, detect_os};
+use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
@@ -22,6 +24,8 @@ pub struct NodeRunner {
     pub event_tx: mpsc::UnboundedSender<ExecutorEvent>,
     pub inventory_template_data: Arc<TemplateData>,
     pub plan_base_dir: Arc<PathBuf>,
+    pub coordinator: Arc<HostCoordinator>,
+    pub all_targets: Arc<Vec<ResolvedHost>>,
 }
 
 impl NodeRunner {
@@ -127,6 +131,8 @@ impl NodeRunner {
                     match self
                         .run_step_tasks(
                             step,
+                            step_idx,
+                            0,
                             &mut vars,
                             &template_data,
                             &session,
@@ -174,11 +180,13 @@ impl NodeRunner {
                     };
 
                     let mut any_iteration_changed = false;
-                    for item in &items {
+                    for (iter_idx, item) in items.iter().enumerate() {
                         vars.insert("item".to_string(), item.clone());
                         match self
                             .run_step_tasks(
                                 step,
+                                step_idx,
+                                iter_idx,
                                 &mut vars,
                                 &template_data,
                                 &session,
@@ -230,6 +238,8 @@ impl NodeRunner {
     async fn run_step_tasks(
         &self,
         step: &Step,
+        step_idx: usize,
+        loop_iter: usize,
         vars: &mut HashMap<String, String>,
         template_data: &TemplateData,
         session: &SshSession,
@@ -239,7 +249,23 @@ impl NodeRunner {
     ) -> Result<bool, (String, String)> {
         let mut any_changed = false;
 
-        for task in &step.tasks {
+        for (task_idx, task) in step.tasks.iter().enumerate() {
+            if task.module == host_module::MODULE_NAME {
+                let changed = self
+                    .run_host_task(
+                        step,
+                        step_idx,
+                        task_idx,
+                        loop_iter,
+                        task,
+                        vars,
+                        total_changed,
+                    )
+                    .await?;
+                any_changed |= changed;
+                continue;
+            }
+
             let module = self.registry.get(&task.module).ok_or_else(|| {
                 (
                     step.name.clone(),
@@ -353,5 +379,79 @@ impl NodeRunner {
             }
         }
         Ok(any_changed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_host_task(
+        &self,
+        step: &Step,
+        step_idx: usize,
+        task_idx: usize,
+        loop_iter: usize,
+        task: &glidesh::config::types::TaskDef,
+        vars: &mut HashMap<String, String>,
+        total_changed: &mut usize,
+    ) -> Result<bool, (String, String)> {
+        let interpolated_args =
+            interpolate_args(&task.args, vars).map_err(|e| (step.name.clone(), e.to_string()))?;
+        let resource_name = glidesh::config::template::interpolate(&task.resource, vars)
+            .map_err(|e| (step.name.clone(), e.to_string()))?;
+
+        let params = ModuleParams {
+            resource_name: resource_name.clone(),
+            args: interpolated_args,
+        };
+
+        let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
+            host: self.host.name.clone(),
+            module: task.module.clone(),
+            resource: resource_name.clone(),
+        });
+
+        let key = TaskKey {
+            step_idx,
+            task_idx,
+            loop_iter,
+        };
+
+        let targets = self.all_targets.clone();
+        let ssh_key = self.key.clone();
+        let policy = self.host_key_policy;
+        let dry_run = self.dry_run;
+        let params_for_exec = params.clone();
+
+        let result = self
+            .coordinator
+            .get_or_run(key, move || async move {
+                host_module::run_host_task(&params_for_exec, &targets, &ssh_key, policy, dry_run)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+
+        match result {
+            Ok(out) => {
+                if let Some(ref var_name) = task.register {
+                    vars.insert(var_name.clone(), out.stdout.trim().to_string());
+                }
+                *total_changed += 1;
+                let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
+                    host: self.host.name.clone(),
+                    module: task.module.clone(),
+                    resource: resource_name,
+                    changed: true,
+                });
+                Ok(true)
+            }
+            Err(msg) => {
+                let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
+                    host: self.host.name.clone(),
+                    module: task.module.clone(),
+                    resource: resource_name,
+                    error: msg.clone(),
+                });
+                Err((step.name.clone(), msg))
+            }
+        }
     }
 }

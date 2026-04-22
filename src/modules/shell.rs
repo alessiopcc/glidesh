@@ -5,55 +5,71 @@ use async_trait::async_trait;
 
 pub struct ShellModule;
 
-impl ShellModule {
-    fn resolve_command(params: &ModuleParams) -> Result<String, GlideshError> {
-        if let Some(cmd_val) = params.args.get("cmd") {
-            if let Some(cmd_list) = cmd_val.as_list() {
-                if cmd_list.is_empty() {
-                    return Err(GlideshError::Module {
-                        module: "shell".to_string(),
-                        message: "cmd list must not be empty".to_string(),
-                    });
-                }
-                Ok(cmd_list.join(" && "))
-            } else if let Some(cmd_str) = cmd_val.as_str() {
-                if cmd_str.is_empty() {
-                    return Err(GlideshError::Module {
-                        module: "shell".to_string(),
-                        message: "cmd must not be empty".to_string(),
-                    });
-                }
-                Ok(cmd_str.to_string())
-            } else {
-                Err(GlideshError::Module {
-                    module: "shell".to_string(),
-                    message: "cmd must be a string or a list of strings".to_string(),
-                })
+pub(crate) fn resolve_cmd_from_params(
+    params: &ModuleParams,
+    module_name: &str,
+) -> Result<String, GlideshError> {
+    if let Some(cmd_val) = params.args.get("cmd") {
+        if let Some(cmd_list) = cmd_val.as_list() {
+            if cmd_list.is_empty() {
+                return Err(GlideshError::Module {
+                    module: module_name.to_string(),
+                    message: "cmd list must not be empty".to_string(),
+                });
             }
-        } else if !params.resource_name.is_empty() {
-            Ok(params.resource_name.clone())
+            Ok(cmd_list.join(" && "))
+        } else if let Some(cmd_str) = cmd_val.as_str() {
+            if cmd_str.is_empty() {
+                return Err(GlideshError::Module {
+                    module: module_name.to_string(),
+                    message: "cmd must not be empty".to_string(),
+                });
+            }
+            Ok(cmd_str.to_string())
         } else {
             Err(GlideshError::Module {
-                module: "shell".to_string(),
-                message: "shell requires a command (positional argument, cmd string, or cmd list)"
-                    .to_string(),
+                module: module_name.to_string(),
+                message: "cmd must be a string or a list of strings".to_string(),
             })
         }
+    } else if !params.resource_name.is_empty() {
+        Ok(params.resource_name.clone())
+    } else {
+        Err(GlideshError::Module {
+            module: module_name.to_string(),
+            message: format!(
+                "{module_name} requires a command (positional argument, cmd string, or cmd list)"
+            ),
+        })
+    }
+}
+
+pub(crate) fn login_enabled(params: &ModuleParams) -> bool {
+    params
+        .args
+        .get("login")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+// A login shell sources /etc/profile and ~/.profile, which is where Nix,
+// asdf, nvm, rustup, etc. inject their PATH entries.
+pub(crate) fn wrap_login(cmd: &str) -> String {
+    let escaped = cmd.replace('\'', "'\\''");
+    format!("sh -l -c '{}'", escaped)
+}
+
+impl ShellModule {
+    fn resolve_command(params: &ModuleParams) -> Result<String, GlideshError> {
+        resolve_cmd_from_params(params, "shell")
     }
 
     fn login_enabled(params: &ModuleParams) -> bool {
-        params
-            .args
-            .get("login")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        self::login_enabled(params)
     }
 
-    // A login shell sources /etc/profile and ~/.profile, which is where Nix,
-    // asdf, nvm, rustup, etc. inject their PATH entries.
     fn wrap_login(cmd: &str) -> String {
-        let escaped = cmd.replace('\'', "'\\''");
-        format!("sh -l -c '{}'", escaped)
+        self::wrap_login(cmd)
     }
 }
 
