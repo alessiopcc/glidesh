@@ -29,6 +29,7 @@ Because modules check before acting, plans are safe to run repeatedly. If a pack
 | Module | Description |
 |--------|-------------|
 | [shell](/modules/shell/) | Run arbitrary shell commands |
+| [host](/modules/host/) | Run once on the controller (or a chosen host) and share the result with every target |
 | [package](/modules/package/) | Install or remove system packages |
 | [user](/modules/user/) | Manage system users and groups |
 | [systemd](/modules/systemd/) | Control systemd services |

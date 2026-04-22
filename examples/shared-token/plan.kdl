@@ -1,0 +1,15 @@
+plan "shared-token" {
+    mode "sync"
+
+    step "Generate one token for the whole fleet" {
+        host "random token" cmd="openssl rand -hex 16" register="deploy_token"
+    }
+
+    step "Write the same token to every host" {
+        shell "mkdir -p /etc/app && echo ${deploy_token} > /etc/app/token"
+    }
+
+    step "Confirm each host has the shared value" {
+        shell "cat /etc/app/token"
+    }
+}
