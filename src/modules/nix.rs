@@ -1,6 +1,7 @@
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
+use crate::util::shell_escape;
 use async_trait::async_trait;
 
 pub struct NixModule;
@@ -92,10 +93,6 @@ impl NixModule {
         format!("{}; {}", NIX_PATH_PREFIX, cmd)
     }
 
-    fn shell_escape(s: &str) -> String {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
-
     /// Resolves `profile=`: `"user"` (default) → empty; `"default"`/`"system"`
     /// → `/nix/var/nix/profiles/default`; any other string → explicit path.
     fn profile_arg(params: &ModuleParams) -> String {
@@ -107,7 +104,7 @@ impl NixModule {
         match profile {
             "user" => String::new(),
             "default" | "system" => " --profile /nix/var/nix/profiles/default".to_string(),
-            other => format!(" --profile {}", Self::shell_escape(other)),
+            other => format!(" --profile {}", shell_escape(other)),
         }
     }
 
@@ -115,7 +112,7 @@ impl NixModule {
     // profile (either is a satisfactory "installed" state). `nix-env` does not
     // accept `--profile`, so non-user profiles only check `nix profile`.
     fn build_check_install_cmd(package: &str, profile_arg: &str) -> String {
-        let pkg_q = Self::shell_escape(package);
+        let pkg_q = shell_escape(package);
         if profile_arg.is_empty() {
             format!(
                 "nix profile list 2>/dev/null | grep -qw {pkg} || nix-env -q {pkg} 2>/dev/null | grep -qw {pkg}",
@@ -133,9 +130,9 @@ impl NixModule {
     // Non-user profiles skip the `nix-env` fallback: `nix-env` doesn't accept
     // `--profile` as `nix profile` does.
     fn build_apply_install_cmd(package: &str, desired_state: &str, profile_arg: &str) -> String {
-        let pkg_q = Self::shell_escape(package);
-        let flake_ref = Self::shell_escape(&format!("nixpkgs#{}", package));
-        let nix_env_attr = Self::shell_escape(&format!("nixpkgs.{}", package));
+        let pkg_q = shell_escape(package);
+        let flake_ref = shell_escape(&format!("nixpkgs#{}", package));
+        let nix_env_attr = shell_escape(&format!("nixpkgs.{}", package));
         let is_user = profile_arg.is_empty();
 
         match desired_state {
@@ -273,14 +270,14 @@ impl NixModule {
                 } else {
                     format!("nixpkgs#{}", p)
                 };
-                Self::shell_escape(&flake_ref)
+                shell_escape(&flake_ref)
             })
             .collect();
 
         format!(
             "nix shell {} --command bash -c {}",
             pkg_args.join(" "),
-            Self::shell_escape(command)
+            shell_escape(command)
         )
     }
 
@@ -340,7 +337,7 @@ impl NixModule {
             .and_then(|v| v.as_str())
             .unwrap_or("result");
 
-        let check_cmd = format!("test -L {}", Self::shell_escape(out_link));
+        let check_cmd = format!("test -L {}", shell_escape(out_link));
         let output = ctx.ssh.exec(&check_cmd).await?;
 
         if output.exit_code == 0 {
@@ -378,8 +375,8 @@ impl NixModule {
 
         let cmd = format!(
             "nix build {} -o {}",
-            Self::shell_escape(derivation),
-            Self::shell_escape(out_link)
+            shell_escape(derivation),
+            shell_escape(out_link)
         );
         let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
 
@@ -414,7 +411,7 @@ impl NixModule {
 
         let check_cmd = format!(
             "nix-channel --list 2>/dev/null | grep -qw {}",
-            Self::shell_escape(channel_name)
+            shell_escape(channel_name)
         );
         let output = ctx.ssh.exec(&Self::with_nix_path(&check_cmd)).await?;
         let exists = output.exit_code == 0;
@@ -466,11 +463,11 @@ impl NixModule {
                     })?;
                 format!(
                     "nix-channel --add {} {}",
-                    Self::shell_escape(url),
-                    Self::shell_escape(channel_name)
+                    shell_escape(url),
+                    shell_escape(channel_name)
                 )
             }
-            "absent" => format!("nix-channel --remove {}", Self::shell_escape(channel_name)),
+            "absent" => format!("nix-channel --remove {}", shell_escape(channel_name)),
             _ => {
                 return Err(GlideshError::Module {
                     module: "nix".to_string(),
@@ -548,11 +545,11 @@ impl NixModule {
         let cmd = if let Some(input) = params.args.get("input").and_then(|v| v.as_str()) {
             format!(
                 "cd {} && nix flake update {}",
-                Self::shell_escape(flake_dir),
-                Self::shell_escape(input)
+                shell_escape(flake_dir),
+                shell_escape(input)
             )
         } else {
-            format!("cd {} && nix flake update", Self::shell_escape(flake_dir))
+            format!("cd {} && nix flake update", shell_escape(flake_dir))
         };
 
         let output = ctx.ssh.exec(&Self::with_nix_path(&cmd)).await?;
@@ -600,7 +597,7 @@ impl NixModule {
         let cmd = if let Some(older_than) = params.args.get("older-than").and_then(|v| v.as_str()) {
             format!(
                 "nix-collect-garbage --delete-older-than {}",
-                Self::shell_escape(older_than)
+                shell_escape(older_than)
             )
         } else {
             "nix-collect-garbage -d".to_string()
@@ -728,16 +725,6 @@ mod tests {
             resource_name: String::new(),
             args: map,
         }
-    }
-
-    #[test]
-    fn shell_escape_wraps_in_single_quotes() {
-        assert_eq!(NixModule::shell_escape("ripgrep"), "'ripgrep'");
-    }
-
-    #[test]
-    fn shell_escape_escapes_embedded_quotes() {
-        assert_eq!(NixModule::shell_escape("it's"), "'it'\\''s'");
     }
 
     #[test]

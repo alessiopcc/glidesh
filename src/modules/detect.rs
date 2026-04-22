@@ -1,9 +1,6 @@
 use crate::error::GlideshError;
 use crate::ssh::SshSession;
-
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
+use crate::util::shell_escape;
 
 // Nix commands live in profile-script paths that non-login SSH shells don't
 // pick up. `PkgManager::Nix` prepends this so `nix-env` is resolvable.
