@@ -259,8 +259,9 @@ impl NixModule {
         })
     }
 
-    // Wrap in `bash -c '<escaped>'` so pipes, redirects, and quoted args in
-    // the user command are preserved (rather than tokenized by `nix shell`).
+    // Wrap in `sh -c '<escaped>'` so pipes, redirects, and quoted args in the
+    // user command are preserved (rather than tokenized by `nix shell`). `sh`
+    // over `bash` because Alpine/minimal targets don't ship bash.
     fn build_shell_cmd(command: &str, packages: &[String]) -> String {
         let pkg_args: Vec<String> = packages
             .iter()
@@ -275,7 +276,7 @@ impl NixModule {
             .collect();
 
         format!(
-            "nix shell {} --command bash -c {}",
+            "nix shell {} --command sh -c {}",
             pkg_args.join(" "),
             shell_escape(command)
         )
@@ -822,14 +823,14 @@ mod tests {
     }
 
     #[test]
-    fn build_shell_cmd_wraps_in_bash_c() {
+    fn build_shell_cmd_wraps_in_sh_c() {
         let cmd = NixModule::build_shell_cmd(
             "echo hello world",
             &["python3".to_string(), "jq".to_string()],
         );
         assert_eq!(
             cmd,
-            "nix shell 'nixpkgs#python3' 'nixpkgs#jq' --command bash -c 'echo hello world'"
+            "nix shell 'nixpkgs#python3' 'nixpkgs#jq' --command sh -c 'echo hello world'"
         );
     }
 
@@ -838,7 +839,7 @@ mod tests {
         let cmd = NixModule::build_shell_cmd("echo 'hi'", &["coreutils".to_string()]);
         assert_eq!(
             cmd,
-            "nix shell 'nixpkgs#coreutils' --command bash -c 'echo '\\''hi'\\'''"
+            "nix shell 'nixpkgs#coreutils' --command sh -c 'echo '\\''hi'\\'''"
         );
     }
 
@@ -855,8 +856,6 @@ mod tests {
             "curl -sf http://x | jq . > /tmp/out",
             &["curl".to_string(), "jq".to_string()],
         );
-        // The full command including pipes/redirects lives inside the single-quoted
-        // bash -c argument, so bash (not the outer shell) tokenizes it.
-        assert!(cmd.contains("bash -c 'curl -sf http://x | jq . > /tmp/out'"));
+        assert!(cmd.contains("sh -c 'curl -sf http://x | jq . > /tmp/out'"));
     }
 }
