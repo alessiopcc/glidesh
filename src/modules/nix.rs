@@ -489,11 +489,14 @@ impl NixModule {
             });
         }
 
+        // Only update after an add by default — running `--update` after a
+        // removal just risks a transient network failure turning a successful
+        // remove into an error.
         let should_update = params
             .args
             .get("update")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(desired_state == "present");
 
         if should_update {
             let update_output = ctx
