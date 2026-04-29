@@ -241,17 +241,61 @@ impl ConsoleState {
             }
             TreeRow::Host(gi, hi) => {
                 let host_idx = self.groups[*gi].host_idxs.get(*hi).copied()?;
-                if let Some(plan) = self.host_plans.get(host_idx).cloned().flatten() {
-                    return Some((plan, self.hosts[host_idx].name.clone()));
-                }
-                let g = &self.groups[*gi];
-                if !g.is_real {
-                    return None;
-                }
-                let plan = g.plan.clone()?;
-                Some((plan, format!("{}:{}", g.name, self.hosts[host_idx].name)))
+                self.host_plan_and_target(host_idx, Some(*gi))
             }
         }
+    }
+
+    /// Plan + target for a specific host index. If `prefer_gi` is given, that
+    /// group's plan is consulted as the fallback; otherwise the first group
+    /// containing the host is used.
+    fn host_plan_and_target(
+        &self,
+        host_idx: usize,
+        prefer_gi: Option<usize>,
+    ) -> Option<(String, String)> {
+        if let Some(plan) = self.host_plans.get(host_idx).cloned().flatten() {
+            return Some((plan, self.hosts[host_idx].name.clone()));
+        }
+        let gi = prefer_gi.or_else(|| {
+            self.groups
+                .iter()
+                .position(|g| g.host_idxs.contains(&host_idx))
+        })?;
+        let g = &self.groups[gi];
+        if !g.is_real {
+            return None;
+        }
+        let plan = g.plan.clone()?;
+        Some((plan, format!("{}:{}", g.name, self.hosts[host_idx].name)))
+    }
+
+    /// Target filter to invoke `glidesh run` with when the user presses `r`.
+    /// `glidesh run` resolves each host's plan from the inventory, so hosts
+    /// without an associated plan are skipped naturally. Returns the comma-
+    /// separated target list and a count of selected hosts that have no plan
+    /// (for display).
+    fn run_invocation(&self) -> Result<(String, usize), &'static str> {
+        if !self.selection.is_empty() {
+            let mut sel: Vec<usize> = self.selection.iter().copied().collect();
+            sel.sort();
+            let mut targets: Vec<String> = Vec::new();
+            let mut skipped = 0usize;
+            for i in sel {
+                match self.host_plan_and_target(i, None) {
+                    Some((_, t)) => targets.push(t),
+                    None => skipped += 1,
+                }
+            }
+            if targets.is_empty() {
+                return Err("no plan associated with selected hosts");
+            }
+            return Ok((targets.join(","), skipped));
+        }
+        let (_, target) = self
+            .current_plan()
+            .ok_or("no plan associated with this row")?;
+        Ok((target, 0))
     }
 
     fn recompute_rows(&mut self) {
@@ -570,18 +614,12 @@ async fn run_plan(
     state: &mut ConsoleState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> io::Result<()> {
-    let Some((plan_rel, target)) = state.current_plan() else {
-        state.set_flash("no plan associated with this row");
-        return Ok(());
-    };
-    let inv_dir = state
-        .inventory_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    let plan_path = if Path::new(&plan_rel).is_absolute() {
-        PathBuf::from(&plan_rel)
-    } else {
-        inv_dir.join(&plan_rel)
+    let (target, skipped) = match state.run_invocation() {
+        Ok(v) => v,
+        Err(msg) => {
+            state.set_flash(msg);
+            return Ok(());
+        }
     };
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -598,8 +636,6 @@ async fn run_plan(
     cmd.arg("run")
         .arg("-i")
         .arg(&state.inventory_path)
-        .arg("-p")
-        .arg(&plan_path)
         .arg("-t")
         .arg(&target)
         .arg("-k")
@@ -613,8 +649,6 @@ async fn run_plan(
     let status = cmd.status().await;
 
     println!("\nPress any key to return to console...\r");
-    // Re-enable raw mode so crossterm sees the keypress immediately rather than
-    // requiring Enter (cooked-mode behavior).
     let _ = terminal::enable_raw_mode();
     let _ = event::read();
     let _ = terminal::disable_raw_mode();
@@ -623,9 +657,14 @@ async fn run_plan(
     io::stdout().execute(EnterAlternateScreen)?;
     terminal.clear()?;
 
+    let suffix = if skipped > 0 {
+        format!(" ({} host(s) skipped: no plan)", skipped)
+    } else {
+        String::new()
+    };
     match status {
-        Ok(s) if s.success() => state.set_flash(format!("plan '{}' completed", plan_rel)),
-        Ok(s) => state.set_flash(format!("plan '{}' exited: {}", plan_rel, s)),
+        Ok(s) if s.success() => state.set_flash(format!("run completed{}", suffix)),
+        Ok(s) => state.set_flash(format!("run exited: {}{}", s, suffix)),
         Err(e) => state.set_flash(format!("failed to spawn run: {}", e)),
     }
     Ok(())

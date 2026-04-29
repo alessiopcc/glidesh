@@ -44,8 +44,28 @@ pub struct Inventory {
 impl Inventory {
     /// Resolve hosts matching a target filter.
     /// Accepted forms: `None` (all hosts), `"name"` (group or host name),
-    /// or `"group:host"` (specific host within a specific group).
+    /// `"group:host"` (specific host within a specific group), or a
+    /// comma-separated list combining any of the above.
     pub fn resolve_targets(&self, target: Option<&str>) -> Vec<ResolvedHost> {
+        if let Some(t) = target {
+            if t.contains(',') {
+                let mut out: Vec<ResolvedHost> = Vec::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for piece in t.split(',') {
+                    let piece = piece.trim();
+                    if piece.is_empty() {
+                        continue;
+                    }
+                    for h in self.resolve_targets(Some(piece)) {
+                        if seen.insert(h.name.clone()) {
+                            out.push(h);
+                        }
+                    }
+                }
+                return out;
+            }
+        }
+
         let mut hosts = Vec::new();
 
         match target {
@@ -122,13 +142,23 @@ impl Inventory {
         let mut result = Vec::new();
         for group in &self.groups {
             if let Some(ref plan_path) = group.plan {
+                // Group-plan entry: hosts that inherit the group plan
+                // (those without their own plan= attribute).
                 let hosts: Vec<ResolvedHost> = group
                     .hosts
                     .iter()
+                    .filter(|h| h.plan.is_none())
                     .map(|h| self.resolve_host(h, Some(&group.vars), group.jump.as_ref()))
                     .collect();
                 if !hosts.is_empty() {
                     result.push((group.name.clone(), plan_path.clone(), hosts));
+                }
+            }
+            // Hosts inside a group that override with their own plan attribute.
+            for host in &group.hosts {
+                if let Some(ref plan_path) = host.plan {
+                    let resolved = self.resolve_host(host, Some(&group.vars), group.jump.as_ref());
+                    result.push((group.name.clone(), plan_path.clone(), vec![resolved]));
                 }
             }
         }

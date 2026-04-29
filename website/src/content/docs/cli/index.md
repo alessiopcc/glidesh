@@ -81,7 +81,7 @@ glidesh run [OPTIONS]
 |------|-------|-------------|---------|
 | `--plan <PATH>` | `-p` | Path to the plan file | — |
 | `--inventory <PATH>` | `-i` | Path to the inventory file | — |
-| `--target <NAME>` | `-t` | Target filter: group name, host name, or group:hostname | — |
+| `--target <NAME>` | `-t` | Target filter: group name, host name, `group:hostname`, or a comma-separated list of any of these | — |
 | `--host <ADDR>` | — | Single host for ad-hoc mode | — |
 | `--user <USER>` | `-u` | SSH user (ad-hoc mode only) | `root` |
 | `--port <PORT>` | `-P` | SSH port | `22` |
@@ -124,6 +124,14 @@ Filter to a specific group or host:
 glidesh run -i inventory.kdl -p plan.kdl -t web
 glidesh run -i inventory.kdl -p plan.kdl -t web-1
 ```
+
+Run on an arbitrary subset by passing a comma-separated list of targets — each token can be a group name, a host name, or `group:host`:
+
+```bash
+glidesh run -i inventory.kdl -p plan.kdl -t web-1,web-3,db-1
+```
+
+When `--plan` is omitted, each resolved target uses its own `plan=` (host-level wins over group-level); targets without an associated plan are skipped.
 
 ### Ad-hoc host with a plan
 
