@@ -1,0 +1,5 @@
+group "fleet" {
+    host "node-1" "127.0.0.1" user="root" port=2222
+    host "node-2" "127.0.0.1" user="root" port=2223
+    host "node-3" "127.0.0.1" user="root" port=2224
+}

@@ -81,23 +81,25 @@ pub async fn run_host_task(
 }
 
 async fn run_local(command: &str) -> Result<HostOutput, GlideshError> {
-    let output = if cfg!(windows) {
-        tokio::process::Command::new("cmd")
-            .arg("/C")
-            .arg(command)
-            .output()
-            .await
+    // Detach stdin so commands that read from it (e.g. `tr`, `cat` with no
+    // file arg) fail fast on EOF instead of hanging on the inherited TTY.
+    let mut cmd = if cfg!(windows) {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
     } else {
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .await
-    }
-    .map_err(|e| GlideshError::Module {
-        module: MODULE_NAME.to_string(),
-        message: format!("Failed to spawn local command '{}': {}", command, e),
-    })?;
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    let output = cmd
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|e| GlideshError::Module {
+            module: MODULE_NAME.to_string(),
+            message: format!("Failed to spawn local command '{}': {}", command, e),
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();

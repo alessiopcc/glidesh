@@ -108,6 +108,7 @@ See the [`examples/`](examples/) directory for ready-to-use examples:
 | [multi-tier](examples/multi-tier/) | Multi-group setup with plan includes |
 | [external-module](examples/external-module/) | External plugin module to set system MOTD |
 | [jump-host](examples/jump-host/) | Connect to hosts through an SSH bastion |
+| [host-module](examples/host-module/) | Run a command once and broadcast its result to every host |
 
 ## License
 
