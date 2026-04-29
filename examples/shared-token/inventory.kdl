@@ -1,0 +1,10 @@
+vars {
+    deploy-user "deploy"
+    ssh-key "~/.ssh/id_ed25519"
+}
+
+group "app" {
+    host "node-1" "192.168.1.10" user="deploy" port=22
+    host "node-2" "192.168.1.11" user="deploy" port=22
+    host "node-3" "192.168.1.12" user="deploy" port=22
+}

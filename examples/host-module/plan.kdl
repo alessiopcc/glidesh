@@ -1,0 +1,21 @@
+plan "host-module-demo" {
+    mode "sync"
+
+    step "Generate shared deploy token" {
+        host "random token" cmd="openssl rand -hex 16" register="deploy_token"
+    }
+
+    step "Pick a leader hostname" {
+        host "elect leader" on="node-1" cmd="hostname" register="leader"
+    }
+
+    step "Write the shared values to every host" {
+        shell "mkdir -p /etc/app"
+        shell "echo token=${deploy_token} > /etc/app/release.env"
+        shell "echo leader=${leader} >> /etc/app/release.env"
+    }
+
+    step "Verify each host received the broadcast" {
+        shell "cat /etc/app/release.env"
+    }
+}

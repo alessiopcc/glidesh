@@ -1,3 +1,4 @@
+use crate::executor::host_coordinator::HostCoordinator;
 use crate::executor::node_runner::NodeRunner;
 use crate::executor::result::{ExecutorEvent, NodeResult, RunSummary};
 use glidesh::config::template::TemplateData;
@@ -34,6 +35,8 @@ impl Engine {
         let mut handles = Vec::new();
 
         let inv_data = self.inventory_template_data.clone();
+        let all_targets: Arc<Vec<ResolvedHost>> = Arc::new(self.targets.clone());
+        let coordinator: Arc<HostCoordinator> = Arc::new(HostCoordinator::new());
 
         for host in self.targets {
             let sem = semaphore.clone();
@@ -45,6 +48,8 @@ impl Engine {
             let tx = event_tx.clone();
             let inv = inv_data.clone();
             let base_dir = self.plan_base_dir.clone();
+            let coord = coordinator.clone();
+            let targets = all_targets.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
@@ -58,6 +63,8 @@ impl Engine {
                     event_tx: tx,
                     inventory_template_data: inv,
                     plan_base_dir: base_dir,
+                    coordinator: coord,
+                    all_targets: targets,
                 };
                 runner.run().await
             });

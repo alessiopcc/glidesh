@@ -69,6 +69,14 @@ Use an external plugin to set the system MOTD. Demonstrates the `external` keywo
 
 [View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/external-module)
 
+## host-module
+
+Run a command **once** on the controller (or a single named target) and broadcast the captured stdout to every host's var map. Demonstrates `cmd=` strings, list-of-commands chaining, and `on="<host>"` remote execution.
+
+**Modules used:** host, shell
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/host-module)
+
 ## jump-host
 
 Connect to internal hosts through an SSH bastion (jump host). Demonstrates group-level and per-host jump host configuration with user/port inheritance.

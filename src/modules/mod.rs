@@ -4,6 +4,7 @@ pub mod detect;
 pub mod disk;
 pub mod external;
 pub mod file;
+pub mod host;
 pub mod nix;
 pub mod package;
 pub mod shell;
@@ -131,6 +132,12 @@ impl ModuleRegistry {
         let mut missing = Vec::new();
         for step in plan.steps() {
             for task in &step.tasks {
+                // `host` is not in the registry — it's intercepted directly
+                // by NodeRunner and routed through HostCoordinator for
+                // run-once-share-to-all semantics.
+                if task.module == host::MODULE_NAME {
+                    continue;
+                }
                 if self.get(&task.module).is_none() {
                     missing.push(task.module.clone());
                 }
