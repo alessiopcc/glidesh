@@ -55,7 +55,7 @@ The **Listen** column is the side that accepts incoming connections (your local 
 | `Esc` | Clear all selections |
 | `Enter` or `s` | Open shell — single host = interactive PTY, group / multi-select = broadcast TUI |
 | `t` | Open the tunnel-creation dialog (cursor must be on a host) |
-| `r` | Run the plan shown in the right panel (`glidesh run` is invoked with the resolved target filter). The console suspends while the plan runs. |
+| `r` | Run plans on the cursor row, or — when one or more hosts are selected — on the entire selection. Each target uses its own associated plan (host's `plan=` or its group's `plan=`); selected hosts with no plan are skipped. The console suspends while the run executes. |
 | `Tab` | Switch focus to the tunnel table |
 | `q` or `Ctrl+C` | Quit (confirms if any tunnels are active) |
 
@@ -111,7 +111,13 @@ The right-side **Plan** panel shows the plan associated with whatever the cursor
 | An ungrouped host with `plan="..."` | the host's plan | the host name |
 | Anything without an associated plan | — | (panel shows "no plan associated") |
 
-Press `r` to run it. The console suspends, `glidesh run -i <inv> -p <plan> -t <target>` is spawned with inherited stdio (so the run TUI takes over the terminal), and you return to the console after pressing a key. Tunnels stay open in the background. SSH key path and host-key flags are forwarded from the console invocation.
+Press `r` to run. The console suspends, `glidesh run -i <inv> -t <targets>` is spawned with inherited stdio (so the run TUI takes over the terminal), and you return to the console after pressing a key. Tunnels stay open in the background. SSH key path and host-key flags are forwarded from the console invocation.
+
+### Multi-select runs
+
+When one or more hosts are selected (via `Space`), `r` runs on the entire selection in a single `glidesh run` invocation. The runner resolves each target's plan independently from the inventory — different selected hosts can run different plans. Hosts in the selection that have no associated plan (no host-level `plan=` and no group-level `plan=`) are skipped, and the count of skipped hosts is shown in the footer flash.
+
+`glidesh run --target` accepts a comma-separated list of targets (`group`, `hostname`, or `group:host`) to support this — useful from scripts as well, e.g. `glidesh run -i inv.kdl -t web-1,db-1`.
 
 ## Tunnels
 

@@ -22,11 +22,33 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> miette::Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("glidesh=info")),
-        )
-        .init();
+    let console_tui_mode = match &cli.command {
+        None => true,
+        Some(Commands::Console(a)) => a.target.is_none() && a.command.is_none(),
+        _ => false,
+    };
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("glidesh=info"));
+
+    if console_tui_mode {
+        let log_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".glidesh");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let appender = tracing_appender::rolling::never(&log_dir, "console.log");
+        let (writer, guard) = tracing_appender::non_blocking(appender);
+        // Keep the guard alive for the lifetime of the process so buffered
+        // log lines actually flush.
+        std::mem::forget(guard);
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     match cli.command {
         Some(Commands::Run(args)) => cmd_run(args).await?,
@@ -180,54 +202,59 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             ));
         }
 
-        // Parse --target filter:
-        //   "name"       — matches a group or ungrouped host by name
-        //   "group:host" — matches a specific host within a specific group
-        let (filter_group, filter_host) = match args.target.as_deref() {
-            Some(t) if t.contains(':') => {
-                let mut parts = t.splitn(2, ':');
-                (
-                    Some(parts.next().unwrap().to_string()),
-                    Some(parts.next().unwrap().to_string()),
-                )
-            }
-            Some(t) => (Some(t.to_string()), None),
-            None => (None, None),
+        // Parse --target filter into a list of tokens. Each token is either
+        // "group", "hostname", or "group:host". The filter is a comma-separated
+        // list; an entry passes if any token matches.
+        let tokens: Vec<(Option<String>, Option<String>)> = match args.target.as_deref() {
+            Some(t) => t
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|tok| {
+                    if let Some((g, h)) = tok.split_once(':') {
+                        (Some(g.to_string()), Some(h.to_string()))
+                    } else {
+                        (Some(tok.to_string()), None)
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
         };
 
         for (group_name, plan_path, targets) in &group_plans_raw {
-            if let Some(ref fg) = filter_group {
-                if filter_host.is_some() {
-                    // "group:host" — group must match exactly
-                    if fg != group_name {
-                        continue;
-                    }
-                } else if !group_name.is_empty() {
-                    // Grouped entry — plain name must match group name
-                    if fg != group_name {
-                        continue;
-                    }
-                } else {
-                    // Ungrouped host — plain name must match host name
-                    let has_host = targets.iter().any(|h| h.name == *fg);
-                    if !has_host {
-                        continue;
+            let host_matches = |h: &config::types::ResolvedHost| -> bool {
+                if tokens.is_empty() {
+                    return true;
+                }
+                for (g_filter, h_filter) in &tokens {
+                    match h_filter {
+                        Some(host_name) => {
+                            // "group:host" — both must match this entry.
+                            if g_filter.as_deref() == Some(group_name.as_str())
+                                && h.name == *host_name
+                            {
+                                return true;
+                            }
+                        }
+                        None => {
+                            let token = g_filter.as_deref().unwrap_or("");
+                            // Plain token: match group name (keeps all hosts in
+                            // entry) or match host name (this host only).
+                            if !group_name.is_empty() && token == group_name {
+                                return true;
+                            }
+                            if h.name == token {
+                                return true;
+                            }
+                        }
                     }
                 }
-            }
+                false
+            };
 
             let filtered_targets: Vec<_> = targets
                 .iter()
-                .filter(|h| {
-                    if let Some(ref fh) = filter_host {
-                        h.name == *fh
-                    } else if let Some(ref fg) = filter_group {
-                        // Ungrouped: only keep the host matching the filter
-                        !group_name.is_empty() || h.name == *fg
-                    } else {
-                        true // group matched or no filter, keep all hosts
-                    }
-                })
+                .filter(|h| host_matches(h))
                 .cloned()
                 .collect();
 
