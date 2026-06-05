@@ -353,15 +353,35 @@ impl SshSession {
             channel.eof().await.map_err(|e| GlideshError::SshChannel {
                 message: format!("Failed to close stdin on {}: {}", self.host, e),
             })?;
+        } else if !opts.pty {
+            // No input to send. Signal EOF immediately (like `ssh -n`) so a
+            // command that reads stdin gets EOF instead of blocking forever
+            // waiting for input that will never arrive.
+            let _ = channel.eof().await;
         }
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_code: u32 = 0;
+        let mut exited = false;
 
         loop {
-            let Some(msg) = channel.wait().await else {
-                break;
+            // Once the command has reported its exit status, don't block forever
+            // waiting for the channel to close. A backgrounded child (e.g. an
+            // auto-started daemon) can inherit the command's stdout/stderr and
+            // hold the channel open indefinitely — the command is done, but the
+            // server never sends a close. After exit, drain any already-buffered
+            // output briefly, then stop.
+            let msg = if exited {
+                match tokio::time::timeout(Duration::from_millis(200), channel.wait()).await {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) | Err(_) => break,
+                }
+            } else {
+                match channel.wait().await {
+                    Some(msg) => msg,
+                    None => break,
+                }
             };
 
             match msg {
@@ -373,6 +393,7 @@ impl SshSession {
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = exit_status;
+                    exited = true;
                 }
                 _ => {}
             }
