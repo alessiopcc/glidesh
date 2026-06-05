@@ -8,7 +8,7 @@ use cli::{Cli, Commands};
 use executor::result::ExecutorEvent;
 use glidesh::config;
 use glidesh::config::template::TemplateData;
-use glidesh::config::types::{ExecutionMode, Inventory};
+use glidesh::config::types::{ExecutionMode, Inventory, RunAsMethod, RunAsSpec, RunAsUser};
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
 use glidesh::ssh::{HostKeyPolicy, SshSession};
@@ -59,6 +59,42 @@ async fn main() -> miette::Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the CLI-level escalation spec from `--run-as` / `--run-as-method`.
+fn build_cli_run_as(args: &cli::RunArgs) -> Result<RunAsSpec, GlideshError> {
+    let user = args.run_as.as_ref().map(|u| {
+        if u.is_empty() {
+            RunAsUser::Disabled
+        } else {
+            RunAsUser::User(u.clone())
+        }
+    });
+    let method = match &args.run_as_method {
+        Some(s) => Some(RunAsMethod::parse(s).ok_or_else(|| {
+            GlideshError::Other(format!(
+                "Unknown --run-as-method '{}' (expected sudo, doas, or su)",
+                s
+            ))
+        })?),
+        None => None,
+    };
+    Ok(RunAsSpec { user, method })
+}
+
+/// Source the escalation password: `GLIDESH_RUNAS_PASS` first, then `--ask-pass`.
+fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, GlideshError> {
+    if let Ok(p) = std::env::var("GLIDESH_RUNAS_PASS") {
+        if !p.is_empty() {
+            return Ok(Some(p));
+        }
+    }
+    if args.ask_pass {
+        let p = rpassword::prompt_password("run-as password: ")
+            .map_err(|e| GlideshError::Other(format!("Failed to read password: {}", e)))?;
+        return Ok(Some(p));
+    }
+    Ok(None)
 }
 
 async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
@@ -119,6 +155,16 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         None
     };
 
+    // Establish the global escalation defaults. The CLI `--run-as*` flags are the
+    // least-specific layer, so fold them into the inventory's global spec; every
+    // host then resolves with CLI as the base. The password is global for the run.
+    let cli_run_as = build_cli_run_as(&args)?;
+    glidesh::modules::escalation::set_password(source_run_as_password(&args)?);
+    let inventory = inventory.map(|mut inv| {
+        inv.run_as = std::mem::take(&mut inv.run_as).merge_over(&cli_run_as);
+        inv
+    });
+
     let inv_base_dir = args
         .inventory
         .as_ref()
@@ -163,6 +209,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                 port: args.port,
                 vars: plan.vars.clone(),
                 jump: None,
+                run_as: cli_run_as.clone(),
             }]
         } else if let Some(ref inventory) = inventory {
             let target_filter = args.target.as_deref();

@@ -4,7 +4,6 @@ use crate::modules::external::protocol::{
     CheckResponse, ModuleRequest, PluginMessage, ShutdownRequest, SshRequest, SshResponse,
 };
 use crate::modules::{ModuleParams, ModuleResult, ModuleStatus};
-use crate::ssh::SshSession;
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -143,7 +142,7 @@ impl ExternalModule {
 
             match msg {
                 PluginMessage::SshRequest(ssh_req) => {
-                    let response = handle_ssh_request(ctx.ssh, ssh_req).await;
+                    let response = handle_ssh_request(ctx, ssh_req).await;
                     send_line(writer, &response, &self.info.name).await?;
                 }
                 terminal => return Ok(terminal),
@@ -208,9 +207,12 @@ impl crate::modules::Module for ExternalModule {
     }
 }
 
-async fn handle_ssh_request(ssh: &SshSession, req: SshRequest) -> SshResponse {
+/// Fulfils a plugin's SSH request over the existing session. Escalation configured
+/// for the task (`ctx.run_as`) is applied transparently, so plugins inherit `run-as`
+/// without ever seeing credentials.
+async fn handle_ssh_request(ctx: &ModuleContext<'_>, req: SshRequest) -> SshResponse {
     match req {
-        SshRequest::Exec { command } => match ssh.exec(&command).await {
+        SshRequest::Exec { command } => match ctx.exec(&command).await {
             Ok(output) => SshResponse::Exec {
                 exit_code: output.exit_code,
                 stdout: output.stdout,
@@ -236,7 +238,7 @@ async fn handle_ssh_request(ssh: &SshSession, req: SshRequest) -> SshResponse {
                     };
                 }
             };
-            match ssh.upload_file(&decoded, &path).await {
+            match ctx.upload_file(&decoded, &path).await {
                 Ok(()) => SshResponse::Upload {
                     ok: true,
                     error: None,
@@ -247,7 +249,7 @@ async fn handle_ssh_request(ssh: &SshSession, req: SshRequest) -> SshResponse {
                 },
             }
         }
-        SshRequest::Download { path } => match ssh.download_file(&path).await {
+        SshRequest::Download { path } => match ctx.download_file(&path).await {
             Ok(data) => {
                 use base64::Engine as _;
                 SshResponse::Download {
@@ -262,7 +264,7 @@ async fn handle_ssh_request(ssh: &SshSession, req: SshRequest) -> SshResponse {
                 error: Some(e.to_string()),
             },
         },
-        SshRequest::Checksum { path } => match ssh.checksum_remote(&path).await {
+        SshRequest::Checksum { path } => match ctx.checksum_remote(&path).await {
             Ok(Some(hash)) => SshResponse::Checksum {
                 hash,
                 exists: true,
@@ -285,7 +287,7 @@ async fn handle_ssh_request(ssh: &SshSession, req: SshRequest) -> SshResponse {
             group,
             mode,
         } => {
-            match ssh
+            match ctx
                 .set_file_attrs(&path, owner.as_deref(), group.as_deref(), mode.as_deref())
                 .await
             {

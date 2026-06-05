@@ -115,6 +115,18 @@ pub struct RunArgs {
     /// Accept and save new host keys to known_hosts
     #[arg(long)]
     pub accept_new_host_key: bool,
+
+    /// Default escalation target user (e.g. root). Inventory/plan can override.
+    #[arg(long)]
+    pub run_as: Option<String>,
+
+    /// Default escalation method: sudo (default), doas, or su
+    #[arg(long)]
+    pub run_as_method: Option<String>,
+
+    /// Prompt for the escalation password (otherwise read from GLIDESH_RUNAS_PASS)
+    #[arg(long)]
+    pub ask_pass: bool,
 }
 
 #[derive(Parser, Debug)]

@@ -1,5 +1,6 @@
-use crate::config::types::ResolvedJumpHost;
+use crate::config::types::{ResolvedJumpHost, ResolvedRunAs};
 use crate::error::GlideshError;
+use crate::modules::escalation;
 use crate::ssh::HostKeyPolicy;
 use crate::ssh::handler::{ForwardRegistry, SshHandler, new_forward_registry};
 use crate::util::shell_escape;
@@ -27,6 +28,14 @@ pub struct CommandOutput {
     pub exit_code: u32,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Optional controls for [`SshSession::exec_with`]: feed bytes on stdin (e.g. a
+/// `sudo -S` password) and/or allocate a PTY (required by `su`).
+#[derive(Default)]
+pub struct ExecOptions {
+    pub stdin: Option<Vec<u8>>,
+    pub pty: bool,
 }
 
 pub struct SshSession {
@@ -298,6 +307,14 @@ impl SshSession {
     }
 
     pub async fn exec(&self, command: &str) -> Result<CommandOutput, GlideshError> {
+        self.exec_with(command, ExecOptions::default()).await
+    }
+
+    pub async fn exec_with(
+        &self,
+        command: &str,
+        opts: ExecOptions,
+    ) -> Result<CommandOutput, GlideshError> {
         let guard = self.handle.lock().await;
         let mut channel =
             guard
@@ -308,12 +325,35 @@ impl SshSession {
                 })?;
         drop(guard);
 
+        // A PTY is needed for methods (e.g. `su`) that read their password from the
+        // controlling terminal. Under a PTY the server merges stderr into stdout.
+        if opts.pty {
+            channel
+                .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+                .await
+                .map_err(|e| GlideshError::SshChannel {
+                    message: format!("Failed to request PTY on {}: {}", self.host, e),
+                })?;
+        }
+
         channel
             .exec(true, command)
             .await
             .map_err(|e| GlideshError::SshChannel {
                 message: format!("Failed to exec command on {}: {}", self.host, e),
             })?;
+
+        if let Some(stdin) = opts.stdin.as_ref() {
+            channel
+                .data(&stdin[..])
+                .await
+                .map_err(|e| GlideshError::SshChannel {
+                    message: format!("Failed to write stdin on {}: {}", self.host, e),
+                })?;
+            channel.eof().await.map_err(|e| GlideshError::SshChannel {
+                message: format!("Failed to close stdin on {}: {}", self.host, e),
+            })?;
+        }
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -343,6 +383,51 @@ impl SshSession {
             stdout: String::from_utf8_lossy(&stdout).to_string(),
             stderr: String::from_utf8_lossy(&stderr).to_string(),
         })
+    }
+
+    /// Execute `command`, escalating to another user when `run_as` is set. A denied
+    /// escalation surfaces as [`GlideshError::RunAs`]; otherwise the wrapped command's
+    /// output is returned verbatim for the caller to interpret.
+    pub async fn exec_as(
+        &self,
+        command: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<CommandOutput, GlideshError> {
+        let Some(r) = run_as else {
+            return self.exec(command).await;
+        };
+        let wrapped = escalation::wrap(r, command);
+        let out = self
+            .exec_with(
+                &wrapped.command,
+                ExecOptions {
+                    stdin: wrapped.stdin,
+                    pty: wrapped.pty,
+                },
+            )
+            .await?;
+        if let Some(err) = escalation::classify_failure(r, &out) {
+            return Err(err);
+        }
+        Ok(out)
+    }
+
+    /// Create a fresh temporary file as the login user (writable for SFTP) and
+    /// return its path. Used to stage privileged uploads/downloads.
+    async fn mktemp_remote(&self) -> Result<String, GlideshError> {
+        let out = self.exec("mktemp /tmp/glidesh.XXXXXX").await?;
+        if out.exit_code != 0 {
+            return Err(GlideshError::SshChannel {
+                message: format!("mktemp failed on {}: {}", self.host, out.stderr.trim()),
+            });
+        }
+        let path = out.stdout.trim().to_string();
+        if path.is_empty() {
+            return Err(GlideshError::SshChannel {
+                message: format!("mktemp returned no path on {}", self.host),
+            });
+        }
+        Ok(path)
     }
 
     async fn sftp(&self) -> Result<SftpSession, GlideshError> {
@@ -423,12 +508,94 @@ impl SshSession {
         Ok(data)
     }
 
-    pub async fn checksum_remote(&self, remote_path: &str) -> Result<Option<String>, GlideshError> {
+    /// Upload to a destination the login user may not be able to write directly.
+    /// Without escalation this is a plain SFTP write; with escalation the content is
+    /// staged in `/tmp` over SFTP and moved into place with the escalated shell.
+    pub async fn upload_file_as(
+        &self,
+        content: &[u8],
+        remote_path: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<(), GlideshError> {
+        let Some(r) = run_as else {
+            return self.upload_file(content, remote_path).await;
+        };
+        let tmp = self.mktemp_remote().await?;
+        self.upload_file(content, &tmp).await?;
+        // Move into place and hand ownership to the escalation target — `mv` alone
+        // would preserve the staging file's login-user ownership. Any explicit
+        // owner/group from the module is applied afterwards by set_file_attrs.
+        let dest = shell_escape(remote_path);
+        let place = format!(
+            "mv -f {} {} && chown {} {}",
+            shell_escape(&tmp),
+            dest,
+            shell_escape(&r.user),
+            dest,
+        );
+        let out = self.exec_as(&place, run_as).await?;
+        if out.exit_code != 0 {
+            let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "failed to move staged upload to {}: {}",
+                    remote_path,
+                    out.stderr.trim()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Download a source the login user may not be able to read directly. Without
+    /// escalation this is a plain SFTP read; with escalation the file is copied to a
+    /// world-readable temp path with the escalated shell, then read over SFTP.
+    pub async fn download_file_as(
+        &self,
+        remote_path: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<Vec<u8>, GlideshError> {
+        if run_as.is_none() {
+            return self.download_file(remote_path).await;
+        }
+        let tmp = self.mktemp_remote().await?;
+        // tmp is owned by the login user; root can overwrite its content, and the
+        // chmod keeps it readable for the SFTP read that follows.
+        let stage = format!(
+            "cp -f {} {} && chmod 0644 {}",
+            shell_escape(remote_path),
+            shell_escape(&tmp),
+            shell_escape(&tmp)
+        );
+        let out = self.exec_as(&stage, run_as).await?;
+        if out.exit_code != 0 {
+            let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "failed to stage download of {}: {}",
+                    remote_path,
+                    out.stderr.trim()
+                ),
+            });
+        }
+        let data = self.download_file(&tmp).await?;
+        let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
+        Ok(data)
+    }
+
+    pub async fn checksum_remote(
+        &self,
+        remote_path: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<Option<String>, GlideshError> {
         let escaped = shell_escape(remote_path);
         let output = self
-            .exec(&format!(
-                "sha256sum {escaped} 2>&1 || shasum -a 256 {escaped} 2>&1",
-            ))
+            .exec_as(
+                &format!("sha256sum {escaped} 2>&1 || shasum -a 256 {escaped} 2>&1"),
+                run_as,
+            )
             .await?;
 
         if output.exit_code != 0 {
@@ -458,9 +625,12 @@ impl SshSession {
     pub async fn get_file_attrs(
         &self,
         path: &str,
+        run_as: Option<&ResolvedRunAs>,
     ) -> Result<Option<(String, String, String)>, GlideshError> {
         let escaped = shell_escape(path);
-        let output = self.exec(&format!("stat -c '%U %G %a' {escaped}")).await?;
+        let output = self
+            .exec_as(&format!("stat -c '%U %G %a' {escaped}"), run_as)
+            .await?;
 
         if output.exit_code != 0 {
             let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
@@ -497,12 +667,13 @@ impl SshSession {
         owner: Option<&str>,
         group: Option<&str>,
         mode: Option<&str>,
+        run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
         let escaped = shell_escape(path);
 
         if let Some(mode) = mode {
             let output = self
-                .exec(&format!("chmod {} {}", shell_escape(mode), escaped))
+                .exec_as(&format!("chmod {} {}", shell_escape(mode), escaped), run_as)
                 .await?;
             if output.exit_code != 0 {
                 return Err(GlideshError::Module {
@@ -515,12 +686,10 @@ impl SshSession {
         match (owner, group) {
             (Some(o), Some(g)) => {
                 let output = self
-                    .exec(&format!(
-                        "chown {}:{} {}",
-                        shell_escape(o),
-                        shell_escape(g),
-                        escaped
-                    ))
+                    .exec_as(
+                        &format!("chown {}:{} {}", shell_escape(o), shell_escape(g), escaped),
+                        run_as,
+                    )
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
@@ -531,7 +700,7 @@ impl SshSession {
             }
             (Some(o), None) => {
                 let output = self
-                    .exec(&format!("chown {} {}", shell_escape(o), escaped))
+                    .exec_as(&format!("chown {} {}", shell_escape(o), escaped), run_as)
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
@@ -542,7 +711,7 @@ impl SshSession {
             }
             (None, Some(g)) => {
                 let output = self
-                    .exec(&format!("chgrp {} {}", shell_escape(g), escaped))
+                    .exec_as(&format!("chgrp {} {}", shell_escape(g), escaped), run_as)
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
@@ -563,12 +732,16 @@ impl SshSession {
         owner: Option<&str>,
         group: Option<&str>,
         mode: Option<&str>,
+        run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
         let escaped = shell_escape(path);
 
         if let Some(mode) = mode {
             let output = self
-                .exec(&format!("chmod -R {} {}", shell_escape(mode), escaped))
+                .exec_as(
+                    &format!("chmod -R {} {}", shell_escape(mode), escaped),
+                    run_as,
+                )
                 .await?;
             if output.exit_code != 0 {
                 return Err(GlideshError::Module {
@@ -581,12 +754,15 @@ impl SshSession {
         match (owner, group) {
             (Some(o), Some(g)) => {
                 let output = self
-                    .exec(&format!(
-                        "chown -R {}:{} {}",
-                        shell_escape(o),
-                        shell_escape(g),
-                        escaped
-                    ))
+                    .exec_as(
+                        &format!(
+                            "chown -R {}:{} {}",
+                            shell_escape(o),
+                            shell_escape(g),
+                            escaped
+                        ),
+                        run_as,
+                    )
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
@@ -597,7 +773,7 @@ impl SshSession {
             }
             (Some(o), None) => {
                 let output = self
-                    .exec(&format!("chown -R {} {}", shell_escape(o), escaped))
+                    .exec_as(&format!("chown -R {} {}", shell_escape(o), escaped), run_as)
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
@@ -608,7 +784,7 @@ impl SshSession {
             }
             (None, Some(g)) => {
                 let output = self
-                    .exec(&format!("chgrp -R {} {}", shell_escape(g), escaped))
+                    .exec_as(&format!("chgrp -R {} {}", shell_escape(g), escaped), run_as)
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {

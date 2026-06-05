@@ -39,6 +39,16 @@ pub enum GlideshError {
     #[error("Module error in {module}: {message}")]
     Module { module: String, message: String },
 
+    #[error("Privilege escalation failed (run-as {user} via {method}): {message}")]
+    #[diagnostic(help(
+        "Ensure the login user may escalate (e.g. a NOPASSWD sudoers entry) or supply a password with --ask-pass / GLIDESH_RUNAS_PASS"
+    ))]
+    RunAs {
+        user: String,
+        method: String,
+        message: String,
+    },
+
     #[error("OS detection failed: {message}")]
     OsDetection { message: String },
 

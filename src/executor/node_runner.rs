@@ -292,6 +292,16 @@ impl NodeRunner {
                 args: interpolated_args,
             };
 
+            // Escalation precedence: module > step > plan > host (host already
+            // carries group/global/CLI defaults merged during target resolution).
+            let run_as = task
+                .run_as
+                .clone()
+                .merge_over(&step.run_as)
+                .merge_over(&self.plan.run_as)
+                .merge_over(&self.host.run_as)
+                .resolve(glidesh::modules::escalation::password());
+
             let ctx = ModuleContext {
                 ssh: session,
                 os_info,
@@ -299,6 +309,7 @@ impl NodeRunner {
                 template_data,
                 dry_run: self.dry_run,
                 plan_base_dir: &self.plan_base_dir,
+                run_as,
             };
 
             let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {

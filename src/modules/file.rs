@@ -176,14 +176,14 @@ impl Module for FileModule {
         )?;
         let local_hash = Self::sha256_hex(&content);
 
-        match ctx.ssh.checksum_remote(dest).await? {
+        match ctx.checksum_remote(dest).await? {
             Some(remote_hash) if remote_hash == local_hash => {
                 let desired_owner = params.args.get("owner").and_then(|v| v.as_str());
                 let desired_group = params.args.get("group").and_then(|v| v.as_str());
                 let desired_mode = params.args.get("mode").and_then(|v| v.as_str());
 
                 if desired_owner.is_some() || desired_group.is_some() || desired_mode.is_some() {
-                    let remote_attrs = ctx.ssh.get_file_attrs(dest).await?;
+                    let remote_attrs = ctx.get_file_attrs(dest).await?;
                     if let Some((remote_owner, remote_group, remote_mode)) = remote_attrs {
                         let owner_ok = desired_owner.is_none_or(|o| o == remote_owner);
                         let group_ok = desired_group.is_none_or(|g| g == remote_group);
@@ -286,7 +286,7 @@ impl FileModule {
         )?;
         let local_hash = Self::sha256_hex(&content);
 
-        let needs_upload = match ctx.ssh.checksum_remote(dest).await? {
+        let needs_upload = match ctx.checksum_remote(dest).await? {
             Some(remote_hash) => remote_hash != local_hash,
             None => true,
         };
@@ -295,20 +295,19 @@ impl FileModule {
             if let Some(parent) = std::path::Path::new(dest).parent() {
                 let parent_str = parent.to_string_lossy();
                 if !parent_str.is_empty() {
-                    ctx.ssh
-                        .exec(&format!("mkdir -p '{}'", parent_str.replace('\'', "'\\''")))
+                    ctx.exec(&format!("mkdir -p '{}'", parent_str.replace('\'', "'\\''")))
                         .await?;
                 }
             }
 
-            ctx.ssh.upload_file(&content, dest).await?;
+            ctx.upload_file(&content, dest).await?;
         }
 
         let owner = params.args.get("owner").and_then(|v| v.as_str());
         let group = params.args.get("group").and_then(|v| v.as_str());
         let mode = params.args.get("mode").and_then(|v| v.as_str());
 
-        ctx.ssh.set_file_attrs(dest, owner, group, mode).await?;
+        ctx.set_file_attrs(dest, owner, group, mode).await?;
 
         let output_msg = if needs_upload {
             format!("{} {} -> {} ({} bytes)", mode_str, src, dest, content.len())
@@ -339,7 +338,7 @@ impl FileModule {
             });
         }
 
-        let data = ctx.ssh.download_file(src).await?;
+        let data = ctx.download_file(src).await?;
 
         if let Some(parent) = std::path::Path::new(dest).parent() {
             if !parent.as_os_str().is_empty() {
@@ -423,11 +422,11 @@ impl FileModule {
                 rel_path.to_string_lossy().replace('\\', "/")
             );
 
-            match ctx.ssh.checksum_remote(&remote_path).await? {
+            match ctx.checksum_remote(&remote_path).await? {
                 Some(remote_hash) if remote_hash == local_hash => {
                     if check_attrs {
                         if let Some((remote_owner, remote_group, remote_mode)) =
-                            ctx.ssh.get_file_attrs(&remote_path).await?
+                            ctx.get_file_attrs(&remote_path).await?
                         {
                             let owner_ok = desired_owner.is_none_or(|o| o == remote_owner);
                             let group_ok = desired_group.is_none_or(|g| g == remote_group);
@@ -527,7 +526,7 @@ impl FileModule {
                 .map(|d| format!("'{}'", d.replace('\'', "'\\''")))
                 .collect::<Vec<_>>()
                 .join(" ");
-            ctx.ssh.exec(&format!("mkdir -p {}", dirs_arg)).await?;
+            ctx.exec(&format!("mkdir -p {}", dirs_arg)).await?;
         }
 
         for rel_path in &local_files {
@@ -554,13 +553,13 @@ impl FileModule {
                 rel_path.to_string_lossy().replace('\\', "/")
             );
 
-            let needs_upload = match ctx.ssh.checksum_remote(&remote_path).await? {
+            let needs_upload = match ctx.checksum_remote(&remote_path).await? {
                 Some(remote_hash) => remote_hash != local_hash,
                 None => true,
             };
 
             if needs_upload {
-                ctx.ssh.upload_file(&content, &remote_path).await?;
+                ctx.upload_file(&content, &remote_path).await?;
                 uploaded += 1;
             }
         }
@@ -571,8 +570,7 @@ impl FileModule {
 
         let attrs_changed = owner.is_some() || group.is_some() || mode.is_some();
         if attrs_changed {
-            ctx.ssh
-                .set_file_attrs_recursive(dest_trimmed, owner, group, mode)
+            ctx.set_file_attrs_recursive(dest_trimmed, owner, group, mode)
                 .await?;
         }
 

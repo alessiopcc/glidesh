@@ -124,12 +124,15 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(fp_node)?;
+
     Ok(Plan {
         name,
         mode,
         vars,
         structured_vars,
         vars_files,
+        run_as,
         items,
     })
 }
@@ -403,11 +406,14 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(node)?;
+
     Ok(Step {
         name,
         tasks,
         loop_source,
         subscribe,
+        run_as,
     })
 }
 
@@ -442,6 +448,8 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
             let key = name.to_string();
             if key == "register" {
                 register = entry.value().as_string().map(|s| s.to_string());
+            } else if key == "run-as" || key == "run-as-method" {
+                // Captured separately as the task's escalation, not a module arg.
             } else {
                 let value = kdl_value_to_param(entry.value());
                 args.insert(key, value);
@@ -500,11 +508,14 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(node)?;
+
     Ok(TaskDef {
         module,
         resource,
         args,
         register,
+        run_as,
     })
 }
 
@@ -574,6 +585,47 @@ plan "deploy-app" {
             fp.steps()[1].tasks[0].args.get("retries").unwrap().as_i64(),
             Some(5)
         );
+    }
+
+    #[test]
+    fn test_parse_plan_level_run_as() {
+        use crate::config::types::{RunAsMethod, RunAsUser};
+        let input = r#"plan "p" run-as="root" run-as-method="doas" { step "s" { shell "id" } }"#;
+        let fp = parse_plan(input).unwrap();
+        assert_eq!(fp.run_as.user, Some(RunAsUser::User("root".to_string())));
+        assert_eq!(fp.run_as.method, Some(RunAsMethod::Doas));
+    }
+
+    #[test]
+    fn test_parse_run_as_step_and_task() {
+        use crate::config::types::{RunAsMethod, RunAsUser};
+        let input = r#"
+plan "p" {
+    step "Install" run-as="root" {
+        package "nginx" state="present"
+        shell "whoami" run-as="postgres" run-as-method="doas"
+        shell "id" run-as=""
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        let step = &fp.steps()[0];
+        assert_eq!(step.run_as.user, Some(RunAsUser::User("root".to_string())));
+
+        // Module without a run-as attribute inherits (None).
+        assert_eq!(step.tasks[0].run_as.user, None);
+
+        // Module-level override, and run-as attrs must not leak into module args.
+        assert_eq!(
+            step.tasks[1].run_as.user,
+            Some(RunAsUser::User("postgres".to_string()))
+        );
+        assert_eq!(step.tasks[1].run_as.method, Some(RunAsMethod::Doas));
+        assert!(!step.tasks[1].args.contains_key("run-as"));
+        assert!(!step.tasks[1].args.contains_key("run-as-method"));
+
+        // run-as="" opts out at the task level.
+        assert_eq!(step.tasks[2].run_as.user, Some(RunAsUser::Disabled));
     }
 
     #[test]

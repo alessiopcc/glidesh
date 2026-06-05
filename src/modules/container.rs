@@ -31,7 +31,6 @@ impl Module for ContainerModule {
         let runtime = self.resolve_runtime(ctx, params).await?;
 
         let output = ctx
-            .ssh
             .exec(&format!(
                 "{} inspect --format '{{{{.State.Status}}}}' {} 2>/dev/null",
                 runtime, container_name
@@ -46,7 +45,6 @@ impl Module for ContainerModule {
                 if exists && current_state == "running" {
                     let desired_hash = param_hash(&runtime, params);
                     let label_output = ctx
-                        .ssh
                         .exec(&format!(
                             "{} inspect --format '{{{{index .Config.Labels \"{}\"}}}}' {} 2>/dev/null",
                             runtime, PARAM_HASH_LABEL, container_name
@@ -157,7 +155,6 @@ impl ContainerModule {
         if let Some(detected) = Self::detected_runtime(ctx) {
             if !preferred.is_empty() && preferred != detected {
                 let check = ctx
-                    .ssh
                     .exec(&format!("which {} 2>/dev/null", preferred))
                     .await?;
                 if check.exit_code == 0 {
@@ -218,7 +215,7 @@ impl ContainerModule {
             install_cmd
         );
 
-        let output = ctx.ssh.exec(&install_cmd).await?;
+        let output = ctx.exec(&install_cmd).await?;
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "container".to_string(),
@@ -234,7 +231,6 @@ impl ContainerModule {
             _ => "docker",
         };
         let _ = ctx
-            .ssh
             .exec(&format!("systemctl enable --now {} 2>/dev/null", service))
             .await;
 
@@ -247,7 +243,6 @@ impl ContainerModule {
         network: &str,
     ) -> Result<(), GlideshError> {
         let inspect = ctx
-            .ssh
             .exec(&format!(
                 "{} network inspect {} 2>/dev/null",
                 runtime, network
@@ -259,7 +254,6 @@ impl ContainerModule {
         }
 
         let create = ctx
-            .ssh
             .exec(&format!("{} network create {}", runtime, network))
             .await?;
 
@@ -291,7 +285,6 @@ impl ContainerModule {
         }
 
         let _ = ctx
-            .ssh
             .exec(&format!(
                 "{} stop {} 2>/dev/null; {} rm {} 2>/dev/null",
                 runtime, container_name, runtime, container_name
@@ -300,7 +293,7 @@ impl ContainerModule {
 
         let cmd = build_run_command(runtime, container_name, params)?;
 
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.exec(&cmd).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -327,7 +320,6 @@ impl ContainerModule {
         runtime: &str,
     ) -> Result<ModuleResult, GlideshError> {
         let output = ctx
-            .ssh
             .exec(&format!("{} stop {}", runtime, container_name))
             .await?;
 
@@ -356,7 +348,6 @@ impl ContainerModule {
         runtime: &str,
     ) -> Result<ModuleResult, GlideshError> {
         let output = ctx
-            .ssh
             .exec(&format!(
                 "{} stop {} 2>/dev/null; {} rm -f {}",
                 runtime, container_name, runtime, container_name
