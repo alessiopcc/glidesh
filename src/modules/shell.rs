@@ -1,7 +1,10 @@
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
+use crate::ssh::connection::CommandOutput;
 use async_trait::async_trait;
+use std::collections::HashSet;
+use std::time::Duration;
 
 pub struct ShellModule;
 
@@ -59,6 +62,106 @@ pub(crate) fn wrap_login(cmd: &str) -> String {
     format!("sh -l -c '{}'", escaped)
 }
 
+/// Parse the optional `timeout` argument (seconds). `None` (absent or `<= 0`)
+/// means run with no time limit.
+pub(crate) fn parse_timeout(params: &ModuleParams) -> Result<Option<u64>, GlideshError> {
+    match params.args.get("timeout") {
+        None => Ok(None),
+        Some(value) => {
+            let secs = value.as_i64().ok_or_else(|| GlideshError::Module {
+                module: "shell".to_string(),
+                message: "timeout must be an integer number of seconds".to_string(),
+            })?;
+            Ok(if secs > 0 { Some(secs as u64) } else { None })
+        }
+    }
+}
+
+/// Parse the optional `success_codes` argument. `None` means *any* exit code is
+/// accepted (the default); `Some(set)` restricts success to those codes.
+/// Accepts a string (`"0,2"`), a single integer (`2`), or a list.
+pub(crate) fn parse_success_codes(
+    params: &ModuleParams,
+) -> Result<Option<HashSet<i32>>, GlideshError> {
+    let Some(value) = params.args.get("success_codes") else {
+        return Ok(None);
+    };
+
+    let mut codes = HashSet::new();
+    let add_tokens = |s: &str, codes: &mut HashSet<i32>| -> Result<(), GlideshError> {
+        for tok in s
+            .split([',', ' ', '\t', '\n'])
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            let code: i32 = tok.parse().map_err(|_| GlideshError::Module {
+                module: "shell".to_string(),
+                message: format!("invalid success_codes entry: '{}'", tok),
+            })?;
+            codes.insert(code);
+        }
+        Ok(())
+    };
+
+    if let Some(s) = value.as_str() {
+        add_tokens(s, &mut codes)?;
+    } else if let Some(i) = value.as_i64() {
+        codes.insert(i as i32);
+    } else if let Some(list) = value.as_list() {
+        for item in list {
+            add_tokens(item, &mut codes)?;
+        }
+    } else {
+        return Err(GlideshError::Module {
+            module: "shell".to_string(),
+            message: "success_codes must be a string, integer, or list".to_string(),
+        });
+    }
+
+    Ok(if codes.is_empty() { None } else { Some(codes) })
+}
+
+/// Run a command, optionally bounded by a timeout. `Ok(None)` means the command
+/// did not finish within the limit (the in-flight exec is dropped, which closes
+/// the channel; the remote command may keep running).
+pub(crate) async fn exec_timed(
+    ctx: &ModuleContext<'_>,
+    command: &str,
+    timeout: Option<u64>,
+) -> Result<Option<CommandOutput>, GlideshError> {
+    match timeout {
+        Some(secs) => {
+            match tokio::time::timeout(Duration::from_secs(secs), ctx.exec(command)).await {
+                Ok(result) => result.map(Some),
+                Err(_) => Ok(None),
+            }
+        }
+        None => ctx.exec(command).await.map(Some),
+    }
+}
+
+fn accepted(exit_code: i32, success_codes: &Option<HashSet<i32>>) -> bool {
+    match success_codes {
+        None => true,
+        Some(codes) => codes.contains(&exit_code),
+    }
+}
+
+fn describe_success_codes(success_codes: &Option<HashSet<i32>>) -> String {
+    match success_codes {
+        None => "any".to_string(),
+        Some(codes) => {
+            let mut sorted: Vec<i32> = codes.iter().copied().collect();
+            sorted.sort_unstable();
+            sorted
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
 impl ShellModule {
     fn resolve_command(params: &ModuleParams) -> Result<String, GlideshError> {
         resolve_cmd_from_params(params, "shell")
@@ -95,13 +198,13 @@ impl Module for ShellModule {
                 } else {
                     check_cmd.to_string()
                 };
-                let output = ctx.ssh.exec(&gate_cmd).await?;
-                if output.exit_code == 0 {
-                    Ok(ModuleStatus::Satisfied)
-                } else {
-                    Ok(ModuleStatus::Pending {
+                let timeout = parse_timeout(params)?;
+                // A timed-out gate is treated as "not satisfied" so `apply` runs.
+                match exec_timed(ctx, &gate_cmd, timeout).await? {
+                    Some(output) if output.exit_code == 0 => Ok(ModuleStatus::Satisfied),
+                    _ => Ok(ModuleStatus::Pending {
                         plan: format!("Run: {}", command),
-                    })
+                    }),
                 }
             }
             None => Ok(ModuleStatus::Pending {
@@ -141,35 +244,60 @@ impl Module for ShellModule {
             .get("delay")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as u64;
+        let timeout = parse_timeout(params)?;
+        // Absent `success_codes` means any exit code is accepted (the default).
+        let success_codes = parse_success_codes(params)?;
 
-        let mut last_output = None;
+        let mut last_output: Option<CommandOutput> = None;
+        let mut timed_out = false;
 
         for attempt in 1..=max_retries {
-            let output = ctx.ssh.exec(&command).await?;
-
-            if output.exit_code == 0 {
-                return Ok(ModuleResult {
-                    changed: true,
-                    output: output.stdout,
-                    stderr: output.stderr,
-                    exit_code: output.exit_code as i32,
-                });
+            match exec_timed(ctx, &command, timeout).await? {
+                Some(output) => {
+                    if accepted(output.exit_code as i32, &success_codes) {
+                        return Ok(ModuleResult {
+                            changed: true,
+                            output: output.stdout,
+                            stderr: output.stderr,
+                            exit_code: output.exit_code as i32,
+                        });
+                    }
+                    timed_out = false;
+                    last_output = Some(output);
+                }
+                None => {
+                    timed_out = true;
+                    last_output = None;
+                }
             }
 
-            last_output = Some(output);
-
             if attempt < max_retries && delay_secs > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
             }
         }
 
-        let output = last_output.unwrap();
+        let message = if timed_out {
+            format!(
+                "Command '{}' timed out after {}s ({} attempt(s)).",
+                command,
+                timeout.unwrap_or(0),
+                max_retries
+            )
+        } else if let Some(output) = last_output {
+            let accepted_desc = describe_success_codes(&success_codes);
+            format!(
+                "Command '{}' failed: exit code {} is not in the accepted set ({}) after {} attempt(s).\nstdout: {}\nstderr: {}",
+                command, output.exit_code, accepted_desc, max_retries, output.stdout, output.stderr
+            )
+        } else {
+            format!(
+                "Command '{}' failed after {} attempt(s).",
+                command, max_retries
+            )
+        };
         Err(GlideshError::Module {
             module: "shell".to_string(),
-            message: format!(
-                "Command '{}' failed with exit code {} after {} attempt(s).\nstdout: {}\nstderr: {}",
-                command, output.exit_code, max_retries, output.stdout, output.stderr
-            ),
+            message,
         })
     }
 }
@@ -213,5 +341,73 @@ mod tests {
             ShellModule::wrap_login("echo 'hi'"),
             "sh -l -c 'echo '\\''hi'\\'''"
         );
+    }
+
+    #[test]
+    fn timeout_absent_is_none() {
+        assert_eq!(parse_timeout(&params_with(&[])).unwrap(), None);
+    }
+
+    #[test]
+    fn timeout_parses_positive_seconds() {
+        let p = params_with(&[("timeout", ParamValue::Integer(60))]);
+        assert_eq!(parse_timeout(&p).unwrap(), Some(60));
+    }
+
+    #[test]
+    fn timeout_zero_or_negative_is_none() {
+        let p = params_with(&[("timeout", ParamValue::Integer(0))]);
+        assert_eq!(parse_timeout(&p).unwrap(), None);
+        let p = params_with(&[("timeout", ParamValue::Integer(-5))]);
+        assert_eq!(parse_timeout(&p).unwrap(), None);
+    }
+
+    #[test]
+    fn success_codes_absent_means_any() {
+        assert_eq!(parse_success_codes(&params_with(&[])).unwrap(), None);
+        // None accepts every exit code.
+        assert!(accepted(0, &None));
+        assert!(accepted(2, &None));
+        assert!(accepted(137, &None));
+    }
+
+    #[test]
+    fn success_codes_parses_comma_string() {
+        let p = params_with(&[("success_codes", ParamValue::String("0, 2".to_string()))]);
+        let set = parse_success_codes(&p).unwrap().unwrap();
+        assert!(set.contains(&0) && set.contains(&2) && set.len() == 2);
+        assert!(accepted(2, &Some(set.clone())));
+        assert!(!accepted(1, &Some(set)));
+    }
+
+    #[test]
+    fn success_codes_parses_single_integer() {
+        let p = params_with(&[("success_codes", ParamValue::Integer(2))]);
+        let set = parse_success_codes(&p).unwrap().unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&2));
+    }
+
+    #[test]
+    fn success_codes_parses_list() {
+        let p = params_with(&[(
+            "success_codes",
+            ParamValue::List(vec!["0".to_string(), "2".to_string()]),
+        )]);
+        let set = parse_success_codes(&p).unwrap().unwrap();
+        assert!(set.contains(&0) && set.contains(&2));
+    }
+
+    #[test]
+    fn success_codes_rejects_garbage() {
+        let p = params_with(&[("success_codes", ParamValue::String("0,nope".to_string()))]);
+        assert!(parse_success_codes(&p).is_err());
+    }
+
+    #[test]
+    fn describe_success_codes_is_sorted_and_human_readable() {
+        assert_eq!(describe_success_codes(&None), "any");
+        let set: HashSet<i32> = [2, 0, 137].into_iter().collect();
+        assert_eq!(describe_success_codes(&Some(set)), "0, 2, 137");
     }
 }

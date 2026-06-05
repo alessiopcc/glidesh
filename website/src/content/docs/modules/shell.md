@@ -11,6 +11,7 @@ The `shell` module executes commands on the remote host via SSH.
 shell "echo 'hello world'"
 
 shell "curl -sf http://localhost:8080/health" {
+    success_codes "0"   // retry until curl succeeds
     retries 5
     delay 3
 }
@@ -25,7 +26,40 @@ shell "curl -sf http://localhost:8080/health" {
 | `check` | string | Gate command — if it exits 0 the step is skipped (already satisfied) |
 | `retries` | integer | Number of retry attempts on failure |
 | `delay` | integer | Seconds between retries |
+| `timeout` | integer | Abort the command after this many seconds and treat the attempt as failed (feeds `retries`). Default: no limit |
+| `success_codes` | string / integer / list | Exit codes treated as success (e.g. `"0,2"`). Default: **any exit code is accepted** |
 | `login` | boolean | Run the command (and `check` gate) inside a POSIX login shell so `/etc/profile` and `~/.profile` are sourced |
+
+## Exit codes (`success_codes`)
+
+By **default the shell module accepts any exit code as success** — a non-zero exit does *not* fail the step on its own. Set `success_codes` to restrict which codes count as success; any other code fails the attempt (and triggers `retries` if configured).
+
+```kdl
+// cloud-init returns 2 when it finished but with recoverable errors ("degraded
+// done"). Accept both 0 and 2; only a real error (exit 1) fails and retries.
+shell "incus exec -T web -- cloud-init status --wait" {
+    success_codes "0,2"
+    retries 30
+    delay 5
+}
+```
+
+`success_codes` accepts a comma/space-separated string (`"0,2"`), a single integer (`2`), or a list.
+
+> **Note:** because the default accepts any exit code, a plain `retries`/`delay` loop will **not** retry on a non-zero exit unless you also set `success_codes`. To retry until a command truly succeeds, add `success_codes "0"`.
+
+## Timeouts (`timeout`)
+
+A remote command with no `timeout` runs until it completes. Some tools hang when driven non-interactively (no TTY) — set `timeout` (seconds) to bound each attempt. On timeout the in-flight command is abandoned (its SSH channel is closed; the remote process may keep running) and the attempt is treated as a failure, so `retries`/`delay` apply.
+
+```kdl
+shell "incus exec -T web -- cloud-init status --wait" {
+    timeout 60      // give up on a stuck attempt after 60s
+    retries 30
+    delay 5
+    success_codes "0,2"
+}
+```
 
 ## Conditional execution with `check`
 
@@ -122,6 +156,7 @@ step "Check connectivity" {
 ```kdl
 step "Wait for app" {
     shell "curl -sf http://localhost:8080/health" {
+        success_codes "0"   // keep retrying until the health check returns 0
         retries 10
         delay 5
     }
