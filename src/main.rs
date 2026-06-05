@@ -437,6 +437,8 @@ fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<St
             module,
             resource,
             changed,
+            stderr,
+            ..
         } => {
             let status = if *changed { "changed" } else { "ok" };
             println!(
@@ -446,6 +448,12 @@ fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<St
                 resource,
                 status
             );
+            let stderr = stderr.trim_end();
+            if !stderr.is_empty() {
+                for line in stderr.lines() {
+                    println!("[{}]     stderr | {}", display_id(host, display_ids), line);
+                }
+            }
         }
         ExecutorEvent::ModuleFailed {
             host,
@@ -458,6 +466,14 @@ fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<St
                 display_id(host, display_ids),
                 module,
                 resource,
+                error
+            );
+        }
+        ExecutorEvent::StepFailed { host, step, error } => {
+            eprintln!(
+                "[{}]   FAILED step '{}': {}",
+                display_id(host, display_ids),
+                step,
                 error
             );
         }

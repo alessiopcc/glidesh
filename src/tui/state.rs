@@ -203,9 +203,18 @@ impl TuiState {
                 module,
                 resource,
                 changed,
+                stdout,
+                stderr,
+                ..
             } => {
                 let status = if *changed { "changed" } else { "ok" };
                 self.push_node_log(host, format!("  {} '{}': {}", module, resource, status));
+                for line in stdout.trim_end().lines() {
+                    self.push_node_log(host, format!("    stdout | {}", line));
+                }
+                for line in stderr.trim_end().lines() {
+                    self.push_node_log(host, format!("    stderr | {}", line));
+                }
                 if *changed {
                     if let Some(&idx) = self.node_index.get(host) {
                         self.nodes[idx].changed += 1;
@@ -223,6 +232,9 @@ impl TuiState {
                     host,
                     format!("  FAILED {} '{}': {}", module, resource, error),
                 );
+            }
+            ExecutorEvent::StepFailed { host, step, error } => {
+                self.push_node_log(host, format!("  FAILED step '{}': {}", step, error));
             }
             ExecutorEvent::NodeComplete {
                 host,
