@@ -50,7 +50,6 @@ impl Module for DiskModule {
                     .unwrap_or(false);
 
                 let blkid = ctx
-                    .ssh
                     .exec(&format!("blkid -o value -s TYPE {} 2>/dev/null", device))
                     .await?;
                 let current_fs = blkid.stdout.trim();
@@ -68,7 +67,6 @@ impl Module for DiskModule {
                 }
 
                 let fstab = ctx
-                    .ssh
                     .exec(&format!(
                         "grep -c '\\s{}\\s' /etc/fstab 2>/dev/null || echo 0",
                         mount_point
@@ -79,7 +77,6 @@ impl Module for DiskModule {
                 }
 
                 let findmnt = ctx
-                    .ssh
                     .exec(&format!("findmnt -n {} 2>/dev/null", mount_point))
                     .await?;
                 if findmnt.stdout.trim().is_empty() {
@@ -88,7 +85,6 @@ impl Module for DiskModule {
             }
             "unmounted" | "absent" => {
                 let findmnt = ctx
-                    .ssh
                     .exec(&format!("findmnt -n {} 2>/dev/null", mount_point))
                     .await?;
                 if !findmnt.stdout.trim().is_empty() {
@@ -96,7 +92,6 @@ impl Module for DiskModule {
                 }
 
                 let fstab = ctx
-                    .ssh
                     .exec(&format!(
                         "grep -c '\\s{}\\s' /etc/fstab 2>/dev/null || echo 0",
                         mount_point
@@ -204,7 +199,6 @@ impl DiskModule {
         let mut actions = Vec::new();
 
         let blkid = ctx
-            .ssh
             .exec(&format!("blkid -o value -s TYPE {} 2>/dev/null", device))
             .await?;
         let current_fs = blkid.stdout.trim();
@@ -220,7 +214,6 @@ impl DiskModule {
             }
             let force_flag = if force { " -f" } else { "" };
             let mkfs = ctx
-                .ssh
                 .exec(&format!("mkfs.{}{} {}", fs, force_flag, device))
                 .await?;
             if mkfs.exit_code != 0 {
@@ -236,7 +229,6 @@ impl DiskModule {
         }
 
         let uuid_out = ctx
-            .ssh
             .exec(&format!("blkid -o value -s UUID {}", device))
             .await?;
         let uuid = uuid_out.stdout.trim().to_string();
@@ -247,7 +239,7 @@ impl DiskModule {
             });
         }
 
-        let mkdir = ctx.ssh.exec(&format!("mkdir -p {}", mount_point)).await?;
+        let mkdir = ctx.exec(&format!("mkdir -p {}", mount_point)).await?;
         if mkdir.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "disk".to_string(),
@@ -256,12 +248,10 @@ impl DiskModule {
         }
 
         // Update fstab: remove existing entry for this mount point, then append
-        ctx.ssh
-            .exec(&format!("sed -i '\\|\\s{}\\s|d' /etc/fstab", mount_point))
+        ctx.exec(&format!("sed -i '\\|\\s{}\\s|d' /etc/fstab", mount_point))
             .await?;
         let fstab_line = format!("UUID={}  {}  {}  {}  0  2", uuid, mount_point, fs, opts);
         let append = ctx
-            .ssh
             .exec(&format!("echo '{}' >> /etc/fstab", fstab_line))
             .await?;
         if append.exit_code != 0 {
@@ -273,11 +263,10 @@ impl DiskModule {
         actions.push("updated fstab".to_string());
 
         let findmnt = ctx
-            .ssh
             .exec(&format!("findmnt -n {} 2>/dev/null", mount_point))
             .await?;
         if findmnt.stdout.trim().is_empty() {
-            let mount = ctx.ssh.exec(&format!("mount {}", mount_point)).await?;
+            let mount = ctx.exec(&format!("mount {}", mount_point)).await?;
             if mount.exit_code != 0 {
                 return Err(GlideshError::Module {
                     module: "disk".to_string(),
@@ -306,11 +295,10 @@ impl DiskModule {
         let mut actions = Vec::new();
 
         let findmnt = ctx
-            .ssh
             .exec(&format!("findmnt -n {} 2>/dev/null", mount_point))
             .await?;
         if !findmnt.stdout.trim().is_empty() {
-            let umount = ctx.ssh.exec(&format!("umount {}", mount_point)).await?;
+            let umount = ctx.exec(&format!("umount {}", mount_point)).await?;
             if umount.exit_code != 0 {
                 return Err(GlideshError::Module {
                     module: "disk".to_string(),
@@ -324,7 +312,6 @@ impl DiskModule {
         }
 
         let sed = ctx
-            .ssh
             .exec(&format!("sed -i '\\|\\s{}\\s|d' /etc/fstab", mount_point))
             .await?;
         if sed.exit_code != 0 {

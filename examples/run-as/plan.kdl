@@ -1,0 +1,21 @@
+plan "run-as-demo" {
+    // run-as is inherited from the inventory (host > group > global). Tasks and
+    // steps can override it; `run-as=""` opts a single task out.
+    step "Identity check" {
+        shell "id -un"               // runs as the escalation target (root)
+        shell "whoami" run-as=""     // opt out -> runs as the SSH login user
+    }
+
+    // Whole-step escalation. Redundant here because the inventory already sets
+    // run-as="root", but shown to illustrate step-level configuration.
+    step "Install packages" run-as="root" {
+        package "nginx" state="present"
+        package "curl" state="present"
+    }
+
+    // Per-task escalation: only the second command is privileged.
+    step "Mixed privileges" {
+        shell "id -un"                       // login user (no run-as on this step)
+        shell "id -un" run-as="root"         // escalated just for this task
+    }
+}

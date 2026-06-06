@@ -44,11 +44,19 @@ pub enum ExecutorEvent {
         module: String,
         resource: String,
         changed: bool,
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
     },
     ModuleFailed {
         host: String,
         module: String,
         resource: String,
+        error: String,
+    },
+    StepFailed {
+        host: String,
+        step: String,
         error: String,
     },
     NodeComplete {

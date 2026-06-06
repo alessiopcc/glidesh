@@ -1,4 +1,6 @@
-use crate::config::types::{ExecutionMode, LoopSource, ParamValue, Plan, PlanItem, Step, TaskDef};
+use crate::config::types::{
+    ExecutionMode, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step, TaskDef,
+};
 use crate::error::GlideshError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -124,12 +126,15 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(fp_node)?;
+
     Ok(Plan {
         name,
         mode,
         vars,
         structured_vars,
         vars_files,
+        run_as,
         items,
     })
 }
@@ -149,12 +154,16 @@ pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshE
 
     let mut seen = HashSet::new();
     seen.insert(plan.name.clone());
+    // The top-level plan's own run-as is applied at execution time (the `plan`
+    // tier of the merge), so steps start with no inherited escalation here.
+    // Included plans contribute their plan-level run-as to their own steps below.
     let resolved = resolve_items(
         &plan.items,
         &plan.vars,
         &plan.structured_vars,
         base_dir,
         &mut seen,
+        &RunAsSpec::default(),
     )?;
     plan.items = resolved;
 
@@ -264,11 +273,20 @@ fn resolve_items(
     parent_structured: &HashMap<String, Vec<HashMap<String, String>>>,
     base_dir: &Path,
     seen: &mut HashSet<String>,
+    inherited_run_as: &RunAsSpec,
 ) -> Result<Vec<PlanItem>, GlideshError> {
     let mut result = Vec::new();
     for item in items {
         match item {
-            PlanItem::Step(s) => result.push(PlanItem::Step(s.clone())),
+            PlanItem::Step(s) => {
+                // Flattening discards the nested-plan structure, so an including
+                // plan's plan-level run-as is layered onto each inlined step here
+                // (the step's own run-as still wins). Without this, escalation set
+                // at the plan level of an included file would be lost.
+                let mut s = s.clone();
+                s.run_as = s.run_as.clone().merge_over(inherited_run_as);
+                result.push(PlanItem::Step(s));
+            }
             PlanItem::Include(path) => {
                 let resolved_path = if Path::new(path).is_absolute() {
                     PathBuf::from(path)
@@ -302,6 +320,9 @@ fn resolve_items(
                         .map(|(k, v)| (k.clone(), v.clone())),
                 );
 
+                // The included plan's plan-level run-as governs its own steps,
+                // layered under anything inherited from the including plan(s).
+                let child_run_as = included.run_as.clone().merge_over(inherited_run_as);
                 let child_base = resolved_path.parent().unwrap_or(base_dir);
                 let child_items = resolve_items(
                     &included.items,
@@ -309,6 +330,7 @@ fn resolve_items(
                     &merged_structured,
                     child_base,
                     seen,
+                    &child_run_as,
                 )?;
                 result.extend(child_items);
             }
@@ -403,11 +425,14 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(node)?;
+
     Ok(Step {
         name,
         tasks,
         loop_source,
         subscribe,
+        run_as,
     })
 }
 
@@ -442,6 +467,8 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
             let key = name.to_string();
             if key == "register" {
                 register = entry.value().as_string().map(|s| s.to_string());
+            } else if key == "run-as" || key == "run-as-method" {
+                // Captured separately as the task's escalation, not a module arg.
             } else {
                 let value = kdl_value_to_param(entry.value());
                 args.insert(key, value);
@@ -500,11 +527,14 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(node)?;
+
     Ok(TaskDef {
         module,
         resource,
         args,
         register,
+        run_as,
     })
 }
 
@@ -574,6 +604,47 @@ plan "deploy-app" {
             fp.steps()[1].tasks[0].args.get("retries").unwrap().as_i64(),
             Some(5)
         );
+    }
+
+    #[test]
+    fn test_parse_plan_level_run_as() {
+        use crate::config::types::{RunAsMethod, RunAsUser};
+        let input = r#"plan "p" run-as="root" run-as-method="doas" { step "s" { shell "id" } }"#;
+        let fp = parse_plan(input).unwrap();
+        assert_eq!(fp.run_as.user, Some(RunAsUser::User("root".to_string())));
+        assert_eq!(fp.run_as.method, Some(RunAsMethod::Doas));
+    }
+
+    #[test]
+    fn test_parse_run_as_step_and_task() {
+        use crate::config::types::{RunAsMethod, RunAsUser};
+        let input = r#"
+plan "p" {
+    step "Install" run-as="root" {
+        package "nginx" state="present"
+        shell "whoami" run-as="postgres" run-as-method="doas"
+        shell "id" run-as=""
+    }
+}
+"#;
+        let fp = parse_plan(input).unwrap();
+        let step = &fp.steps()[0];
+        assert_eq!(step.run_as.user, Some(RunAsUser::User("root".to_string())));
+
+        // Module without a run-as attribute inherits (None).
+        assert_eq!(step.tasks[0].run_as.user, None);
+
+        // Module-level override, and run-as attrs must not leak into module args.
+        assert_eq!(
+            step.tasks[1].run_as.user,
+            Some(RunAsUser::User("postgres".to_string()))
+        );
+        assert_eq!(step.tasks[1].run_as.method, Some(RunAsMethod::Doas));
+        assert!(!step.tasks[1].args.contains_key("run-as"));
+        assert!(!step.tasks[1].args.contains_key("run-as-method"));
+
+        // run-as="" opts out at the task level.
+        assert_eq!(step.tasks[2].run_as.user, Some(RunAsUser::Disabled));
     }
 
     #[test]
@@ -749,6 +820,57 @@ plan "parent" {
         assert_eq!(plan.steps()[0].name, "Before");
         assert_eq!(plan.steps()[1].name, "Child step");
         assert_eq!(plan.steps()[2].name, "After");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_included_plan_run_as_propagates_to_its_steps() {
+        use crate::config::types::{RunAsMethod, RunAsUser};
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("glidesh_test_include_runas");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // The included plan declares plan-level escalation; its own steps must
+        // inherit it after flattening, while a step that opts out still wins.
+        let child = r#"
+plan "child" run-as="root" run-as-method="doas" {
+    step "Inherits" {
+        shell "id"
+    }
+    step "Opts out" run-as="" {
+        shell "whoami"
+    }
+}
+"#;
+        let mut f = std::fs::File::create(dir.join("child.kdl")).unwrap();
+        f.write_all(child.as_bytes()).unwrap();
+
+        // The parent has no plan-level run-as of its own.
+        let parent = r#"
+plan "parent" {
+    step "Local" {
+        shell "echo hi"
+    }
+    include "child.kdl"
+}
+"#;
+        let mut plan = parse_plan(parent).unwrap();
+        resolve_includes(&mut plan, &dir).unwrap();
+
+        let steps = plan.steps();
+        assert_eq!(steps[0].name, "Local");
+        assert_eq!(steps[0].run_as.user, None);
+
+        assert_eq!(steps[1].name, "Inherits");
+        assert_eq!(
+            steps[1].run_as.user,
+            Some(RunAsUser::User("root".to_string()))
+        );
+        assert_eq!(steps[1].run_as.method, Some(RunAsMethod::Doas));
+
+        assert_eq!(steps[2].name, "Opts out");
+        assert_eq!(steps[2].run_as.user, Some(RunAsUser::Disabled));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

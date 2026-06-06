@@ -24,7 +24,7 @@ impl Module for PackageModule {
             .unwrap_or("present");
 
         let check_cmd = ctx.os_info.pkg_manager.check_installed_cmd(package);
-        let output = ctx.ssh.exec(&check_cmd).await?;
+        let output = ctx.exec(&check_cmd).await?;
         let is_installed = output.exit_code == 0;
 
         match (desired_state, is_installed) {
@@ -65,7 +65,7 @@ impl Module for PackageModule {
         let cmd = match desired_state {
             "present" => {
                 let update_cmd = ctx.os_info.pkg_manager.update_index_cmd();
-                ctx.ssh.exec(update_cmd).await?;
+                ctx.exec(update_cmd).await?;
                 ctx.os_info
                     .pkg_manager
                     .install_cmd(std::slice::from_ref(package))
@@ -82,7 +82,7 @@ impl Module for PackageModule {
             }
         };
 
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.exec(&cmd).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {

@@ -1,4 +1,4 @@
-use crate::config::types::{Group, Host, Inventory, JumpHost};
+use crate::config::types::{Group, Host, Inventory, JumpHost, RunAsSpec};
 use crate::error::GlideshError;
 use std::collections::HashMap;
 
@@ -13,6 +13,7 @@ pub fn parse_inventory(input: &str) -> Result<Inventory, GlideshError> {
     let mut global_vars = HashMap::new();
     let mut groups = Vec::new();
     let mut ungrouped_hosts = Vec::new();
+    let mut run_as = RunAsSpec::default();
 
     for node in doc.nodes() {
         match node.name().to_string().as_str() {
@@ -20,6 +21,10 @@ pub fn parse_inventory(input: &str) -> Result<Inventory, GlideshError> {
                 if let Some(children) = node.children() {
                     global_vars = parse_vars_block(children)?;
                 }
+            }
+            "run-as" => {
+                // Top-level default escalation: `run-as "root" run-as-method="sudo"`.
+                run_as = parse_run_as_global(node)?;
             }
             "group" => {
                 groups.push(parse_group(node)?);
@@ -73,6 +78,21 @@ pub fn parse_inventory(input: &str) -> Result<Inventory, GlideshError> {
         groups,
         ungrouped_hosts,
         global_vars,
+        run_as,
+    })
+}
+
+/// Read the top-level `run-as "<user>" run-as-method="<m>"` node (the global default).
+fn parse_run_as_global(node: &kdl::KdlNode) -> Result<RunAsSpec, GlideshError> {
+    let user = node
+        .entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .map(|e| super::run_as_user_from_value(e.value()))
+        .transpose()?;
+    Ok(RunAsSpec {
+        user,
+        method: super::parse_run_as_method_attr(node)?,
     })
 }
 
@@ -155,12 +175,15 @@ fn parse_group(node: &kdl::KdlNode) -> Result<Group, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(node)?;
+
     Ok(Group {
         name,
         hosts,
         vars,
         plan,
         jump,
+        run_as,
     })
 }
 
@@ -228,6 +251,8 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         }
     }
 
+    let run_as = super::parse_run_as_attrs(node)?;
+
     Ok(Host {
         name,
         address,
@@ -236,6 +261,7 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         vars,
         plan,
         jump,
+        run_as,
     })
 }
 
@@ -707,6 +733,51 @@ host "standalone" "10.0.0.1" user="admin" {
         let inv = parse_inventory(input).unwrap();
         let resolved = inv.resolve_targets(Some("standalone"));
         assert_eq!(resolved[0].vars.get("env").unwrap(), "production");
+    }
+
+    #[test]
+    fn test_run_as_inheritance_and_override() {
+        use crate::config::types::{RunAsMethod, RunAsUser};
+        let input = r#"
+run-as "globaluser"
+group "web" run-as="root" run-as-method="doas" {
+    host "w1" "10.0.0.1"
+    host "w2" "10.0.0.2" run-as="deploy"
+    host "w3" "10.0.0.3" run-as=""
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let resolved = inv.resolve_targets(Some("web"));
+        let by = |n: &str| {
+            resolved
+                .iter()
+                .find(|h| h.name == n)
+                .unwrap()
+                .run_as
+                .clone()
+        };
+
+        // w1 inherits the group's root + doas.
+        let w1 = by("w1");
+        assert_eq!(w1.user, Some(RunAsUser::User("root".to_string())));
+        assert_eq!(w1.method, Some(RunAsMethod::Doas));
+
+        // w2 overrides the user but keeps the group's method.
+        let w2 = by("w2");
+        assert_eq!(w2.user, Some(RunAsUser::User("deploy".to_string())));
+        assert_eq!(w2.method, Some(RunAsMethod::Doas));
+
+        // w3 opts out entirely.
+        let w3 = by("w3");
+        assert_eq!(w3.user, Some(RunAsUser::Disabled));
+        assert!(w3.resolve(None).is_none());
+    }
+
+    #[test]
+    fn test_run_as_invalid_method_errors() {
+        let input = r#"host "w1" "10.0.0.1" run-as="root" run-as-method="bogus""#;
+        let err = parse_inventory(input).unwrap_err().to_string();
+        assert!(err.contains("Unknown run-as-method"), "got: {}", err);
     }
 
     #[test]

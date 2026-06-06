@@ -1,0 +1,18 @@
+vars {
+    deploy-user "deploy"
+}
+
+// Global default: every host escalates to root via sudo unless it overrides this.
+// Omit this node to require explicit per-group / per-host configuration instead.
+run-as "root"
+
+group "web" {
+    // Inherits the global `run-as "root"` (sudo).
+    host "web-1" "10.0.0.1" user="deploy"
+
+    // Same escalation target, but via doas instead of sudo.
+    host "web-2" "10.0.0.2" user="deploy" run-as-method="doas"
+}
+
+// This host is reached as root already, so opt out of escalation entirely.
+host "legacy" "10.0.2.1" user="root" run-as=""

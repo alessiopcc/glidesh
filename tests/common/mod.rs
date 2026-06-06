@@ -135,14 +135,20 @@ impl TestContainer {
         }
     }
 
-    /// Connect an SSH session to this container, with retries.
+    /// Connect an SSH session to this container as root, with retries.
     pub async fn ssh_session(&self) -> SshSession {
+        self.ssh_session_as("root").await
+    }
+
+    /// Connect an SSH session as a specific user, with retries.
+    #[allow(dead_code)]
+    pub async fn ssh_session_as(&self, user: &str) -> SshSession {
         let mut last_err = None;
         for attempt in 0..15 {
             match SshSession::connect(
                 "127.0.0.1",
                 self.port,
-                "root",
+                user,
                 &self.key,
                 glidesh::ssh::HostKeyPolicy {
                     verify: false,
@@ -186,6 +192,28 @@ impl TestContainer {
             template_data: &glidesh::config::template::EMPTY_TEMPLATE_DATA,
             dry_run,
             plan_base_dir: std::path::Path::new("."),
+            run_as: None,
+        }
+    }
+
+    /// Create a ModuleContext with privilege escalation configured.
+    #[allow(dead_code)]
+    pub fn module_context_run_as<'a>(
+        &self,
+        ssh: &'a SshSession,
+        os_info: &'a OsInfo,
+        vars: &'a HashMap<String, String>,
+        dry_run: bool,
+        run_as: glidesh::config::types::ResolvedRunAs,
+    ) -> ModuleContext<'a> {
+        ModuleContext {
+            ssh,
+            os_info,
+            vars,
+            template_data: &glidesh::config::template::EMPTY_TEMPLATE_DATA,
+            dry_run,
+            plan_base_dir: std::path::Path::new("."),
+            run_as: Some(run_as),
         }
     }
 }

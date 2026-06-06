@@ -2,6 +2,7 @@ pub mod container;
 pub mod context;
 pub mod detect;
 pub mod disk;
+pub mod escalation;
 pub mod external;
 pub mod file;
 pub mod host;

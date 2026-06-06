@@ -26,6 +26,17 @@ ARG PUBKEY
 RUN echo "${PUBKEY}" > /root/.ssh/authorized_keys && \
     chmod 600 /root/.ssh/authorized_keys
 
+# Non-root user for run-as (privilege escalation) tests: passwordless sudo and the
+# same authorized key, so tests can connect as `deploy` and escalate to root.
+RUN useradd -m -s /bin/bash deploy && \
+    mkdir -p /home/deploy/.ssh && \
+    echo "${PUBKEY}" > /home/deploy/.ssh/authorized_keys && \
+    chmod 700 /home/deploy/.ssh && \
+    chmod 600 /home/deploy/.ssh/authorized_keys && \
+    chown -R deploy:deploy /home/deploy/.ssh && \
+    echo "deploy ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/deploy && \
+    chmod 440 /etc/sudoers.d/deploy
+
 # Create a 64MB loopback image for disk module tests
 RUN dd if=/dev/zero of=/opt/fake.img bs=1M count=64
 

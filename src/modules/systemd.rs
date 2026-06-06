@@ -234,7 +234,7 @@ impl SystemdModule {
         let local_hash = Self::sha256_hex(content.as_bytes());
         let unit_path = Self::unit_path(&params.resource_name);
 
-        match ctx.ssh.checksum_remote(&unit_path).await? {
+        match ctx.checksum_remote(&unit_path).await? {
             Some(remote_hash) if remote_hash == local_hash => Ok(None),
             _ => Ok(Some(content)),
         }
@@ -254,7 +254,7 @@ impl SystemdModule {
         let unit_path = Self::unit_path(&params.resource_name);
 
         let needs_upload = !matches!(
-            ctx.ssh.checksum_remote(&unit_path).await?,
+            ctx.checksum_remote(&unit_path).await?,
             Some(remote_hash) if remote_hash == local_hash
         );
 
@@ -266,9 +266,9 @@ impl SystemdModule {
             return Ok(true);
         }
 
-        ctx.ssh.upload_file(content.as_bytes(), &unit_path).await?;
+        ctx.upload_file(content.as_bytes(), &unit_path).await?;
 
-        let reload = ctx.ssh.exec("systemctl daemon-reload").await?;
+        let reload = ctx.exec("systemctl daemon-reload").await?;
         if reload.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "systemd".to_string(),
@@ -309,7 +309,6 @@ impl Module for SystemdModule {
         }
 
         let is_active = ctx
-            .ssh
             .exec(&format!("systemctl is-active {} 2>/dev/null", unit))
             .await?;
         let active = is_active.stdout.trim() == "active";
@@ -324,7 +323,6 @@ impl Module for SystemdModule {
 
         if let Some(want_enabled) = desired_enabled {
             let is_enabled = ctx
-                .ssh
                 .exec(&format!("systemctl is-enabled {} 2>/dev/null", unit))
                 .await?;
             let enabled = is_enabled.stdout.trim() == "enabled";
@@ -382,7 +380,6 @@ impl Module for SystemdModule {
 
         if let Some(want_enabled) = desired_enabled {
             let is_enabled = ctx
-                .ssh
                 .exec(&format!("systemctl is-enabled {} 2>/dev/null", unit))
                 .await?;
             let enabled = is_enabled.stdout.trim() == "enabled";
@@ -394,7 +391,6 @@ impl Module for SystemdModule {
         }
 
         let is_active = ctx
-            .ssh
             .exec(&format!("systemctl is-active {} 2>/dev/null", unit))
             .await?;
         let active = is_active.stdout.trim() == "active";
@@ -425,7 +421,7 @@ impl Module for SystemdModule {
         }
 
         let combined = commands.join(" && ");
-        let output = ctx.ssh.exec(&combined).await?;
+        let output = ctx.exec(&combined).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {

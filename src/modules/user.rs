@@ -23,10 +23,7 @@ impl Module for UserModule {
             .and_then(|v| v.as_str())
             .unwrap_or("present");
 
-        let output = ctx
-            .ssh
-            .exec(&format!("id {} 2>/dev/null", username))
-            .await?;
+        let output = ctx.exec(&format!("id {} 2>/dev/null", username)).await?;
         let exists = output.exit_code == 0;
 
         match (desired_state, exists) {
@@ -96,7 +93,6 @@ impl UserModule {
 
         if let Some(desired_shell) = params.args.get("shell").and_then(|v| v.as_str()) {
             let output = ctx
-                .ssh
                 .exec(&format!("getent passwd {} | cut -d: -f7", username))
                 .await?;
             let current_shell = output.stdout.trim();
@@ -106,7 +102,7 @@ impl UserModule {
         }
 
         if let Some(desired_groups) = params.args.get("groups").and_then(|v| v.as_list()) {
-            let output = ctx.ssh.exec(&format!("id -nG {}", username)).await?;
+            let output = ctx.exec(&format!("id -nG {}", username)).await?;
             let current_groups: Vec<&str> = output.stdout.split_whitespace().collect();
             for g in desired_groups {
                 if !current_groups.contains(&g.as_str()) {
@@ -116,7 +112,7 @@ impl UserModule {
         }
 
         if let Some(desired_uid) = params.args.get("uid").and_then(|v| v.as_i64()) {
-            let output = ctx.ssh.exec(&format!("id -u {}", username)).await?;
+            let output = ctx.exec(&format!("id -u {}", username)).await?;
             let current_uid: i64 = output.stdout.trim().parse().unwrap_or(-1);
             if current_uid != desired_uid {
                 changes.push(format!("uid {} -> {}", current_uid, desired_uid));
@@ -134,7 +130,6 @@ impl UserModule {
         let username = &params.resource_name;
 
         let exists = ctx
-            .ssh
             .exec(&format!("id {} 2>/dev/null", username))
             .await?
             .exit_code
@@ -167,7 +162,7 @@ impl UserModule {
         cmd_parts.push(username.clone());
 
         let cmd = cmd_parts.join(" ");
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.exec(&cmd).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -200,7 +195,7 @@ impl UserModule {
             "userdel -r {} 2>/dev/null || userdel {}",
             username, username
         );
-        let output = ctx.ssh.exec(&cmd).await?;
+        let output = ctx.exec(&cmd).await?;
 
         if output.exit_code != 0 {
             return Err(GlideshError::Module {

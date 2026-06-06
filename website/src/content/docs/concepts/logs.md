@@ -66,6 +66,8 @@ Displays the full log file with syntax highlighting:
 - **Green** — successful results
 - **Gray** — check operations
 
+Each command result records its captured `stdout` and `stderr` (indented and prefixed with `stdout |` / `stderr |`) along with the exit code, so a failure's output is preserved in the log instead of being discarded. Each stream is capped at 8 KiB per result; longer output is truncated with a `… [truncated]` marker. Orchestration failures that never reach a module — an unknown module name, an unresolved `${…}` reference, or an undefined loop variable — are logged as failed steps rather than vanishing silently.
+
 | Key | Action |
 |-----|--------|
 | Up/Down or j/k | Scroll line by line |

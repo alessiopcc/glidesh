@@ -14,6 +14,79 @@ pub struct ResolvedJumpHost {
     pub port: u16,
 }
 
+/// Privilege escalation method used to run a command as another user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunAsMethod {
+    #[default]
+    Sudo,
+    Doas,
+    Su,
+}
+
+impl RunAsMethod {
+    pub fn parse(s: &str) -> Option<RunAsMethod> {
+        match s {
+            "sudo" => Some(RunAsMethod::Sudo),
+            "doas" => Some(RunAsMethod::Doas),
+            "su" => Some(RunAsMethod::Su),
+            _ => None,
+        }
+    }
+}
+
+/// The escalation target at a single config level.
+///
+/// `run-as="x"` => `User("x")`, `run-as=""` => `Disabled` (cancel an escalated
+/// parent), attribute absent => the surrounding `RunAsSpec.user` is `None` (inherit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunAsUser {
+    Disabled,
+    User(String),
+}
+
+/// Partial run-as config at one level (host/group/global/step/task/CLI). Merged
+/// field-by-field down the chain, most specific winning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunAsSpec {
+    /// `None` = inherit from the less-specific level.
+    pub user: Option<RunAsUser>,
+    /// `None` = inherit; the final fallback is [`RunAsMethod::Sudo`].
+    pub method: Option<RunAsMethod>,
+}
+
+impl RunAsSpec {
+    /// Layer `self` (more specific) over `base` (less specific). Each field falls
+    /// back to `base` only when unset on `self`.
+    pub fn merge_over(self, base: &RunAsSpec) -> RunAsSpec {
+        RunAsSpec {
+            user: self.user.or_else(|| base.user.clone()),
+            method: self.method.or(base.method),
+        }
+    }
+
+    /// Resolve to a concrete escalation, attaching the global password. Returns
+    /// `None` when escalation is unset or explicitly disabled.
+    pub fn resolve(&self, password: Option<&str>) -> Option<ResolvedRunAs> {
+        match &self.user {
+            Some(RunAsUser::User(user)) => Some(ResolvedRunAs {
+                user: user.clone(),
+                method: self.method.unwrap_or_default(),
+                password: password.map(|p| p.to_string()),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A fully resolved escalation, ready to wrap a command.
+#[derive(Debug, Clone)]
+pub struct ResolvedRunAs {
+    pub user: String,
+    pub method: RunAsMethod,
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Host {
     pub name: String,
@@ -23,6 +96,7 @@ pub struct Host {
     pub vars: HashMap<String, String>,
     pub plan: Option<String>,
     pub jump: Option<JumpHost>,
+    pub run_as: RunAsSpec,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +106,7 @@ pub struct Group {
     pub vars: HashMap<String, String>,
     pub plan: Option<String>,
     pub jump: Option<JumpHost>,
+    pub run_as: RunAsSpec,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +114,7 @@ pub struct Inventory {
     pub groups: Vec<Group>,
     pub ungrouped_hosts: Vec<Host>,
     pub global_vars: HashMap<String, String>,
+    pub run_as: RunAsSpec,
 }
 
 impl Inventory {
@@ -72,11 +148,11 @@ impl Inventory {
             None => {
                 for group in &self.groups {
                     for host in &group.hosts {
-                        hosts.push(self.resolve_host(host, Some(&group.vars), group.jump.as_ref()));
+                        hosts.push(self.resolve_host(host, Some(group)));
                     }
                 }
                 for host in &self.ungrouped_hosts {
-                    hosts.push(self.resolve_host(host, None, None));
+                    hosts.push(self.resolve_host(host, None));
                 }
             }
             Some(target) => {
@@ -85,11 +161,7 @@ impl Inventory {
                         if group.name == g_name {
                             for host in &group.hosts {
                                 if host.name == h_name {
-                                    hosts.push(self.resolve_host(
-                                        host,
-                                        Some(&group.vars),
-                                        group.jump.as_ref(),
-                                    ));
+                                    hosts.push(self.resolve_host(host, Some(group)));
                                     return hosts;
                                 }
                             }
@@ -101,11 +173,7 @@ impl Inventory {
                 for group in &self.groups {
                     if group.name == target {
                         for host in &group.hosts {
-                            hosts.push(self.resolve_host(
-                                host,
-                                Some(&group.vars),
-                                group.jump.as_ref(),
-                            ));
+                            hosts.push(self.resolve_host(host, Some(group)));
                         }
                         return hosts;
                     }
@@ -114,18 +182,14 @@ impl Inventory {
                 for group in &self.groups {
                     for host in &group.hosts {
                         if host.name == target {
-                            hosts.push(self.resolve_host(
-                                host,
-                                Some(&group.vars),
-                                group.jump.as_ref(),
-                            ));
+                            hosts.push(self.resolve_host(host, Some(group)));
                             return hosts;
                         }
                     }
                 }
                 for host in &self.ungrouped_hosts {
                     if host.name == target {
-                        hosts.push(self.resolve_host(host, None, None));
+                        hosts.push(self.resolve_host(host, None));
                         return hosts;
                     }
                 }
@@ -148,7 +212,7 @@ impl Inventory {
                     .hosts
                     .iter()
                     .filter(|h| h.plan.is_none())
-                    .map(|h| self.resolve_host(h, Some(&group.vars), group.jump.as_ref()))
+                    .map(|h| self.resolve_host(h, Some(group)))
                     .collect();
                 if !hosts.is_empty() {
                     result.push((group.name.clone(), plan_path.clone(), hosts));
@@ -157,30 +221,25 @@ impl Inventory {
             // Hosts inside a group that override with their own plan attribute.
             for host in &group.hosts {
                 if let Some(ref plan_path) = host.plan {
-                    let resolved = self.resolve_host(host, Some(&group.vars), group.jump.as_ref());
+                    let resolved = self.resolve_host(host, Some(group));
                     result.push((group.name.clone(), plan_path.clone(), vec![resolved]));
                 }
             }
         }
         for host in &self.ungrouped_hosts {
             if let Some(ref plan_path) = host.plan {
-                let resolved = self.resolve_host(host, None, None);
+                let resolved = self.resolve_host(host, None);
                 result.push((String::new(), plan_path.clone(), vec![resolved]));
             }
         }
         result
     }
 
-    fn resolve_host(
-        &self,
-        host: &Host,
-        group_vars: Option<&HashMap<String, String>>,
-        group_jump: Option<&JumpHost>,
-    ) -> ResolvedHost {
+    fn resolve_host(&self, host: &Host, group: Option<&Group>) -> ResolvedHost {
         // Merge vars: global -> group -> host (most specific wins)
         let mut vars = self.global_vars.clone();
-        if let Some(gv) = group_vars {
-            vars.extend(gv.iter().map(|(k, v)| (k.clone(), v.clone())));
+        if let Some(g) = group {
+            vars.extend(g.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
         vars.extend(host.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
@@ -190,12 +249,22 @@ impl Inventory {
             .or_else(|| vars.get("deploy-user").cloned())
             .unwrap_or_else(|| "root".to_string());
 
-        let jump_source = host.jump.as_ref().or(group_jump);
+        let jump_source = host
+            .jump
+            .as_ref()
+            .or_else(|| group.and_then(|g| g.jump.as_ref()));
         let jump = jump_source.map(|j| ResolvedJumpHost {
             address: j.address.clone(),
             user: j.user.clone().unwrap_or_else(|| user.clone()),
             port: j.port.unwrap_or(22),
         });
+
+        // Escalation: host overrides group overrides global.
+        let run_as = host
+            .run_as
+            .clone()
+            .merge_over(group.map(|g| &g.run_as).unwrap_or(&RunAsSpec::default()))
+            .merge_over(&self.run_as);
 
         ResolvedHost {
             name: host.name.clone(),
@@ -204,6 +273,7 @@ impl Inventory {
             port: host.port.unwrap_or(22),
             vars,
             jump,
+            run_as,
         }
     }
 }
@@ -216,6 +286,9 @@ pub struct ResolvedHost {
     pub port: u16,
     pub vars: HashMap<String, String>,
     pub jump: Option<ResolvedJumpHost>,
+    /// Merged escalation from global -> group -> host (CLI default applied later
+    /// in the executor, since it is the least-specific layer).
+    pub run_as: RunAsSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -234,6 +307,8 @@ pub struct Plan {
     pub structured_vars: HashMap<String, Vec<HashMap<String, String>>>,
     /// Paths to external KDL files containing additional vars (resolved during `resolve_includes`).
     pub vars_files: Vec<String>,
+    /// Plan-level escalation default, applied to every step (overridable per step/task).
+    pub run_as: RunAsSpec,
     pub items: Vec<PlanItem>,
 }
 
@@ -268,6 +343,8 @@ pub struct Step {
     pub tasks: Vec<TaskDef>,
     pub loop_source: Option<LoopSource>,
     pub subscribe: Vec<String>,
+    /// Step-level escalation override (applies to all tasks in the step).
+    pub run_as: RunAsSpec,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +353,8 @@ pub struct TaskDef {
     pub resource: String,
     pub args: HashMap<String, ParamValue>,
     pub register: Option<String>,
+    /// Module-level escalation override (most specific).
+    pub run_as: RunAsSpec,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -322,5 +401,83 @@ impl ParamValue {
             ParamValue::Map(m) => Some(m),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod run_as_tests {
+    use super::*;
+
+    fn user(name: &str) -> RunAsSpec {
+        RunAsSpec {
+            user: Some(RunAsUser::User(name.to_string())),
+            method: None,
+        }
+    }
+
+    #[test]
+    fn merge_inherits_when_unset() {
+        let base = user("root");
+        let merged = RunAsSpec::default().merge_over(&base);
+        assert_eq!(merged.user, Some(RunAsUser::User("root".to_string())));
+    }
+
+    #[test]
+    fn merge_more_specific_wins() {
+        let base = user("root");
+        let specific = user("postgres");
+        assert_eq!(
+            specific.merge_over(&base).user,
+            Some(RunAsUser::User("postgres".to_string()))
+        );
+    }
+
+    #[test]
+    fn disabled_cancels_escalated_parent() {
+        let base = user("root");
+        let off = RunAsSpec {
+            user: Some(RunAsUser::Disabled),
+            method: None,
+        };
+        let merged = off.merge_over(&base);
+        assert_eq!(merged.user, Some(RunAsUser::Disabled));
+        assert!(merged.resolve(None).is_none());
+    }
+
+    #[test]
+    fn method_resolves_with_default_sudo() {
+        let resolved = user("root").resolve(Some("pw")).unwrap();
+        assert_eq!(resolved.user, "root");
+        assert_eq!(resolved.method, RunAsMethod::Sudo);
+        assert_eq!(resolved.password.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn full_precedence_module_over_step_over_host() {
+        // host=root(sudo), step inherits, module overrides user+method.
+        let host = RunAsSpec {
+            user: Some(RunAsUser::User("root".to_string())),
+            method: Some(RunAsMethod::Sudo),
+        };
+        let step = RunAsSpec::default();
+        let module = RunAsSpec {
+            user: Some(RunAsUser::User("deploy".to_string())),
+            method: Some(RunAsMethod::Doas),
+        };
+        let effective = module
+            .merge_over(&step)
+            .merge_over(&host)
+            .resolve(None)
+            .unwrap();
+        assert_eq!(effective.user, "deploy");
+        assert_eq!(effective.method, RunAsMethod::Doas);
+    }
+
+    #[test]
+    fn unset_everywhere_is_no_escalation() {
+        let effective = RunAsSpec::default()
+            .merge_over(&RunAsSpec::default())
+            .resolve(None);
+        assert!(effective.is_none());
     }
 }
