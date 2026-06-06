@@ -25,6 +25,26 @@ fn truncate_stream(content: &str) -> (&str, bool) {
     (&content[..end], true)
 }
 
+/// Format a captured stream (`stdout`/`stderr`) into indented, labelled log lines,
+/// capped at [`MAX_STREAM_LOG_BYTES`] with a `... [truncated]` marker. Shared by the
+/// run log, the TUI, and the CLI so all three honor the same cap and a chatty command
+/// can't bloat any of them. Returns an empty vec for an empty stream.
+pub(crate) fn stream_log_lines(label: &str, content: &str) -> Vec<String> {
+    let trimmed = content.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let (body, truncated) = truncate_stream(trimmed);
+    let mut lines: Vec<String> = body
+        .lines()
+        .map(|line| format!("    {} | {}", label, line))
+        .collect();
+    if truncated {
+        lines.push(format!("    {} | ... [truncated]", label));
+    }
+    lines
+}
+
 pub struct RunLogger {
     run_dir: PathBuf,
     run_id: String,
@@ -80,13 +100,10 @@ impl RunLogger {
         if trimmed.is_empty() {
             return;
         }
-        let (body, truncated) = truncate_stream(trimmed);
+        let lines = stream_log_lines(label, trimmed);
         if let Ok(file) = self.get_node_file(host) {
-            for line in body.lines() {
-                let _ = writeln!(file, "    {} | {}", label, line);
-            }
-            if truncated {
-                let _ = writeln!(file, "    {} | ... [truncated]", label);
+            for line in &lines {
+                let _ = writeln!(file, "{}", line);
             }
         }
     }

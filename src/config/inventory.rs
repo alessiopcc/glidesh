@@ -88,7 +88,8 @@ fn parse_run_as_global(node: &kdl::KdlNode) -> Result<RunAsSpec, GlideshError> {
         .entries()
         .iter()
         .find(|e| e.name().is_none())
-        .map(|e| super::run_as_user_from_value(e.value()));
+        .map(|e| super::run_as_user_from_value(e.value()))
+        .transpose()?;
     Ok(RunAsSpec {
         user,
         method: super::parse_run_as_method_attr(node)?,

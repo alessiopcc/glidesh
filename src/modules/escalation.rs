@@ -48,6 +48,21 @@ pub fn method_name(method: RunAsMethod) -> &'static str {
     }
 }
 
+/// Validate a resolved escalation before spending a channel on it. `su` reads its
+/// password from the controlling terminal (PTY), so without one the remote would
+/// block on the prompt forever — fail fast with a clear [`GlideshError::RunAs`].
+pub fn precheck(run_as: &ResolvedRunAs) -> Result<(), GlideshError> {
+    if run_as.method == RunAsMethod::Su && run_as.password.is_none() {
+        return Err(GlideshError::RunAs {
+            user: run_as.user.clone(),
+            method: method_name(run_as.method).to_string(),
+            message: "su requires a password; provide --ask-pass or set GLIDESH_RUNAS_PASS"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Wrap `inner` so it executes as `run_as.user` via the configured method.
 pub fn wrap(run_as: &ResolvedRunAs, inner: &str) -> Wrapped {
     let cmd = shell_escape(inner);
@@ -190,6 +205,23 @@ mod tests {
             stderr: "sudo: a password is required".to_string(),
         };
         assert!(classify_failure(&r, &out).is_some());
+    }
+
+    #[test]
+    fn precheck_rejects_su_without_password() {
+        let err = precheck(&resolved(RunAsMethod::Su, None)).unwrap_err();
+        assert!(matches!(err, GlideshError::RunAs { .. }));
+    }
+
+    #[test]
+    fn precheck_allows_su_with_password() {
+        assert!(precheck(&resolved(RunAsMethod::Su, Some("pw"))).is_ok());
+    }
+
+    #[test]
+    fn precheck_allows_passwordless_sudo_and_doas() {
+        assert!(precheck(&resolved(RunAsMethod::Sudo, None)).is_ok());
+        assert!(precheck(&resolved(RunAsMethod::Doas, None)).is_ok());
     }
 
     #[test]

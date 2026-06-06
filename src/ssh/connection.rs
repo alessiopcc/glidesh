@@ -417,6 +417,7 @@ impl SshSession {
         let Some(r) = run_as else {
             return self.exec(command).await;
         };
+        escalation::precheck(r)?;
         let wrapped = escalation::wrap(r, command);
         let out = self
             .exec_with(

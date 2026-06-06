@@ -448,11 +448,8 @@ fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<St
                 resource,
                 status
             );
-            let stderr = stderr.trim_end();
-            if !stderr.is_empty() {
-                for line in stderr.lines() {
-                    println!("[{}]     stderr | {}", display_id(host, display_ids), line);
-                }
+            for line in crate::logging::stream_log_lines("stderr", stderr) {
+                println!("[{}] {}", display_id(host, display_ids), line);
             }
         }
         ExecutorEvent::ModuleFailed {
