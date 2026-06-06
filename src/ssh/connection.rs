@@ -542,21 +542,40 @@ impl SshSession {
             return self.upload_file(content, remote_path).await;
         };
         let tmp = self.mktemp_remote().await?;
-        self.upload_file(content, &tmp).await?;
+        // Any early return past this point must clean up the staged temp file,
+        // so the SFTP write and the escalated move are wrapped and the temp file
+        // is removed on every error path (not only on a non-zero `mv`/`chown`).
+        let result = self
+            .stage_upload(content, &tmp, remote_path, r, run_as)
+            .await;
+        if result.is_err() {
+            let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
+        }
+        result
+    }
+
+    async fn stage_upload(
+        &self,
+        content: &[u8],
+        tmp: &str,
+        remote_path: &str,
+        r: &ResolvedRunAs,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<(), GlideshError> {
+        self.upload_file(content, tmp).await?;
         // Move into place and hand ownership to the escalation target — `mv` alone
         // would preserve the staging file's login-user ownership. Any explicit
         // owner/group from the module is applied afterwards by set_file_attrs.
         let dest = shell_escape(remote_path);
         let place = format!(
             "mv -f {} {} && chown {} {}",
-            shell_escape(&tmp),
+            shell_escape(tmp),
             dest,
             shell_escape(&r.user),
             dest,
         );
         let out = self.exec_as(&place, run_as).await?;
         if out.exit_code != 0 {
-            let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
             return Err(GlideshError::Module {
                 module: "file".to_string(),
                 message: format!(
@@ -581,17 +600,29 @@ impl SshSession {
             return self.download_file(remote_path).await;
         }
         let tmp = self.mktemp_remote().await?;
+        // The staged temp file must be removed on every exit path, including the
+        // error returns from `exec_as`/`download_file`, not just the happy path.
+        let result = self.stage_download(remote_path, &tmp, run_as).await;
+        let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
+        result
+    }
+
+    async fn stage_download(
+        &self,
+        remote_path: &str,
+        tmp: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<Vec<u8>, GlideshError> {
         // tmp is owned by the login user; root can overwrite its content, and the
         // chmod keeps it readable for the SFTP read that follows.
         let stage = format!(
             "cp -f {} {} && chmod 0644 {}",
             shell_escape(remote_path),
-            shell_escape(&tmp),
-            shell_escape(&tmp)
+            shell_escape(tmp),
+            shell_escape(tmp)
         );
         let out = self.exec_as(&stage, run_as).await?;
         if out.exit_code != 0 {
-            let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
             return Err(GlideshError::Module {
                 module: "file".to_string(),
                 message: format!(
@@ -601,9 +632,7 @@ impl SshSession {
                 ),
             });
         }
-        let data = self.download_file(&tmp).await?;
-        let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
-        Ok(data)
+        self.download_file(tmp).await
     }
 
     pub async fn checksum_remote(

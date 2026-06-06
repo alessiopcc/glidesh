@@ -111,10 +111,18 @@ pub fn classify_failure(run_as: &ResolvedRunAs, out: &CommandOutput) -> Option<G
     }
     let combined = format!("{}\n{}", out.stdout, out.stderr).to_lowercase();
     if DENIAL_MARKERS.iter().any(|m| combined.contains(m)) {
+        // Prefer stderr, but fall back to stdout: under a PTY (e.g. `su`) the
+        // server merges stderr into stdout, so the denial text lives there.
+        let stderr = out.stderr.trim();
+        let message = if stderr.is_empty() {
+            out.stdout.trim().to_string()
+        } else {
+            stderr.to_string()
+        };
         return Some(GlideshError::RunAs {
             user: run_as.user.clone(),
             method: method_name(run_as.method).to_string(),
-            message: out.stderr.trim().to_string(),
+            message,
         });
     }
     None
@@ -182,6 +190,24 @@ mod tests {
             stderr: "sudo: a password is required".to_string(),
         };
         assert!(classify_failure(&r, &out).is_some());
+    }
+
+    #[test]
+    fn classify_uses_stdout_when_stderr_is_empty() {
+        // Under a PTY (su) the denial text is merged into stdout; the surfaced
+        // message must still be populated rather than empty.
+        let r = resolved(RunAsMethod::Su, Some("wrong"));
+        let out = CommandOutput {
+            exit_code: 1,
+            stdout: "su: Authentication failure".to_string(),
+            stderr: String::new(),
+        };
+        match classify_failure(&r, &out) {
+            Some(GlideshError::RunAs { message, .. }) => {
+                assert_eq!(message, "su: Authentication failure");
+            }
+            other => panic!("expected RunAs error, got {:?}", other),
+        }
     }
 
     #[test]
