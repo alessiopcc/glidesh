@@ -82,6 +82,31 @@ plan "deploy" {
 }
 ```
 
+#### Included plans
+
+When a plan pulls in another with [`include`](/advanced/plan-includes/), the included
+plan's **plan-level `run-as` applies to its own steps**. The including plan's steps are
+unaffected, and a step in the included plan can still opt out with `run-as=""`.
+
+```kdl
+// common/db.kdl
+plan "db" run-as="root" {        // governs the steps below, even when included
+    step "Install Postgres" {
+        package "postgresql" state="present"
+    }
+}
+```
+
+```kdl
+// plan.kdl
+plan "deploy" {
+    step "App config" {           // runs as the login user
+        shell "whoami"
+    }
+    include "common/db.kdl"       // its "Install Postgres" step escalates to root
+}
+```
+
 ### CLI
 
 The CLI flags are the lowest-precedence default — a baseline that inventory and plan
