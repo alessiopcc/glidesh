@@ -11,8 +11,7 @@ The `shell` module executes commands on the remote host via SSH.
 shell "echo 'hello world'"
 
 shell "curl -sf http://localhost:8080/health" {
-    success_codes "0"   // retry until curl succeeds
-    retries 5
+    retries 5           // retry until curl exits 0
     delay 3
 }
 ```
@@ -27,12 +26,12 @@ shell "curl -sf http://localhost:8080/health" {
 | `retries` | integer | Number of retry attempts on failure |
 | `delay` | integer | Seconds between retries |
 | `timeout` | integer | Abort the command after this many seconds and treat the attempt as failed (feeds `retries`). Default: no limit |
-| `success_codes` | string / integer / list | Exit codes treated as success (e.g. `"0,2"`). Default: **any exit code is accepted** |
+| `success_codes` | string / integer / list | Exit codes treated as success (e.g. `"0,2"`). Default: only `0` |
 | `login` | boolean | Run the command (and `check` gate) inside a POSIX login shell so `/etc/profile` and `~/.profile` are sourced |
 
 ## Exit codes (`success_codes`)
 
-By **default the shell module accepts any exit code as success** — a non-zero exit does *not* fail the step on its own. Set `success_codes` to restrict which codes count as success; any other code fails the attempt (and triggers `retries` if configured).
+By **default only exit code `0` counts as success** — any non-zero exit fails the attempt (and triggers `retries` if configured). Set `success_codes` to widen the accepted set when a tool uses non-zero codes to mean something other than failure.
 
 ```kdl
 // cloud-init returns 2 when it finished but with recoverable errors ("degraded
@@ -46,7 +45,7 @@ shell "incus exec -T web -- cloud-init status --wait" {
 
 `success_codes` accepts a comma/space-separated string (`"0,2"`), a single integer (`2`), or a list.
 
-> **Note:** because the default accepts any exit code, a plain `retries`/`delay` loop will **not** retry on a non-zero exit unless you also set `success_codes`. To retry until a command truly succeeds, add `success_codes "0"`.
+> Because the default already accepts only `0`, a plain `retries`/`delay` loop retries until the command exits `0` with no extra configuration. Use `success_codes` only when a non-zero exit should *also* count as success.
 
 ## Timeouts (`timeout`)
 
@@ -156,8 +155,7 @@ step "Check connectivity" {
 ```kdl
 step "Wait for app" {
     shell "curl -sf http://localhost:8080/health" {
-        success_codes "0"   // keep retrying until the health check returns 0
-        retries 10
+        retries 10          // keep retrying until the health check exits 0
         delay 5
     }
 }

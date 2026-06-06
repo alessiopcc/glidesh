@@ -77,8 +77,8 @@ pub(crate) fn parse_timeout(params: &ModuleParams) -> Result<Option<u64>, Glides
     }
 }
 
-/// Parse the optional `success_codes` argument. `None` means *any* exit code is
-/// accepted (the default); `Some(set)` restricts success to those codes.
+/// Parse the optional `success_codes` argument. `None` means only exit `0` is
+/// accepted (the default); `Some(set)` accepts exactly those codes.
 /// Accepts a string (`"0,2"`), a single integer (`2`), or a list.
 pub(crate) fn parse_success_codes(
     params: &ModuleParams,
@@ -142,14 +142,15 @@ pub(crate) async fn exec_timed(
 
 fn accepted(exit_code: i32, success_codes: &Option<HashSet<i32>>) -> bool {
     match success_codes {
-        None => true,
+        // Absent success_codes accepts only the conventional success code, 0.
+        None => exit_code == 0,
         Some(codes) => codes.contains(&exit_code),
     }
 }
 
 fn describe_success_codes(success_codes: &Option<HashSet<i32>>) -> String {
     match success_codes {
-        None => "any".to_string(),
+        None => "0".to_string(),
         Some(codes) => {
             let mut sorted: Vec<i32> = codes.iter().copied().collect();
             sorted.sort_unstable();
@@ -245,7 +246,7 @@ impl Module for ShellModule {
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as u64;
         let timeout = parse_timeout(params)?;
-        // Absent `success_codes` means any exit code is accepted (the default).
+        // Absent `success_codes` accepts only exit 0 (the default).
         let success_codes = parse_success_codes(params)?;
 
         let mut last_output: Option<CommandOutput> = None;
@@ -363,12 +364,12 @@ mod tests {
     }
 
     #[test]
-    fn success_codes_absent_means_any() {
+    fn success_codes_absent_means_zero_only() {
         assert_eq!(parse_success_codes(&params_with(&[])).unwrap(), None);
-        // None accepts every exit code.
+        // Absent success_codes accepts only exit 0.
         assert!(accepted(0, &None));
-        assert!(accepted(2, &None));
-        assert!(accepted(137, &None));
+        assert!(!accepted(2, &None));
+        assert!(!accepted(137, &None));
     }
 
     #[test]
@@ -406,7 +407,7 @@ mod tests {
 
     #[test]
     fn describe_success_codes_is_sorted_and_human_readable() {
-        assert_eq!(describe_success_codes(&None), "any");
+        assert_eq!(describe_success_codes(&None), "0");
         let set: HashSet<i32> = [2, 0, 137].into_iter().collect();
         assert_eq!(describe_success_codes(&Some(set)), "0, 2, 137");
     }
