@@ -158,7 +158,7 @@ reverse_proxy 10.0.1.5:8080
 
 ## Structured Variables
 
-Variables can also be lists of named fields, used for [template loops](/advanced/loops-register/#template-loops). Define them in a `vars` block using `-` nodes with named properties:
+Variables can also be lists of named fields, used for [template loops](/advanced/loops-register/#template-loops) and [structured step loops](/advanced/loops-register/#looping-over-structured-variables). Define them in a `vars` block using `-` nodes with named properties:
 
 ```kdl
 plan "setup" {
@@ -176,7 +176,7 @@ plan "setup" {
 }
 ```
 
-Structured variables are available in `${for}` loops inside template files. See [Template Loops](/advanced/loops-register/#template-loops) for usage.
+Structured variables can be consumed two ways: in `${for}` loops inside template files (see [Template Loops](/advanced/loops-register/#template-loops)), and as the source of a step `loop=`, where each row binds `${item.<field>}` (see [Looping over structured variables](/advanced/loops-register/#looping-over-structured-variables)).
 
 ## Interpolation
 

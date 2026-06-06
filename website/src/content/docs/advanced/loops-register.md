@@ -52,6 +52,37 @@ step "Validate each config" loop="${config_files}" {
 }
 ```
 
+### Looping over structured variables
+
+A step loop can also iterate over a [structured variable](/concepts/variables/#structured-variables) — a list of named-field maps defined in your plan's `vars` block. Each iteration binds the row's fields as `${item.<field>}` (instead of a single `${item}` value):
+
+```kdl
+plan "provision-vms" {
+    vars {
+        vms {
+            - name="web" port="2301"
+            - name="db"  port="2302"
+        }
+    }
+
+    step "Create each VM" loop="${vms}" {
+        shell "incus launch images:ubuntu/22.04 ${item.name} --config limits.cpu=2"
+    }
+
+    step "Wait for cloud-init" loop="${vms}" {
+        shell "incus exec ${item.name} -- cloud-init status --wait" {
+            success_codes "0,2"
+            retries 30
+            delay 5
+        }
+    }
+}
+```
+
+Each `${item.<field>}` resolves to the value of that field for the current row. Reference any field defined on the collection's `-` nodes (`${item.name}`, `${item.port}`, …). This is the per-step counterpart to [template loops](#template-loops), which expand the same structured data **inside a file**.
+
+> A loop source that is a plain newline-separated string binds `${item}`; one that names a structured collection binds `${item.<field>}`. If the named variable is neither, the step fails with `Loop variable '<name>' is not defined`.
+
 ## Template Loops
 
 Template loops generate repeated content **inside a template file**. This is different from step loops — instead of repeating an entire step, you repeat lines within a file.
