@@ -105,7 +105,7 @@ pub struct RunArgs {
     pub dry_run: bool,
 
     /// Disable TUI and use plain text output
-    #[arg(long)]
+    #[arg(short = 'T', long)]
     pub no_tui: bool,
 
     /// Skip SSH host key verification

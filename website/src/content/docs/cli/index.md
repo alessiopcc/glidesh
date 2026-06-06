@@ -90,7 +90,7 @@ glidesh run [OPTIONS]
 | `--mode <MODE>` | `-m` | Execution mode: `sync` or `async` | `sync` |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
 | `--dry-run` | — | Check only, no changes applied | `false` |
-| `--no-tui` | — | Disable TUI, use plain text output | `false` |
+| `--no-tui` | `-T` | Disable TUI, use plain text output | `false` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
 
