@@ -1,3 +1,4 @@
+use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::template::{TemplateData, interpolate_args};
@@ -7,12 +8,12 @@ use glidesh::modules::context::ModuleContext;
 use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
+use glidesh::secrets::Secrets;
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 /// One iteration of a step `loop`. A flat item binds `${item}`; a structured
 /// item (a row from a `vars` collection) binds `${item.<field>}` for each field.
@@ -77,11 +78,12 @@ pub struct NodeRunner {
     pub key: PrivateKeyWithHashAlg,
     pub dry_run: bool,
     pub host_key_policy: HostKeyPolicy,
-    pub event_tx: mpsc::UnboundedSender<ExecutorEvent>,
+    pub event_tx: EventSink,
     pub inventory_template_data: Arc<TemplateData>,
     pub plan_base_dir: Arc<PathBuf>,
     pub coordinator: Arc<HostCoordinator>,
     pub all_targets: Arc<Vec<ResolvedHost>>,
+    pub secrets: Arc<Secrets>,
 }
 
 impl NodeRunner {
@@ -162,6 +164,32 @@ impl NodeRunner {
             if !template_data.collections.contains_key(key) {
                 template_data.collections.insert(key.clone(), value.clone());
             }
+        }
+
+        // Decrypt secret tokens once, up front — across flat vars, inventory @-refs, and
+        // structured collections — so check/apply (and --dry-run) see plaintext, and every
+        // plaintext is registered for redaction before any event is emitted.
+        if let Err(e) = self
+            .secrets
+            .decrypt_vars(&mut vars)
+            .and_then(|_| self.secrets.decrypt_template_data(&mut template_data))
+        {
+            let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
+                host: self.host.name.clone(),
+                module: "secret".to_string(),
+                resource: String::new(),
+                error: e.to_string(),
+            });
+            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+                host: self.host.name.clone(),
+                success: false,
+                changed: 0,
+            });
+            let _ = session.close().await;
+            return Ok(NodeResult {
+                success: false,
+                total_changed: 0,
+            });
         }
 
         let steps = self.plan.steps();
@@ -309,6 +337,37 @@ impl NodeRunner {
         });
     }
 
+    /// Decrypt any `secret:v1:…` tokens written inline in interpolated argument values
+    /// (the var-based ones are already decrypted by the up-front sweep).
+    fn decrypt_inline_params(
+        &self,
+        args: HashMap<String, ParamValue>,
+    ) -> Result<HashMap<String, ParamValue>, GlideshError> {
+        let mut out = HashMap::with_capacity(args.len());
+        for (key, value) in args {
+            let value = match value {
+                ParamValue::String(s) => ParamValue::String(self.secrets.decrypt_inline(&s)?),
+                ParamValue::List(list) => {
+                    let mut new_list = Vec::with_capacity(list.len());
+                    for s in list {
+                        new_list.push(self.secrets.decrypt_inline(&s)?);
+                    }
+                    ParamValue::List(new_list)
+                }
+                ParamValue::Map(map) => {
+                    let mut new_map = HashMap::with_capacity(map.len());
+                    for (mk, mv) in map {
+                        new_map.insert(mk, self.secrets.decrypt_inline(&mv)?);
+                    }
+                    ParamValue::Map(new_map)
+                }
+                other => other,
+            };
+            out.insert(key, value);
+        }
+        Ok(out)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_step_tasks(
         &self,
@@ -357,6 +416,13 @@ impl NodeRunner {
                     return Err((step.name.clone(), e.to_string()));
                 }
             };
+            let interpolated_args = match self.decrypt_inline_params(interpolated_args) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.emit_task_error(&task.module, &task.resource, &e.to_string());
+                    return Err((step.name.clone(), e.to_string()));
+                }
+            };
 
             let mut resource_name =
                 match glidesh::config::template::interpolate(&task.resource, vars) {
@@ -374,6 +440,14 @@ impl NodeRunner {
                     _ => {}
                 }
             }
+
+            resource_name = match self.secrets.decrypt_inline(&resource_name) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.emit_task_error(&task.module, &task.resource, &e.to_string());
+                    return Err((step.name.clone(), e.to_string()));
+                }
+            };
 
             let params = ModuleParams {
                 resource_name,
@@ -504,6 +578,13 @@ impl NodeRunner {
                 return Err((step.name.clone(), e.to_string()));
             }
         };
+        let interpolated_args = match self.decrypt_inline_params(interpolated_args) {
+            Ok(a) => a,
+            Err(e) => {
+                self.emit_task_error(&task.module, &task.resource, &e.to_string());
+                return Err((step.name.clone(), e.to_string()));
+            }
+        };
         let mut resource_name = match glidesh::config::template::interpolate(&task.resource, vars) {
             Ok(r) => r,
             Err(e) => {
@@ -519,6 +600,14 @@ impl NodeRunner {
                 _ => {}
             }
         }
+
+        resource_name = match self.secrets.decrypt_inline(&resource_name) {
+            Ok(r) => r,
+            Err(e) => {
+                self.emit_task_error(&task.module, &task.resource, &e.to_string());
+                return Err((step.name.clone(), e.to_string()));
+            }
+        };
 
         let params = ModuleParams {
             resource_name: resource_name.clone(),

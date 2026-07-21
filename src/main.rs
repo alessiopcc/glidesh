@@ -11,6 +11,10 @@ use glidesh::config::template::TemplateData;
 use glidesh::config::types::{ExecutionMode, Inventory, RunAsMethod, RunAsSpec, RunAsUser};
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
+use glidesh::secrets::{
+    self, config as secrets_config, passphrase as secret_passphrase, store as secret_store,
+    token as secret_token,
+};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use logging::RunLogger;
 use std::collections::HashMap;
@@ -55,6 +59,7 @@ async fn main() -> miette::Result<()> {
         Some(Commands::Logs(args)) => cmd_logs(args)?,
         Some(Commands::Validate(args)) => cmd_validate(args)?,
         Some(Commands::Console(args)) => cmd_console(args).await?,
+        Some(Commands::Secret(args)) => cmd_secret(args)?,
         None => cmd_console(cli::ConsoleArgs::default()).await?,
     }
 
@@ -92,6 +97,21 @@ fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, Glidesh
     if args.ask_pass {
         let p = rpassword::prompt_password("run-as password: ")
             .map_err(|e| GlideshError::Other(format!("Failed to read password: {}", e)))?;
+        return Ok(Some(p));
+    }
+    Ok(None)
+}
+
+/// Source the secrets passphrase: `GLIDESH_SECRET_PASS` first, then `--ask-secret-pass`.
+fn source_secret_pass(args: &cli::RunArgs) -> Result<Option<String>, GlideshError> {
+    if let Ok(p) = std::env::var("GLIDESH_SECRET_PASS") {
+        if !p.is_empty() {
+            return Ok(Some(p));
+        }
+    }
+    if args.ask_secret_pass {
+        let p = rpassword::prompt_password("secret passphrase: ")
+            .map_err(|e| GlideshError::Other(format!("Failed to read passphrase: {}", e)))?;
         return Ok(Some(p));
     }
     Ok(None)
@@ -171,6 +191,36 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         .and_then(|p| p.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
+    // Discover and load secrets.kdl: its provider block configures decryption, and its
+    // variable nodes merge in at the inventory-global tier (lowest, overridable).
+    let secrets_path = glidesh::secrets::config::discover_secrets_path(
+        args.secrets.as_deref(),
+        Some(inv_base_dir),
+    );
+    let mut secret_vars: HashMap<String, String> = HashMap::new();
+    let mut secret_structured: HashMap<String, Vec<HashMap<String, String>>> = HashMap::new();
+    let mut secrets_config = None;
+    if let Some(ref sp) = secrets_path {
+        let content = glidesh::secrets::store::read(sp)?;
+        let sf = glidesh::secrets::config::parse_secrets_file(&content)?;
+        secrets_config = sf.config;
+        secret_vars = sf.vars;
+        secret_structured = sf.structured;
+    }
+    glidesh::secrets::set_identity(source_secret_pass(&args)?);
+    let secrets =
+        glidesh::secrets::Secrets::open(secrets_config.as_ref(), glidesh::secrets::identity())?;
+
+    // Secret-file scalars sit under the inventory-global vars (inline global wins).
+    let inventory = inventory.map(|mut inv| {
+        for (k, v) in &secret_vars {
+            inv.global_vars
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        inv
+    });
+
     let inv_template_data = Arc::new(
         inventory
             .as_ref()
@@ -195,6 +245,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
         config::resolve_includes(&mut plan, plan_base_dir)?;
+        merge_secret_structured(&mut plan, &secret_structured);
 
         if args.mode == "async" {
             plan.mode = ExecutionMode::Async;
@@ -202,12 +253,15 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
         let targets = if let Some(ref host) = args.host {
             let user = args.user.as_deref().unwrap_or("root").to_string();
+            // Without an inventory, secret-file scalars are the lowest tier under plan vars.
+            let mut host_vars = secret_vars.clone();
+            host_vars.extend(plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
             vec![config::types::ResolvedHost {
                 name: host.clone(),
                 address: host.clone(),
                 user,
                 port: args.port,
-                vars: plan.vars.clone(),
+                vars: host_vars,
                 jump: None,
                 run_as: cli_run_as.clone(),
             }]
@@ -326,6 +380,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             let mut plan = config::parse_plan(&fp_content)?;
             let include_base = resolved_path.parent().unwrap_or(inv_base_dir);
             config::resolve_includes(&mut plan, include_base)?;
+            merge_secret_structured(&mut plan, &secret_structured);
 
             if args.mode == "async" {
                 plan.mode = ExecutionMode::Async;
@@ -381,11 +436,24 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         group_plans,
         registry,
         key,
+        secrets,
         &run_name,
         &all_host_names,
         &args,
     )
     .await
+}
+
+/// Merge secret-file structured vars into a plan (the plan's own value wins on conflict).
+fn merge_secret_structured(
+    plan: &mut config::types::Plan,
+    secret_structured: &HashMap<String, Vec<HashMap<String, String>>>,
+) {
+    for (k, v) in secret_structured {
+        plan.structured_vars
+            .entry(k.clone())
+            .or_insert_with(|| v.clone());
+    }
 }
 
 fn display_id(host: &str, display_ids: &std::collections::HashMap<String, String>) -> String {
@@ -650,6 +718,271 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     } else {
         Err(GlideshError::Other("Validation failed".to_string()))
     }
+}
+
+fn cmd_secret(args: cli::SecretArgs) -> Result<(), GlideshError> {
+    use cli::SecretCommand::*;
+    match args.command {
+        Init(a) => secret_init(&a.file),
+        Set(a) => secret_set(&a.file, &a.key, a.value),
+        Get(a) | Decrypt(a) => secret_get(&a.file, &a.key),
+        Encrypt(a) => secret_encrypt(&a.file),
+        Rekey(a) => secret_rekey(&a.file),
+        Edit(a) => secret_edit(&a.file),
+    }
+}
+
+fn read_secret_pass(prompt: &str) -> Result<String, GlideshError> {
+    rpassword::prompt_password(prompt).map_err(|e| GlideshError::Secret {
+        message: format!("failed to read passphrase: {e}"),
+    })
+}
+
+/// Unlock passphrase for existing files: `GLIDESH_SECRET_PASS` or an interactive prompt.
+fn unlock_pass() -> Result<String, GlideshError> {
+    if let Ok(p) = std::env::var("GLIDESH_SECRET_PASS") {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    read_secret_pass("secret passphrase: ")
+}
+
+/// A brand-new passphrase: `GLIDESH_SECRET_PASS` (for CI), else prompt with confirmation.
+fn new_pass() -> Result<String, GlideshError> {
+    if let Ok(p) = std::env::var("GLIDESH_SECRET_PASS") {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    let a = read_secret_pass("new passphrase: ")?;
+    let b = read_secret_pass("confirm passphrase: ")?;
+    if a != b {
+        return Err(GlideshError::Secret {
+            message: "passphrases do not match".to_string(),
+        });
+    }
+    Ok(a)
+}
+
+fn not_initialized(file: &std::path::Path) -> GlideshError {
+    GlideshError::Secret {
+        message: format!(
+            "{} has no `secrets` block — run `glidesh secret init`",
+            file.display()
+        ),
+    }
+}
+
+fn secret_init(file: &std::path::Path) -> Result<(), GlideshError> {
+    if file.exists() {
+        return Err(GlideshError::Secret {
+            message: format!("{} already exists", file.display()),
+        });
+    }
+    let pass = new_pass()?;
+    let dek = secret_passphrase::generate_dek();
+    let wrapped = secret_passphrase::PassphraseProvider::new(pass).wrap_dek(&dek)?;
+    secret_store::write(file, &secret_store::init_content(&wrapped))?;
+    println!("Initialized {}", file.display());
+    Ok(())
+}
+
+fn secret_set(
+    file: &std::path::Path,
+    key: &str,
+    value: Option<String>,
+) -> Result<(), GlideshError> {
+    let content = secret_store::read(file)?;
+    let cfg = secrets_config::parse_secrets_file(&content)?
+        .config
+        .ok_or_else(|| not_initialized(file))?;
+    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
+    let plaintext = match value {
+        Some(v) => v,
+        None => read_secret_pass(&format!("value for '{key}': "))?,
+    };
+    let token = secret_token::encrypt_value(&dek, plaintext.as_bytes())?;
+    let updated = secret_store::upsert_scalar(&content, key, &token);
+    secret_store::write(file, &updated)?;
+    println!("Set '{key}' in {}", file.display());
+    Ok(())
+}
+
+fn secret_get(file: &std::path::Path, key: &str) -> Result<(), GlideshError> {
+    let content = secret_store::read(file)?;
+    let parsed = secrets_config::parse_secrets_file(&content)?;
+    let value = parsed.vars.get(key).ok_or_else(|| GlideshError::Secret {
+        message: format!("no secret named '{key}' in {}", file.display()),
+    })?;
+    if !secret_token::is_secret_token(value) {
+        println!("{value}");
+        return Ok(());
+    }
+    let cfg = parsed.config.ok_or_else(|| not_initialized(file))?;
+    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
+    let plaintext = secret_token::decrypt_value(&dek, value)?;
+    println!("{}", plaintext.as_str());
+    Ok(())
+}
+
+fn secret_encrypt(file: &std::path::Path) -> Result<(), GlideshError> {
+    let content = secret_store::read(file)?;
+    let cfg = secrets_config::parse_secrets_file(&content)?
+        .config
+        .ok_or_else(|| not_initialized(file))?;
+    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
+    use std::io::Read;
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| GlideshError::Secret {
+            message: format!("failed to read stdin: {e}"),
+        })?;
+    let plaintext = input.strip_suffix('\n').unwrap_or(&input);
+    let token = secret_token::encrypt_value(&dek, plaintext.as_bytes())?;
+    println!("{token}");
+    Ok(())
+}
+
+fn secret_rekey(file: &std::path::Path) -> Result<(), GlideshError> {
+    let content = secret_store::read(file)?;
+    let cfg = secrets_config::parse_secrets_file(&content)?
+        .config
+        .ok_or_else(|| not_initialized(file))?;
+    let dek = secrets::unwrap_dek(&cfg, &read_secret_pass("current passphrase: ")?)?;
+    let a = read_secret_pass("new passphrase: ")?;
+    let b = read_secret_pass("confirm passphrase: ")?;
+    if a != b {
+        return Err(GlideshError::Secret {
+            message: "passphrases do not match".to_string(),
+        });
+    }
+    let wrapped = secret_passphrase::PassphraseProvider::new(a).wrap_dek(&dek)?;
+    let updated = secret_store::replace_encryptedkey(&content, &wrapped)?;
+    secret_store::write(file, &updated)?;
+    println!("Rekeyed {} (value tokens unchanged)", file.display());
+    Ok(())
+}
+
+/// Removes and best-effort shreds a temp file on every exit path.
+struct TempShredder(PathBuf);
+
+impl Drop for TempShredder {
+    fn drop(&mut self) {
+        if let Ok(meta) = std::fs::metadata(&self.0) {
+            let _ = std::fs::write(&self.0, vec![0u8; meta.len() as usize]);
+        }
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn secret_edit(file: &std::path::Path) -> Result<(), GlideshError> {
+    let content = secret_store::read(file)?;
+    let parsed = secrets_config::parse_secrets_file(&content)?;
+    let cfg = parsed.config.ok_or_else(|| not_initialized(file))?;
+    if !parsed.structured.is_empty() {
+        return Err(GlideshError::Secret {
+            message:
+                "`secret edit` supports scalar values only; use `secret set` for structured secrets"
+                    .to_string(),
+        });
+    }
+    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
+
+    // Decrypt values into an editable view; remember which keys were secret so they are
+    // re-encrypted on save (new keys added in the editor are stored as plaintext — use
+    // `secret set` to encrypt them).
+    let mut secret_keys = std::collections::HashSet::new();
+    let mut keys: Vec<&String> = parsed.vars.keys().collect();
+    keys.sort();
+    let mut editable = String::from(
+        "// glidesh secret edit — values are decrypted here and re-encrypted on save.\n\
+         // The secrets{} provider block is managed separately. Add new secrets with `secret set`.\n\n",
+    );
+    for key in &keys {
+        let value = &parsed.vars[*key];
+        if secret_token::is_secret_token(value) {
+            secret_keys.insert((*key).clone());
+            let plaintext = secret_token::decrypt_value(&dek, value)?;
+            editable.push_str(&format!("{key} {}\n", kdl_quote(plaintext.as_str())));
+        } else {
+            editable.push_str(&format!("{key} {}\n", kdl_quote(value)));
+        }
+    }
+
+    let tmp = file.with_extension("kdl.edit");
+    let _guard = TempShredder(tmp.clone());
+    secret_store::write_private(&tmp, &editable)?;
+    launch_editor(&tmp)?;
+
+    let edited = secret_store::read(&tmp)?;
+    let doc: kdl::KdlDocument =
+        edited
+            .parse()
+            .map_err(|e: kdl::KdlError| GlideshError::Secret {
+                message: format!("edited file is not valid KDL: {e}"),
+            })?;
+
+    let mut out = secret_store::init_content(&cfg.encryptedkey);
+    for node in doc.nodes() {
+        let key = node.name().to_string();
+        let value = node
+            .entries()
+            .iter()
+            .find(|e| e.name().is_none())
+            .and_then(|e| e.value().as_string())
+            .unwrap_or("");
+        let stored = if secret_keys.contains(&key) {
+            secret_token::encrypt_value(&dek, value.as_bytes())?
+        } else {
+            value.to_string()
+        };
+        out.push_str(&format!("{key} {}\n", kdl_quote(&stored)));
+    }
+    secret_store::write(file, &out)?;
+    println!("Updated {}", file.display());
+    Ok(())
+}
+
+fn launch_editor(path: &std::path::Path) -> Result<(), GlideshError> {
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        });
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(path)
+        .status()
+        .map_err(|e| GlideshError::Secret {
+            message: format!("failed to launch editor '{editor}': {e}"),
+        })?;
+    if !status.success() {
+        return Err(GlideshError::Secret {
+            message: "editor exited with an error; secrets unchanged".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Quote and escape a string as a KDL basic string value.
+fn kdl_quote(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r");
+    format!("\"{escaped}\"")
 }
 
 /// Build `TemplateData` from an inventory for `@inventory.*` and `@group.*` template references.
@@ -952,6 +1285,7 @@ async fn run_with_ui(
     group_plans: Vec<executor::GroupPlan>,
     registry: Arc<ModuleRegistry>,
     key: russh_keys::key::PrivateKeyWithHashAlg,
+    secrets: Arc<glidesh::secrets::Secrets>,
     run_name: &str,
     host_names: &[(String, String, String)],
     args: &cli::RunArgs,
@@ -1022,6 +1356,7 @@ async fn run_with_ui(
                 concurrency,
                 dry_run,
                 host_key_policy,
+                secrets,
                 combined_tx,
             )
             .await
@@ -1075,6 +1410,7 @@ async fn run_with_ui(
             concurrency,
             dry_run,
             host_key_policy,
+            secrets,
             event_tx,
         )
         .await?;

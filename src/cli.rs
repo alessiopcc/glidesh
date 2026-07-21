@@ -25,6 +25,69 @@ pub enum Commands {
 
     /// Connection console: TUI when no target/command, otherwise shell or one-shot exec
     Console(ConsoleArgs),
+
+    /// Manage encrypted secrets (create, read, edit)
+    Secret(SecretArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretArgs {
+    #[command(subcommand)]
+    pub command: SecretCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretCommand {
+    /// Initialize a secrets file: generate and wrap a data key
+    Init(SecretFileArgs),
+
+    /// Encrypt a value and store it under a key (prompts for the value if omitted)
+    Set(SecretSetArgs),
+
+    /// Decrypt and print a stored value
+    Get(SecretKeyArgs),
+
+    /// Decrypt and print a stored value (alias for `get`)
+    Decrypt(SecretKeyArgs),
+
+    /// Read plaintext on stdin and print a `secret:v1:…` token for pasting inline
+    Encrypt(SecretFileArgs),
+
+    /// Re-wrap the data key under a new passphrase (value tokens are unchanged)
+    Rekey(SecretFileArgs),
+
+    /// Open the secrets file in $EDITOR with values transiently decrypted
+    Edit(SecretFileArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretFileArgs {
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretSetArgs {
+    /// Variable name to store the secret under
+    pub key: String,
+
+    /// The secret value (omit to be prompted without echo)
+    pub value: Option<String>,
+
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretKeyArgs {
+    /// Variable name to read
+    pub key: String,
+
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
 }
 
 #[derive(Parser, Debug, Default)]
@@ -127,6 +190,14 @@ pub struct RunArgs {
     /// Prompt for the escalation password (otherwise read from GLIDESH_RUNAS_PASS)
     #[arg(long)]
     pub ask_pass: bool,
+
+    /// Path to the secrets file (defaults to secrets.kdl next to the inventory)
+    #[arg(long)]
+    pub secrets: Option<PathBuf>,
+
+    /// Prompt for the secrets passphrase (otherwise read from GLIDESH_SECRET_PASS)
+    #[arg(long)]
+    pub ask_secret_pass: bool,
 }
 
 #[derive(Parser, Debug)]

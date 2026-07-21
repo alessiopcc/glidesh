@@ -36,8 +36,6 @@ group "web" {
 
 ```kdl
 plan "deploy" {
-    target "web"
-
     vars {
         app-image "registry.example.com/myapp:v2"
     }
@@ -177,6 +175,23 @@ plan "setup" {
 ```
 
 Structured variables can be consumed two ways: in `${for}` loops inside template files (see [Template Loops](/advanced/loops-register/#template-loops)), and as the source of a step `loop=`, where each row binds `${item.<field>}` (see [Looping over structured variables](/advanced/loops-register/#looping-over-structured-variables)).
+
+## Secret Variables
+
+Any variable value can be an encrypted `secret:v1:…` token. glidesh decrypts it in memory at run
+time and scrubs the plaintext from all output. Secrets live in a committed `secrets.kdl` and merge
+in at the inventory-global tier. See [Secrets](/concepts/secrets/) for the full workflow.
+
+```kdl
+// secrets.kdl
+db-password "secret:v1:k6Ge72IL-UQ1lGtRm962…"
+```
+
+```kdl
+step "Configure" {
+    shell "app --db-pass ${db-password}"
+}
+```
 
 ## Interpolation
 
