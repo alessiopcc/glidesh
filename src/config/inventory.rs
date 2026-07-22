@@ -323,21 +323,11 @@ fn parse_vars_block(doc: &kdl::KdlDocument) -> Result<HashMap<String, String>, G
             .entries()
             .iter()
             .find(|e| e.name().is_none())
-            .map(|e| kdl_value_to_string(e.value()))
+            .map(|e| super::kdl_value_to_string(e.value()))
             .unwrap_or_default();
         vars.insert(key, value);
     }
     Ok(vars)
-}
-
-fn kdl_value_to_string(value: &kdl::KdlValue) -> String {
-    match value {
-        kdl::KdlValue::String(s) => s.clone(),
-        kdl::KdlValue::Integer(i) => i.to_string(),
-        kdl::KdlValue::Bool(b) => b.to_string(),
-        kdl::KdlValue::Float(f) => f.to_string(),
-        kdl::KdlValue::Null => String::new(),
-    }
 }
 
 #[cfg(test)]

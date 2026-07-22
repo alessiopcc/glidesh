@@ -5,11 +5,11 @@
 //! self-describing and short; the DEK that decrypts them is unwrapped once per run from
 //! the provider metadata in `secrets.kdl` (see [`super::passphrase`]).
 
+use super::random_bytes;
 use crate::error::GlideshError;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
-use rand::RngCore;
 use zeroize::Zeroizing;
 
 /// Prefix marking a value as an encrypted secret token.
@@ -28,11 +28,6 @@ pub fn is_secret_token(s: &str) -> bool {
 /// True if a secret token appears anywhere in the string (inline usage).
 pub fn contains_secret_token(s: &str) -> bool {
     s.contains(SECRET_PREFIX)
-}
-
-/// Fill a byte buffer with cryptographically secure random bytes.
-fn random_bytes(buf: &mut [u8]) {
-    rand::rngs::OsRng.fill_bytes(buf);
 }
 
 /// Encrypt `plaintext` under `dek`, producing a `secret:v1:…` token.

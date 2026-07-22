@@ -66,7 +66,7 @@ pub fn upsert_scalar(content: &str, key: &str, value: &str) -> String {
 
     for line in content.lines() {
         let trimmed = line.trim_start();
-        if depth == 0 && !replaced && line_key(trimmed).as_deref() == Some(key) {
+        if depth == 0 && !replaced && line_key(trimmed) == Some(key) {
             lines.push(format!("{key} \"{value}\""));
             replaced = true;
         } else {
@@ -96,7 +96,7 @@ pub fn replace_encryptedkey(content: &str, new_blob: &str) -> Result<String, Gli
     let mut lines: Vec<String> = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim_start();
-        if !found && line_key(trimmed).as_deref() == Some("encryptedkey") {
+        if !found && line_key(trimmed) == Some("encryptedkey") {
             let indent = &line[..line.len() - trimmed.len()];
             lines.push(format!("{indent}encryptedkey \"{new_blob}\""));
             found = true;
@@ -118,8 +118,8 @@ pub fn replace_encryptedkey(content: &str, new_blob: &str) -> Result<String, Gli
 }
 
 /// The node name a line declares, if it looks like `name …` (not a comment, `-` row,
-/// or block delimiter).
-fn line_key(trimmed: &str) -> Option<String> {
+/// or block delimiter). Borrows from `trimmed` rather than allocating.
+fn line_key(trimmed: &str) -> Option<&str> {
     if trimmed.is_empty()
         || trimmed.starts_with("//")
         || trimmed.starts_with('-')
@@ -128,10 +128,10 @@ fn line_key(trimmed: &str) -> Option<String> {
     {
         return None;
     }
-    let token: String = trimmed
-        .chars()
-        .take_while(|c| !c.is_whitespace() && *c != '=' && *c != '"')
-        .collect();
+    let end = trimmed
+        .find(|c: char| c.is_whitespace() || c == '=' || c == '"')
+        .unwrap_or(trimmed.len());
+    let token = &trimmed[..end];
     if token.is_empty() { None } else { Some(token) }
 }
 

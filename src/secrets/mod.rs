@@ -15,9 +15,16 @@ use crate::config::template::TemplateData;
 use crate::error::GlideshError;
 use config::{Provider, SecretsConfig};
 use passphrase::PassphraseProvider;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use zeroize::Zeroizing;
+
+/// Fill a buffer with cryptographically secure random bytes. Shared by [`token`] and
+/// [`passphrase`] for nonces, salts, and key generation.
+pub(crate) fn random_bytes(buf: &mut [u8]) {
+    rand::rngs::OsRng.fill_bytes(buf);
+}
 
 /// The secrets identity, sourced once at startup: the passphrase (`GLIDESH_SECRET_PASS`
 /// or `--ask-secret-pass`). Global because it applies to the whole run; process memory
@@ -49,6 +56,9 @@ impl SecretRegistry {
         let mut guard = self.plaintexts.write().unwrap();
         if !guard.iter().any(|p| p == plaintext) {
             guard.push(plaintext.to_string());
+            // Keep the list longest-first so `redact` can iterate without re-sorting on
+            // every call: a secret that is a substring of another must be masked after it.
+            guard.sort_by_key(|s| std::cmp::Reverse(s.len()));
         }
     }
 
@@ -57,20 +67,16 @@ impl SecretRegistry {
         self.plaintexts.read().unwrap().is_empty()
     }
 
-    /// Replace every registered plaintext in `text` with `***`.
-    ///
-    /// Secrets are replaced longest-first: if one secret's plaintext is a substring of
-    /// another's, redacting the shorter one first would leave the longer one's remainder
-    /// in the output, leaking a fragment. Longest-first replacement closes that.
+    /// Replace every registered plaintext in `text` with `***`. Registered secrets are
+    /// kept longest-first (see [`Self::register`]) so a secret that is a substring of
+    /// another cannot leak the longer one's remainder.
     pub fn redact(&self, text: &str) -> String {
         let guard = self.plaintexts.read().unwrap();
         if guard.is_empty() {
             return text.to_string();
         }
-        let mut secrets: Vec<&String> = guard.iter().collect();
-        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         let mut out = text.to_string();
-        for secret in secrets {
+        for secret in guard.iter() {
             if out.contains(secret.as_str()) {
                 out = out.replace(secret.as_str(), "***");
             }
@@ -108,7 +114,6 @@ impl Secrets {
         config: Option<&SecretsConfig>,
         identity: Option<&str>,
     ) -> Result<Arc<Secrets>, GlideshError> {
-        let registry = Arc::new(SecretRegistry::default());
         match config {
             None => Ok(Secrets::locked()),
             Some(cfg) => {
@@ -119,7 +124,7 @@ impl Secrets {
                 Ok(Arc::new(Secrets {
                     dek,
                     has_metadata: true,
-                    registry,
+                    registry: Arc::new(SecretRegistry::default()),
                 }))
             }
         }
@@ -138,8 +143,8 @@ impl Secrets {
     }
 
     /// Decrypt any whole-value tokens in a flat var map, in place.
-    pub fn decrypt_vars(&self, vars: &mut HashMap<String, String>) -> Result<(), GlideshError> {
-        for value in vars.values_mut() {
+    fn decrypt_map(&self, map: &mut HashMap<String, String>) -> Result<(), GlideshError> {
+        for value in map.values_mut() {
             if token::is_secret_token(value) {
                 *value = self.decrypt_token(value)?;
             }
@@ -147,20 +152,17 @@ impl Secrets {
         Ok(())
     }
 
+    /// Decrypt any whole-value tokens in a flat var map, in place.
+    pub fn decrypt_vars(&self, vars: &mut HashMap<String, String>) -> Result<(), GlideshError> {
+        self.decrypt_map(vars)
+    }
+
     /// Decrypt tokens hiding in inventory `@`-refs and structured collections, in place.
     pub fn decrypt_template_data(&self, data: &mut TemplateData) -> Result<(), GlideshError> {
-        for value in data.extra_vars.values_mut() {
-            if token::is_secret_token(value) {
-                *value = self.decrypt_token(value)?;
-            }
-        }
+        self.decrypt_map(&mut data.extra_vars)?;
         for rows in data.collections.values_mut() {
             for row in rows.iter_mut() {
-                for value in row.values_mut() {
-                    if token::is_secret_token(value) {
-                        *value = self.decrypt_token(value)?;
-                    }
-                }
+                self.decrypt_map(row)?;
             }
         }
         Ok(())

@@ -2,13 +2,13 @@ use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::template::{TemplateData, interpolate_args};
-use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step};
+use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
 use glidesh::error::GlideshError;
 use glidesh::modules::context::ModuleContext;
 use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
-use glidesh::secrets::Secrets;
+use glidesh::secrets::{Secrets, token};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
@@ -344,35 +344,66 @@ impl NodeRunner {
         });
     }
 
-    /// Decrypt any `secret:v1:…` tokens written inline in interpolated argument values
-    /// (the var-based ones are already decrypted by the up-front sweep).
+    /// Decrypt any `secret:v1:…` tokens written inline in interpolated argument values, in
+    /// place — the var-based ones are already plaintext from the up-front sweep. Only values
+    /// that actually contain a token are rewritten, so a task with no inline secret (the
+    /// common case) pays nothing beyond a substring scan.
     fn decrypt_inline_params(
         &self,
-        args: HashMap<String, ParamValue>,
-    ) -> Result<HashMap<String, ParamValue>, GlideshError> {
-        let mut out = HashMap::with_capacity(args.len());
-        for (key, value) in args {
-            let value = match value {
-                ParamValue::String(s) => ParamValue::String(self.secrets.decrypt_inline(&s)?),
-                ParamValue::List(list) => {
-                    let mut new_list = Vec::with_capacity(list.len());
-                    for s in list {
-                        new_list.push(self.secrets.decrypt_inline(&s)?);
-                    }
-                    ParamValue::List(new_list)
-                }
-                ParamValue::Map(map) => {
-                    let mut new_map = HashMap::with_capacity(map.len());
-                    for (mk, mv) in map {
-                        new_map.insert(mk, self.secrets.decrypt_inline(&mv)?);
-                    }
-                    ParamValue::Map(new_map)
-                }
-                other => other,
-            };
-            out.insert(key, value);
+        args: &mut HashMap<String, ParamValue>,
+    ) -> Result<(), GlideshError> {
+        let decrypt = |s: &mut String| -> Result<(), GlideshError> {
+            if token::contains_secret_token(s) {
+                *s = self.secrets.decrypt_inline(s)?;
+            }
+            Ok(())
+        };
+        for value in args.values_mut() {
+            match value {
+                ParamValue::String(s) => decrypt(s)?,
+                ParamValue::List(list) => list.iter_mut().try_for_each(&decrypt)?,
+                ParamValue::Map(map) => map.values_mut().try_for_each(&decrypt)?,
+                _ => {}
+            }
         }
-        Ok(out)
+        Ok(())
+    }
+
+    /// Interpolate a task's args and resource, decrypt any inline secret tokens, and apply
+    /// the empty-resource `cmd` fallback — the assembly shared by [`Self::run_step_tasks`]
+    /// and [`Self::run_host_task`]. On failure, emits the task-error event and returns the
+    /// `(step name, message)` the task loop propagates.
+    fn build_params(
+        &self,
+        step: &Step,
+        task: &TaskDef,
+        vars: &HashMap<String, String>,
+    ) -> Result<ModuleParams, (String, String)> {
+        let fail = |e: GlideshError| -> (String, String) {
+            self.emit_task_error(&task.module, &task.resource, &e.to_string());
+            (step.name.clone(), e.to_string())
+        };
+
+        let mut args = interpolate_args(&task.args, vars).map_err(fail)?;
+        self.decrypt_inline_params(&mut args).map_err(fail)?;
+
+        let mut resource_name =
+            glidesh::config::template::interpolate(&task.resource, vars).map_err(fail)?;
+        if resource_name.is_empty() {
+            match args.get("cmd") {
+                Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
+                Some(ParamValue::String(s)) => resource_name = s.clone(),
+                _ => {}
+            }
+        }
+        if token::contains_secret_token(&resource_name) {
+            resource_name = self.secrets.decrypt_inline(&resource_name).map_err(fail)?;
+        }
+
+        Ok(ModuleParams {
+            resource_name,
+            args,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -416,50 +447,7 @@ impl NodeRunner {
                 }
             };
 
-            let interpolated_args = match interpolate_args(&task.args, vars) {
-                Ok(a) => a,
-                Err(e) => {
-                    self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                    return Err((step.name.clone(), e.to_string()));
-                }
-            };
-            let interpolated_args = match self.decrypt_inline_params(interpolated_args) {
-                Ok(a) => a,
-                Err(e) => {
-                    self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                    return Err((step.name.clone(), e.to_string()));
-                }
-            };
-
-            let mut resource_name =
-                match glidesh::config::template::interpolate(&task.resource, vars) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                        return Err((step.name.clone(), e.to_string()));
-                    }
-                };
-
-            if resource_name.is_empty() {
-                match interpolated_args.get("cmd") {
-                    Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
-                    Some(ParamValue::String(s)) => resource_name = s.clone(),
-                    _ => {}
-                }
-            }
-
-            resource_name = match self.secrets.decrypt_inline(&resource_name) {
-                Ok(r) => r,
-                Err(e) => {
-                    self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                    return Err((step.name.clone(), e.to_string()));
-                }
-            };
-
-            let params = ModuleParams {
-                resource_name,
-                args: interpolated_args,
-            };
+            let params = self.build_params(step, task, vars)?;
 
             // Escalation precedence: module > step > plan > host (host already
             // carries group/global/CLI defaults merged during target resolution).
@@ -574,52 +562,12 @@ impl NodeRunner {
         step_idx: usize,
         task_idx: usize,
         loop_iter: usize,
-        task: &glidesh::config::types::TaskDef,
+        task: &TaskDef,
         vars: &mut HashMap<String, String>,
         total_changed: &mut usize,
     ) -> Result<bool, (String, String)> {
-        let interpolated_args = match interpolate_args(&task.args, vars) {
-            Ok(a) => a,
-            Err(e) => {
-                self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                return Err((step.name.clone(), e.to_string()));
-            }
-        };
-        let interpolated_args = match self.decrypt_inline_params(interpolated_args) {
-            Ok(a) => a,
-            Err(e) => {
-                self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                return Err((step.name.clone(), e.to_string()));
-            }
-        };
-        let mut resource_name = match glidesh::config::template::interpolate(&task.resource, vars) {
-            Ok(r) => r,
-            Err(e) => {
-                self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                return Err((step.name.clone(), e.to_string()));
-            }
-        };
-
-        if resource_name.is_empty() {
-            match interpolated_args.get("cmd") {
-                Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
-                Some(ParamValue::String(s)) => resource_name = s.clone(),
-                _ => {}
-            }
-        }
-
-        resource_name = match self.secrets.decrypt_inline(&resource_name) {
-            Ok(r) => r,
-            Err(e) => {
-                self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                return Err((step.name.clone(), e.to_string()));
-            }
-        };
-
-        let params = ModuleParams {
-            resource_name: resource_name.clone(),
-            args: interpolated_args,
-        };
+        let params = self.build_params(step, task, vars)?;
+        let resource_name = params.resource_name.clone();
 
         let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
             host: self.host.name.clone(),

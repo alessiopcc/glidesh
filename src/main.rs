@@ -104,10 +104,8 @@ fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, Glidesh
 
 /// Source the secrets passphrase: `GLIDESH_SECRET_PASS` first, then `--ask-secret-pass`.
 fn source_secret_pass(args: &cli::RunArgs) -> Result<Option<String>, GlideshError> {
-    if let Ok(p) = std::env::var("GLIDESH_SECRET_PASS") {
-        if !p.is_empty() {
-            return Ok(Some(p));
-        }
+    if let Some(p) = secret_pass_from_env() {
+        return Ok(Some(p));
     }
     if args.ask_secret_pass {
         let p = rpassword::prompt_password("secret passphrase: ")
@@ -193,10 +191,9 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
     // Discover and load secrets.kdl: its provider block configures decryption, and its
     // variable nodes merge in at the inventory-global tier (lowest, overridable).
-    let secrets_path = glidesh::secrets::config::discover_secrets_path(
-        args.secrets.as_deref(),
-        Some(inv_base_dir),
-    );
+    let secrets_arg = args.secrets.as_ref().map(|p| expand_tilde(p));
+    let secrets_path =
+        glidesh::secrets::config::discover_secrets_path(secrets_arg.as_deref(), Some(inv_base_dir));
     let mut secret_vars: HashMap<String, String> = HashMap::new();
     let mut secret_structured: HashMap<String, Vec<HashMap<String, String>>> = HashMap::new();
     let mut secrets_config = None;
@@ -738,23 +735,23 @@ fn read_secret_pass(prompt: &str) -> Result<String, GlideshError> {
     })
 }
 
-/// Unlock passphrase for existing files: `GLIDESH_SECRET_PASS` or an interactive prompt.
-fn unlock_pass() -> Result<String, GlideshError> {
-    if let Ok(p) = std::env::var("GLIDESH_SECRET_PASS") {
-        if !p.is_empty() {
-            return Ok(p);
-        }
-    }
-    read_secret_pass("secret passphrase: ")
+/// The non-empty `GLIDESH_SECRET_PASS` value, if set.
+fn secret_pass_from_env() -> Option<String> {
+    std::env::var("GLIDESH_SECRET_PASS")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
-/// A brand-new passphrase: `GLIDESH_SECRET_PASS` (for CI), else prompt with confirmation.
-fn new_pass() -> Result<String, GlideshError> {
-    if let Ok(p) = std::env::var("GLIDESH_SECRET_PASS") {
-        if !p.is_empty() {
-            return Ok(p);
-        }
+/// Unlock passphrase for existing files: `GLIDESH_SECRET_PASS` or an interactive prompt.
+fn unlock_pass() -> Result<String, GlideshError> {
+    match secret_pass_from_env() {
+        Some(p) => Ok(p),
+        None => read_secret_pass("secret passphrase: "),
     }
+}
+
+/// Prompt for a new passphrase twice and require the two entries to match.
+fn prompt_new_passphrase_confirmed() -> Result<String, GlideshError> {
     let a = read_secret_pass("new passphrase: ")?;
     let b = read_secret_pass("confirm passphrase: ")?;
     if a != b {
@@ -765,6 +762,14 @@ fn new_pass() -> Result<String, GlideshError> {
     Ok(a)
 }
 
+/// A brand-new passphrase: `GLIDESH_SECRET_PASS` (for CI), else prompt with confirmation.
+fn new_pass() -> Result<String, GlideshError> {
+    match secret_pass_from_env() {
+        Some(p) => Ok(p),
+        None => prompt_new_passphrase_confirmed(),
+    }
+}
+
 fn not_initialized(file: &std::path::Path) -> GlideshError {
     GlideshError::Secret {
         message: format!(
@@ -772,6 +777,17 @@ fn not_initialized(file: &std::path::Path) -> GlideshError {
             file.display()
         ),
     }
+}
+
+/// Read a secrets file and return its raw content plus the required provider block.
+fn load_config(
+    file: &std::path::Path,
+) -> Result<(String, secrets_config::SecretsConfig), GlideshError> {
+    let content = secret_store::read(file)?;
+    let cfg = secrets_config::parse_secrets_file(&content)?
+        .config
+        .ok_or_else(|| not_initialized(file))?;
+    Ok((content, cfg))
 }
 
 fn secret_init(file: &std::path::Path) -> Result<(), GlideshError> {
@@ -793,10 +809,7 @@ fn secret_set(
     key: &str,
     value: Option<String>,
 ) -> Result<(), GlideshError> {
-    let content = secret_store::read(file)?;
-    let cfg = secrets_config::parse_secrets_file(&content)?
-        .config
-        .ok_or_else(|| not_initialized(file))?;
+    let (content, cfg) = load_config(file)?;
     let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
     let plaintext = match value {
         Some(v) => v,
@@ -827,10 +840,7 @@ fn secret_get(file: &std::path::Path, key: &str) -> Result<(), GlideshError> {
 }
 
 fn secret_encrypt(file: &std::path::Path) -> Result<(), GlideshError> {
-    let content = secret_store::read(file)?;
-    let cfg = secrets_config::parse_secrets_file(&content)?
-        .config
-        .ok_or_else(|| not_initialized(file))?;
+    let (_content, cfg) = load_config(file)?;
     let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
     use std::io::Read;
     let mut input = String::new();
@@ -846,19 +856,10 @@ fn secret_encrypt(file: &std::path::Path) -> Result<(), GlideshError> {
 }
 
 fn secret_rekey(file: &std::path::Path) -> Result<(), GlideshError> {
-    let content = secret_store::read(file)?;
-    let cfg = secrets_config::parse_secrets_file(&content)?
-        .config
-        .ok_or_else(|| not_initialized(file))?;
+    let (content, cfg) = load_config(file)?;
     let dek = secrets::unwrap_dek(&cfg, &read_secret_pass("current passphrase: ")?)?;
-    let a = read_secret_pass("new passphrase: ")?;
-    let b = read_secret_pass("confirm passphrase: ")?;
-    if a != b {
-        return Err(GlideshError::Secret {
-            message: "passphrases do not match".to_string(),
-        });
-    }
-    let wrapped = secret_passphrase::PassphraseProvider::new(a).wrap_dek(&dek)?;
+    let new = prompt_new_passphrase_confirmed()?;
+    let wrapped = secret_passphrase::PassphraseProvider::new(new).wrap_dek(&dek)?;
     let updated = secret_store::replace_encryptedkey(&content, &wrapped)?;
     secret_store::write(file, &updated)?;
     println!("Rekeyed {} (value tokens unchanged)", file.display());

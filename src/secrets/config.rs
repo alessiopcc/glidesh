@@ -72,20 +72,17 @@ pub fn parse_secrets_file(input: &str) -> Result<SecretsFile, GlideshError> {
                 message: e.to_string(),
             }
         })?;
-        if let Some(rows) = parse_structured(node) {
-            if file.vars.contains_key(&name) || file.structured.contains_key(&name) {
-                return Err(dup(&name));
-            }
+        if file.vars.contains_key(&name) || file.structured.contains_key(&name) {
+            return Err(dup(&name));
+        }
+        if let Some(rows) = crate::config::parse_structured_var(node) {
             file.structured.insert(name, rows);
         } else {
-            if file.vars.contains_key(&name) || file.structured.contains_key(&name) {
-                return Err(dup(&name));
-            }
             let value = node
                 .entries()
                 .iter()
                 .find(|e| e.name().is_none())
-                .map(|e| kdl_value_to_string(e.value()))
+                .map(|e| crate::config::kdl_value_to_string(e.value()))
                 .unwrap_or_default();
             file.vars.insert(name, value);
         }
@@ -131,45 +128,6 @@ fn parse_secrets_block(node: &kdl::KdlNode) -> Result<SecretsConfig, GlideshErro
             message: "`secrets` block is missing `encryptedkey`".to_string(),
         })?,
     })
-}
-
-/// A list-of-maps structured var (`name { - k="v" … }`), else `None`.
-fn parse_structured(node: &kdl::KdlNode) -> Option<Vec<HashMap<String, String>>> {
-    let children = node.children()?;
-    let nodes = children.nodes();
-    if nodes.is_empty() || !nodes.iter().all(|n| n.name().to_string() == "-") {
-        return None;
-    }
-    if !nodes
-        .iter()
-        .any(|n| n.entries().iter().any(|e| e.name().is_some()))
-    {
-        return None;
-    }
-    Some(
-        nodes
-            .iter()
-            .map(|n| {
-                n.entries()
-                    .iter()
-                    .filter_map(|e| {
-                        e.name()
-                            .map(|name| (name.to_string(), kdl_value_to_string(e.value())))
-                    })
-                    .collect()
-            })
-            .collect(),
-    )
-}
-
-fn kdl_value_to_string(value: &kdl::KdlValue) -> String {
-    match value {
-        kdl::KdlValue::String(s) => s.clone(),
-        kdl::KdlValue::Integer(i) => i.to_string(),
-        kdl::KdlValue::Bool(b) => b.to_string(),
-        kdl::KdlValue::Float(f) => f.to_string(),
-        kdl::KdlValue::Null => String::new(),
-    }
 }
 
 fn dup(name: &str) -> GlideshError {

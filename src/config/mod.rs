@@ -8,6 +8,49 @@ pub use plan::{parse_plan, resolve_includes};
 
 use crate::config::types::{RunAsMethod, RunAsSpec, RunAsUser};
 use crate::error::GlideshError;
+use std::collections::HashMap;
+
+/// Stringify a KDL scalar value for use as a variable value.
+pub(crate) fn kdl_value_to_string(value: &kdl::KdlValue) -> String {
+    match value {
+        kdl::KdlValue::String(s) => s.clone(),
+        kdl::KdlValue::Integer(i) => i.to_string(),
+        kdl::KdlValue::Bool(b) => b.to_string(),
+        kdl::KdlValue::Float(f) => f.to_string(),
+        kdl::KdlValue::Null => String::new(),
+    }
+}
+
+/// Detect a structured (list-of-maps) variable node: children that are all `-` rows with
+/// at least one named property. Returns `Some(rows)` for a structured var, `None` for a
+/// scalar or plain list. Shared by inventory, plan, and secrets-file parsing.
+pub(crate) fn parse_structured_var(node: &kdl::KdlNode) -> Option<Vec<HashMap<String, String>>> {
+    let children = node.children()?;
+    let nodes = children.nodes();
+    if nodes.is_empty() || !nodes.iter().all(|n| n.name().to_string() == "-") {
+        return None;
+    }
+    if !nodes
+        .iter()
+        .any(|n| n.entries().iter().any(|e| e.name().is_some()))
+    {
+        return None;
+    }
+    Some(
+        nodes
+            .iter()
+            .map(|n| {
+                n.entries()
+                    .iter()
+                    .filter_map(|e| {
+                        e.name()
+                            .map(|name| (name.to_string(), kdl_value_to_string(e.value())))
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
 
 /// Reject user-declared variable names that collide with a reserved namespace. Names
 /// beginning with `@` are the system-injected namespaces (`@host`, `@item`, `@inventory`,

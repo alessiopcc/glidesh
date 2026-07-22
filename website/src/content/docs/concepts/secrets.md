@@ -55,11 +55,16 @@ The `secrets.kdl` next to your inventory is discovered automatically. Its variab
 inventory-global tier (the lowest precedence — group, host, and plan vars override them). Override
 the location with `--secrets <path>` or `$GLIDESH_SECRETS`.
 
-You can also paste a token inline, without going through a variable:
+You can also paste a token inline, without going through a variable — in inventory/plan
+values and module arguments:
 
 ```kdl
 shell "deploy --token secret:v1:-fSttta2omFd…"
 ```
+
+> Inside **template file bodies** (`template=#true`), reference secrets through a variable
+> (`${db-password}`) rather than pasting a raw `secret:v1:…` token — variables are decrypted
+> before the template renders, whereas a literal token in file content is uploaded as-is.
 
 ## Unlocking at run time
 

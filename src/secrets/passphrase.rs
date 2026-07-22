@@ -12,7 +12,6 @@ use crate::error::GlideshError;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce};
-use rand::RngCore;
 use zeroize::Zeroizing;
 
 const WRAP_PREFIX: &str = "v1:";
@@ -58,11 +57,11 @@ impl PassphraseProvider {
     pub fn wrap_dek(&self, dek: &[u8; DEK_LEN]) -> Result<String, GlideshError> {
         let log_n = SCRYPT_LOG_N;
         let mut salt = [0u8; SALT_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
+        super::random_bytes(&mut salt);
         let kek = derive_kek(&self.passphrase, &salt, log_n)?;
 
         let mut nonce = [0u8; NONCE_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        super::random_bytes(&mut nonce);
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&kek[..]));
         let sealed = cipher
             .encrypt(XNonce::from_slice(&nonce), dek.as_slice())
@@ -114,7 +113,7 @@ impl PassphraseProvider {
 /// Generate a random 256-bit DEK.
 pub fn generate_dek() -> Zeroizing<[u8; DEK_LEN]> {
     let mut dek = Zeroizing::new([0u8; DEK_LEN]);
-    rand::rngs::OsRng.fill_bytes(&mut dek[..]);
+    super::random_bytes(&mut dek[..]);
     dek
 }
 
