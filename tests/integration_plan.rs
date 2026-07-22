@@ -55,7 +55,7 @@ async fn test_register_then_loop() {
         vars.insert("items".to_string(), result.output.trim().to_string());
     }
 
-    // Simulate loop: split by newlines, filter empty, run shell "echo ${item}" per item
+    // Simulate loop: split by newlines, filter empty, run shell "echo ${@item}" per item
     let items: Vec<String> = vars
         .get("items")
         .unwrap()
@@ -68,8 +68,8 @@ async fn test_register_then_loop() {
 
     let mut outputs = Vec::new();
     for item in &items {
-        vars.insert("item".to_string(), item.clone());
-        let cmd = interpolate("echo ${item}", &vars).unwrap();
+        vars.insert("@item".to_string(), item.clone());
+        let cmd = interpolate("echo ${@item}", &vars).unwrap();
         let ctx = container.module_context(&ssh, &os_info, &vars, false);
         let params = ModuleParams {
             resource_name: cmd,
@@ -178,7 +178,7 @@ plan "full" {
     }
 
     step "Format each disk" loop="${disks}" {
-        disk "${item}" fs="${fs-type}"
+        disk "${@item}" fs="${fs-type}"
     }
 
     include "monitoring.kdl"

@@ -51,27 +51,21 @@ fn resolve_loop_items(
     }
 }
 
-/// Bind a loop item's variables into `vars`, returning the keys that were
-/// inserted so the caller can remove them after the iteration.
-///
-/// The canonical binding is `@item` / `@item.<field>`; the bare `item` / `item.<field>`
-/// names are inserted alongside as deprecated aliases for backward compatibility.
+/// Bind a loop item's variables into `vars` under the reserved `@item` namespace,
+/// returning the keys that were inserted so the caller can remove them after the iteration.
+/// A flat item binds `@item`; a structured row binds `@item.<field>` for each field.
 fn inject_loop_item(vars: &mut HashMap<String, String>, item: &LoopItem) -> Vec<String> {
     match item {
         LoopItem::Flat(value) => {
             vars.insert("@item".to_string(), value.clone());
-            vars.insert("item".to_string(), value.clone()); // deprecated alias
-            vec!["@item".to_string(), "item".to_string()]
+            vec!["@item".to_string()]
         }
         LoopItem::Structured(row) => {
-            let mut keys = Vec::with_capacity(row.len() * 2);
+            let mut keys = Vec::with_capacity(row.len());
             for (field, value) in row {
-                let canonical = format!("@item.{field}");
-                vars.insert(canonical.clone(), value.clone());
-                keys.push(canonical);
-                let alias = format!("item.{field}"); // deprecated alias
-                vars.insert(alias.clone(), value.clone());
-                keys.push(alias);
+                let key = format!("@item.{field}");
+                vars.insert(key.clone(), value.clone());
+                keys.push(key);
             }
             keys
         }
@@ -158,8 +152,7 @@ impl NodeRunner {
         vars.extend(self.plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
         // Inject built-in host vars under the reserved `@host.*` namespace (cannot be
-        // overridden — user var names may not start with `@`). The bare `host.*` names are
-        // kept as deprecated aliases for backward compatibility.
+        // overridden — user var names may not start with `@`).
         let builtins = [
             ("name", self.host.name.clone()),
             ("address", self.host.address.clone()),
@@ -167,8 +160,7 @@ impl NodeRunner {
             ("port", self.host.port.to_string()),
         ];
         for (suffix, value) in builtins {
-            vars.insert(format!("@host.{suffix}"), value.clone());
-            vars.insert(format!("host.{suffix}"), value); // deprecated alias
+            vars.insert(format!("@host.{suffix}"), value);
         }
 
         // Build template data: inventory @-refs + plan structured vars.
@@ -729,10 +721,8 @@ mod tests {
         let mut vars = HashMap::new();
         let injected = inject_loop_item(&mut vars, &LoopItem::Structured(row));
 
-        // Canonical @-namespaced bindings, plus deprecated bare aliases.
         assert_eq!(vars.get("@item.name").map(String::as_str), Some("vm-a"));
         assert_eq!(vars.get("@item.port").map(String::as_str), Some("2301"));
-        assert_eq!(vars.get("item.name").map(String::as_str), Some("vm-a"));
 
         for key in &injected {
             vars.remove(key);
@@ -753,12 +743,11 @@ mod tests {
     }
 
     #[test]
-    fn flat_item_binds_canonical_and_alias() {
+    fn flat_item_binds_canonical() {
         let mut vars = HashMap::new();
         let injected = inject_loop_item(&mut vars, &LoopItem::Flat("sda".to_string()));
         assert_eq!(vars.get("@item").map(String::as_str), Some("sda"));
-        assert_eq!(vars.get("item").map(String::as_str), Some("sda")); // deprecated alias
-        assert_eq!(injected, vec!["@item".to_string(), "item".to_string()]);
+        assert_eq!(injected, vec!["@item".to_string()]);
     }
 
     #[test]

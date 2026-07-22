@@ -735,7 +735,7 @@ plan "test" {
         let input = r#"
 plan "test" {
     step "Format each" loop="${disks}" {
-        disk "${item}" fs="ext4"
+        disk "${@item}" fs="ext4"
     }
 }
 "#;
@@ -885,7 +885,7 @@ plan "parent" {
         let input = r#"
 plan "test" {
     step "Iterate" loop="alpha" {
-        shell "echo ${item}"
+        shell "echo ${@item}"
     }
 }
 "#;
@@ -904,7 +904,7 @@ plan "test" {
         shell "ls /dev" register="devices"
     }
     step "Process" loop="${devices}" {
-        shell "echo ${item}"
+        shell "echo ${@item}"
     }
 }
 "#;

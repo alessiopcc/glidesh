@@ -81,7 +81,7 @@ plan "provision-vms" {
 
 Each `${@item.<field>}` resolves to the value of that field for the current row. Reference any field defined on the collection's `-` nodes (`${@item.name}`, `${@item.port}`, …). This is the per-step counterpart to [template loops](#template-loops), which expand the same structured data **inside a file**.
 
-> A loop source that is a plain newline-separated string binds `${@item}`; one that names a structured collection binds `${@item.<field>}`. If the named variable is neither, the step fails with `Loop variable '<name>' is not defined`. The bare `${item}` / `${item.<field>}` forms remain as deprecated aliases.
+> A loop source that is a plain newline-separated string binds `${@item}`; one that names a structured collection binds `${@item.<field>}`. If the named variable is neither, the step fails with `Loop variable '<name>' is not defined`.
 
 ## Template Loops
 

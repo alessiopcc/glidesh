@@ -97,8 +97,6 @@ These variables are automatically available in all interpolations — no need to
 | `${@host.user}` | SSH user for this host |
 | `${@host.port}` | SSH port for this host |
 
-> The bare `${host.name}` / `${host.address}` / `${host.user}` / `${host.port}` forms still resolve as **deprecated aliases**; prefer the `@host.*` names.
-
 ### Example
 
 ```kdl
