@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// One iteration of a step `loop`. A flat item binds `${item}`; a structured
-/// item (a row from a `vars` collection) binds `${item.<field>}` for each field.
+/// One iteration of a step `loop`. A flat item binds `${@item}`; a structured
+/// item (a row from a `vars` collection) binds `${@item.<field>}` for each field.
 #[derive(Debug)]
 enum LoopItem {
     Flat(String),
@@ -24,8 +24,8 @@ enum LoopItem {
 }
 
 /// Resolve a step's `loop` source into the items to iterate over. A `${name}`
-/// referencing a `vars` collection yields structured rows (`${item.field}`);
-/// one referencing a flat var yields its newline-split values (`${item}`); a
+/// referencing a `vars` collection yields structured rows (`${@item.field}`);
+/// one referencing a flat var yields its newline-split values (`${@item}`); a
 /// literal yields its lines.
 fn resolve_loop_items(
     loop_source: &LoopSource,
@@ -53,18 +53,25 @@ fn resolve_loop_items(
 
 /// Bind a loop item's variables into `vars`, returning the keys that were
 /// inserted so the caller can remove them after the iteration.
+///
+/// The canonical binding is `@item` / `@item.<field>`; the bare `item` / `item.<field>`
+/// names are inserted alongside as deprecated aliases for backward compatibility.
 fn inject_loop_item(vars: &mut HashMap<String, String>, item: &LoopItem) -> Vec<String> {
     match item {
         LoopItem::Flat(value) => {
-            vars.insert("item".to_string(), value.clone());
-            vec!["item".to_string()]
+            vars.insert("@item".to_string(), value.clone());
+            vars.insert("item".to_string(), value.clone()); // deprecated alias
+            vec!["@item".to_string(), "item".to_string()]
         }
         LoopItem::Structured(row) => {
-            let mut keys = Vec::with_capacity(row.len());
+            let mut keys = Vec::with_capacity(row.len() * 2);
             for (field, value) in row {
-                let key = format!("item.{field}");
-                vars.insert(key.clone(), value.clone());
-                keys.push(key);
+                let canonical = format!("@item.{field}");
+                vars.insert(canonical.clone(), value.clone());
+                keys.push(canonical);
+                let alias = format!("item.{field}"); // deprecated alias
+                vars.insert(alias.clone(), value.clone());
+                keys.push(alias);
             }
             keys
         }
@@ -150,11 +157,19 @@ impl NodeRunner {
         let mut vars = self.host.vars.clone();
         vars.extend(self.plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-        // Inject built-in host vars (cannot be overridden by user vars)
-        vars.insert("host.name".to_string(), self.host.name.clone());
-        vars.insert("host.address".to_string(), self.host.address.clone());
-        vars.insert("host.user".to_string(), self.host.user.clone());
-        vars.insert("host.port".to_string(), self.host.port.to_string());
+        // Inject built-in host vars under the reserved `@host.*` namespace (cannot be
+        // overridden — user var names may not start with `@`). The bare `host.*` names are
+        // kept as deprecated aliases for backward compatibility.
+        let builtins = [
+            ("name", self.host.name.clone()),
+            ("address", self.host.address.clone()),
+            ("user", self.host.user.clone()),
+            ("port", self.host.port.to_string()),
+        ];
+        for (suffix, value) in builtins {
+            vars.insert(format!("@host.{suffix}"), value.clone());
+            vars.insert(format!("host.{suffix}"), value); // deprecated alias
+        }
 
         // Build template data: inventory @-refs + plan structured vars.
         // Preserve inventory-provided collections so plan structured vars
@@ -714,8 +729,10 @@ mod tests {
         let mut vars = HashMap::new();
         let injected = inject_loop_item(&mut vars, &LoopItem::Structured(row));
 
+        // Canonical @-namespaced bindings, plus deprecated bare aliases.
+        assert_eq!(vars.get("@item.name").map(String::as_str), Some("vm-a"));
+        assert_eq!(vars.get("@item.port").map(String::as_str), Some("2301"));
         assert_eq!(vars.get("item.name").map(String::as_str), Some("vm-a"));
-        assert_eq!(vars.get("item.port").map(String::as_str), Some("2301"));
 
         for key in &injected {
             vars.remove(key);
@@ -736,11 +753,12 @@ mod tests {
     }
 
     #[test]
-    fn flat_item_binds_bare_item() {
+    fn flat_item_binds_canonical_and_alias() {
         let mut vars = HashMap::new();
         let injected = inject_loop_item(&mut vars, &LoopItem::Flat("sda".to_string()));
-        assert_eq!(vars.get("item").map(String::as_str), Some("sda"));
-        assert_eq!(injected, vec!["item".to_string()]);
+        assert_eq!(vars.get("@item").map(String::as_str), Some("sda"));
+        assert_eq!(vars.get("item").map(String::as_str), Some("sda")); // deprecated alias
+        assert_eq!(injected, vec!["@item".to_string(), "item".to_string()]);
     }
 
     #[test]

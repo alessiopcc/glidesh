@@ -59,7 +59,7 @@ After the handshake, glidesh sends `check` or `apply` requests:
         "init_system": "systemd",
         "container_runtime": "docker" // may be null if no runtime detected
     },
-    "vars": {"host.name": "web-1", "host.address": "10.0.0.1"},
+    "vars": {"@host.name": "web-1", "@host.address": "10.0.0.1"},
     "dry_run": false
 }
 ```

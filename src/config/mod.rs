@@ -9,6 +9,24 @@ pub use plan::{parse_plan, resolve_includes};
 use crate::config::types::{RunAsMethod, RunAsSpec, RunAsUser};
 use crate::error::GlideshError;
 
+/// Reject user-declared variable names that collide with a reserved namespace. Names
+/// beginning with `@` are the system-injected namespaces (`@host`, `@item`, `@inventory`,
+/// `@group`); the `@` prefix — illegal at the start of a KDL bare identifier — makes this
+/// protection structural rather than dependent on injection order. Applies at every site a
+/// user names a variable: inventory/group/host `vars`, plan `vars`, `vars-file`, the
+/// secrets file, and `register=`.
+pub(crate) fn validate_user_var_name(name: &str) -> Result<(), GlideshError> {
+    if name.starts_with('@') {
+        return Err(GlideshError::ConfigParse {
+            message: format!(
+                "variable name '{name}' is reserved: names beginning with '@' belong to \
+                 built-in namespaces (@host, @item, @inventory, @group)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Read `run-as` / `run-as-method` attributes from a node (host, group, step, or task).
 /// Absent `run-as` => inherit; `run-as=""` (or null) => explicitly no escalation.
 pub(crate) fn parse_run_as_attrs(node: &kdl::KdlNode) -> Result<RunAsSpec, GlideshError> {

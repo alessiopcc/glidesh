@@ -4,9 +4,9 @@ plan "disk-management" {
     }
 
     step "Format and mount each disk" loop="${available_disks}" {
-        disk "/dev/${item}" {
+        disk "/dev/${@item}" {
             fs "ext4"
-            mount "/mnt/${item}"
+            mount "/mnt/${@item}"
             opts "defaults,noatime"
         }
     }

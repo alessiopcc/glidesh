@@ -9,7 +9,7 @@ pub static EMPTY_TEMPLATE_DATA: std::sync::LazyLock<TemplateData> =
 #[derive(Debug, Clone, Default)]
 pub struct TemplateData {
     /// Named collections for `${for item in collection}` loops.
-    /// Each collection is a list of maps with string fields accessible via `${item.field}`.
+    /// Each collection is a list of maps with string fields accessible via `${binding.field}`.
     pub collections: HashMap<String, Vec<HashMap<String, String>>>,
     /// Extra flat vars (e.g., `@inventory.host.address`) injected alongside user vars.
     pub extra_vars: HashMap<String, String>,

@@ -84,7 +84,7 @@ When the same variable is defined at multiple levels, the most specific value wi
 Inventory global vars → Group vars → Host vars → Plan vars
 ```
 
-Built-in host variables are injected last and cannot be overridden.
+Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@item`, `@inventory`, `@group`) that user variables cannot collide with — a variable name may not begin with `@`.
 
 ## Built-in Host Variables
 
@@ -92,20 +92,22 @@ These variables are automatically available in all interpolations — no need to
 
 | Variable | Description |
 |---|---|
-| `${host.name}` | Host name from inventory |
-| `${host.address}` | Host address (IP or hostname) |
-| `${host.user}` | SSH user for this host |
-| `${host.port}` | SSH port for this host |
+| `${@host.name}` | Host name from inventory |
+| `${@host.address}` | Host address (IP or hostname) |
+| `${@host.user}` | SSH user for this host |
+| `${@host.port}` | SSH port for this host |
+
+> The bare `${host.name}` / `${host.address}` / `${host.user}` / `${host.port}` forms still resolve as **deprecated aliases**; prefer the `@host.*` names.
 
 ### Example
 
 ```kdl
 step "Tag host" {
-    shell "echo 'Configuring ${host.name} at ${host.address}'"
+    shell "echo 'Configuring ${@host.name} at ${@host.address}'"
 }
 
 step "Fetch backup" {
-    file "backups/${host.name}-dump.sql" {
+    file "backups/${@host.name}-dump.sql" {
         src "/var/backups/db.sql"
         fetch #true
     }
@@ -174,7 +176,7 @@ plan "setup" {
 }
 ```
 
-Structured variables can be consumed two ways: in `${for}` loops inside template files (see [Template Loops](/advanced/loops-register/#template-loops)), and as the source of a step `loop=`, where each row binds `${item.<field>}` (see [Looping over structured variables](/advanced/loops-register/#looping-over-structured-variables)).
+Structured variables can be consumed two ways: in `${for}` loops inside template files (see [Template Loops](/advanced/loops-register/#template-loops)), and as the source of a step `loop=`, where each row binds `${@item.<field>}` (see [Looping over structured variables](/advanced/loops-register/#looping-over-structured-variables)).
 
 ## Secret Variables
 

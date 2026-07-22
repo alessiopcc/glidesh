@@ -67,6 +67,11 @@ pub fn parse_secrets_file(input: &str) -> Result<SecretsFile, GlideshError> {
             file.config = Some(parse_secrets_block(node)?);
             continue;
         }
+        crate::config::validate_user_var_name(node.name().value()).map_err(|e| {
+            GlideshError::Secret {
+                message: e.to_string(),
+            }
+        })?;
         if let Some(rows) = parse_structured(node) {
             if file.vars.contains_key(&name) || file.structured.contains_key(&name) {
                 return Err(dup(&name));
@@ -248,6 +253,13 @@ api-keys {
         let input = r#"secrets { provider "passphrase" }"#;
         let err = parse_secrets_file(input).unwrap_err().to_string();
         assert!(err.contains("encryptedkey"), "got: {err}");
+    }
+
+    #[test]
+    fn reserved_at_var_name_rejected() {
+        let input = "secrets { provider \"passphrase\"; encryptedkey \"v1:AA\" }\n\"@host\" \"secret:v1:x\"\n";
+        let err = parse_secrets_file(input).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "got: {err}");
     }
 
     #[test]

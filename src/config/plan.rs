@@ -60,6 +60,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
             "vars" => {
                 if let Some(vc) = node.children() {
                     for vnode in vc.nodes() {
+                        super::validate_user_var_name(vnode.name().value())?;
                         let key = vnode.name().to_string();
                         if let Some(list_of_maps) = parse_structured_var(vnode) {
                             if structured_vars.contains_key(&key) || vars.contains_key(&key) {
@@ -229,6 +230,7 @@ fn resolve_vars_files(
                 })?;
         let mut seen_in_file: HashSet<String> = HashSet::new();
         for vnode in doc.nodes() {
+            super::validate_user_var_name(vnode.name().value())?;
             let key = vnode.name().to_string();
             if !seen_in_file.insert(key.clone()) {
                 return Err(GlideshError::ConfigParse {
@@ -467,6 +469,9 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
             let key = name.to_string();
             if key == "register" {
                 register = entry.value().as_string().map(|s| s.to_string());
+                if let Some(ref name) = register {
+                    super::validate_user_var_name(name)?;
+                }
             } else if key == "run-as" || key == "run-as-method" {
                 // Captured separately as the task's escalation, not a module arg.
             } else {
@@ -1374,6 +1379,20 @@ plan "test" {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reserved_at_var_name_rejected_in_plan() {
+        let input = "plan \"p\" {\n    vars {\n        \"@item\" \"x\"\n    }\n    step \"s\" { shell \"echo\" }\n}";
+        let err = parse_plan(input).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "got: {err}");
+    }
+
+    #[test]
+    fn reserved_at_register_name_rejected() {
+        let input = "plan \"p\" {\n    step \"s\" { shell \"echo\" register=\"@out\" }\n}";
+        let err = parse_plan(input).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "got: {err}");
     }
 
     #[test]
