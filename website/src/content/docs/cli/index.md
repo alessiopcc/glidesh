@@ -93,6 +93,8 @@ glidesh run [OPTIONS]
 | `--no-tui` | `-T` | Disable TUI, use plain text output | `false` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
+| `--secrets <PATH>` | — | Path to the secrets file | `secrets.kdl` next to the inventory |
+| `--ask-secret-pass` | — | Prompt for the secrets passphrase (else `GLIDESH_SECRET_PASS`) | `false` |
 
 ### SSH Key Resolution
 
@@ -190,11 +192,42 @@ glidesh validate -i inventory.kdl
 glidesh validate -p plan.kdl -i inventory.kdl
 ```
 
+## `glidesh secret`
+
+Manage encrypted secrets. See [Secrets](/concepts/secrets/) for the full workflow and how
+values are decrypted and redacted at run time.
+
+```
+glidesh secret <COMMAND>
+```
+
+| Command | Description |
+|---------|-------------|
+| `init` | Create a secrets file and generate + wrap a data key |
+| `set <KEY> [VALUE]` | Encrypt a value under a key (prompts for the value if omitted) |
+| `get <KEY>` | Decrypt and print a stored value |
+| `decrypt <KEY>` | Alias for `get` |
+| `encrypt` | Read plaintext on stdin, print a `secret:v1:…` token |
+| `rekey` | Re-wrap the data key under a new passphrase (value tokens unchanged) |
+| `edit` | Open the secrets file in `$EDITOR` with values transiently decrypted |
+
+Every subcommand accepts `--file <PATH>` (default `secrets.kdl`). The passphrase comes from
+`GLIDESH_SECRET_PASS` or an interactive prompt.
+
+```bash
+glidesh secret init
+glidesh secret set db-password
+GLIDESH_SECRET_PASS=… glidesh secret get db-password
+```
+
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `RUST_LOG` | Control log verbosity. Default is `glidesh=info`. Set to `glidesh=debug` or `glidesh=trace` for troubleshooting. |
+| `GLIDESH_SECRET_PASS` | Secrets passphrase, for non-interactive `run` / `secret` commands (else `--ask-secret-pass` / prompt). |
+| `GLIDESH_SECRETS` | Path to the secrets file, overriding auto-discovery. |
+| `GLIDESH_RUNAS_PASS` | Privilege-escalation password for `run-as` (else `--ask-pass`). |
 
 ```bash
 RUST_LOG=glidesh=debug glidesh run -i inventory.kdl -p plan.kdl

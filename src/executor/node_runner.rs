@@ -51,6 +51,17 @@ fn resolve_loop_items(
     }
 }
 
+/// Built-in per-host variables, exposed under the reserved `@host.*` namespace. Only these
+/// `@`-prefixed names are injected — the legacy bare `host.*` forms were removed.
+fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
+    [
+        ("@host.name".to_string(), host.name.clone()),
+        ("@host.address".to_string(), host.address.clone()),
+        ("@host.user".to_string(), host.user.clone()),
+        ("@host.port".to_string(), host.port.to_string()),
+    ]
+}
+
 /// Bind a loop item's variables into `vars` under the reserved `@item` namespace,
 /// returning the keys that were inserted so the caller can remove them after the iteration.
 /// A flat item binds `@item`; a structured row binds `@item.<field>` for each field.
@@ -153,15 +164,7 @@ impl NodeRunner {
 
         // Inject built-in host vars under the reserved `@host.*` namespace (cannot be
         // overridden — user var names may not start with `@`).
-        let builtins = [
-            ("name", self.host.name.clone()),
-            ("address", self.host.address.clone()),
-            ("user", self.host.user.clone()),
-            ("port", self.host.port.to_string()),
-        ];
-        for (suffix, value) in builtins {
-            vars.insert(format!("@host.{suffix}"), value);
-        }
+        vars.extend(host_builtin_vars(&self.host));
 
         // Build template data: inventory @-refs + plan structured vars.
         // Preserve inventory-provided collections so plan structured vars
@@ -688,6 +691,30 @@ mod tests {
             resolve_loop_items(&LoopSource::Variable("disks".to_string()), &vars, &td).unwrap();
         assert_eq!(items.len(), 2);
         assert!(matches!(&items[0], LoopItem::Flat(s) if s == "sda"));
+    }
+
+    #[test]
+    fn host_builtins_use_at_namespace_only() {
+        let host = ResolvedHost {
+            name: "web-1".to_string(),
+            address: "10.0.0.1".to_string(),
+            user: "deploy".to_string(),
+            port: 2222,
+            vars: HashMap::new(),
+            jump: None,
+            run_as: Default::default(),
+        };
+        let vars: HashMap<String, String> = host_builtin_vars(&host).into_iter().collect();
+        assert_eq!(vars.get("@host.name").map(String::as_str), Some("web-1"));
+        assert_eq!(
+            vars.get("@host.address").map(String::as_str),
+            Some("10.0.0.1")
+        );
+        assert_eq!(vars.get("@host.user").map(String::as_str), Some("deploy"));
+        assert_eq!(vars.get("@host.port").map(String::as_str), Some("2222"));
+        // The bare aliases were removed.
+        assert!(!vars.contains_key("host.name"));
+        assert!(!vars.contains_key("host.port"));
     }
 
     #[test]
