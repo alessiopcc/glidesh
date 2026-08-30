@@ -679,8 +679,15 @@ impl SshSession {
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<Option<(String, String, String)>, GlideshError> {
         let escaped = shell_escape(path);
+        // BSD stat fallback for macOS targets, like the shasum fallback in
+        // checksum_remote. Both forms print "owner group mode".
         let output = self
-            .exec_as(&format!("stat -c '%U %G %a' {escaped}"), run_as)
+            .exec_as(
+                &format!(
+                    "stat -c '%U %G %a' {escaped} 2>/dev/null || stat -f '%Su %Sg %Lp' {escaped}"
+                ),
+                run_as,
+            )
             .await?;
 
         if output.exit_code != 0 {
