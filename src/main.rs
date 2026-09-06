@@ -1,6 +1,7 @@
 mod cli;
 mod executor;
 mod logging;
+mod secret_cmd;
 mod tui;
 
 use clap::Parser;
@@ -12,11 +13,14 @@ use glidesh::config::types::{ExecutionMode, Inventory, RunAsMethod, RunAsSpec, R
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
 use glidesh::secrets::{
-    self, config as secrets_config, passphrase as secret_passphrase, store as secret_store,
-    token as secret_token,
+    config as secrets_config, passphrase as secret_passphrase, store as secret_store,
 };
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use logging::RunLogger;
+use secret_cmd::{
+    cmd_secret, read_pass_file, secret_identity_path, secret_pass_file_from_env,
+    secret_pass_from_env,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,9 +106,17 @@ fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, Glidesh
     Ok(None)
 }
 
-/// Source the secrets passphrase: `GLIDESH_SECRET_PASS` first, then `--ask-secret-pass`.
+/// Source the secrets passphrase, most explicit first: `--secret-pass-file`, then
+/// `GLIDESH_SECRET_PASS`, then `GLIDESH_SECRET_PASS_FILE`, then `--ask-secret-pass`.
+/// A flag the operator typed for this run outranks whatever the environment carries.
 fn source_secret_pass(args: &cli::RunArgs) -> Result<Option<String>, GlideshError> {
+    if let Some(path) = &args.secret_pass_file {
+        return Ok(Some(read_pass_file(&expand_tilde(path))?));
+    }
     if let Some(p) = secret_pass_from_env() {
+        return Ok(Some(p));
+    }
+    if let Some(p) = secret_pass_file_from_env()? {
         return Ok(Some(p));
     }
     if args.ask_secret_pass {
@@ -204,7 +216,15 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         secret_vars = sf.vars;
         secret_structured = sf.structured;
     }
-    glidesh::secrets::set_identity(source_secret_pass(&args)?);
+    // Which credential to look for depends on how the file was wrapped, so this happens
+    // after the config is parsed rather than from the flags alone.
+    let identity = match secrets_config.as_ref().map(|c| &c.provider) {
+        Some(glidesh::secrets::config::Provider::Age) => Some(glidesh::secrets::Identity::SshKey(
+            secret_identity_path(args.secret_identity.as_deref(), args.key.as_deref()),
+        )),
+        _ => source_secret_pass(&args)?.map(glidesh::secrets::Identity::Passphrase),
+    };
+    glidesh::secrets::set_identity(identity);
     let secrets =
         glidesh::secrets::Secrets::open(secrets_config.as_ref(), glidesh::secrets::identity())?;
 
@@ -663,6 +683,27 @@ fn show_run_details(
     Ok(())
 }
 
+/// The provider-specific tail of a `validate` line: how many people can open an age file,
+/// or how strongly a passphrase file's key is wrapped. Blobs are self-describing, so a file
+/// created by a development build keeps its low scrypt cost forever unless someone is told —
+/// this is where they are told.
+fn provider_detail(cfg: &secrets_config::SecretsConfig) -> String {
+    match cfg.provider {
+        secrets_config::Provider::Age => format!(", {} recipient(s)", cfg.recipients.len()),
+        secrets_config::Provider::Passphrase => {
+            match secret_passphrase::wrap_cost(&cfg.encryptedkey) {
+                Some(cost) if cost < secret_passphrase::current_cost() => format!(
+                    ", key wrapped at scrypt cost 2^{cost}, below this build's default of \
+                     2^{}: run `glidesh secret rekey` to strengthen it",
+                    secret_passphrase::current_cost()
+                ),
+                Some(cost) => format!(", key wrapped at scrypt cost 2^{cost}"),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     let mut valid = true;
 
@@ -706,6 +747,31 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
         }
     }
 
+    // A secrets file beside the inventory is part of the configuration a run will load, so
+    // check it here rather than letting a malformed provider block surface mid-deploy. Only
+    // the file is parsed — validating never needs the passphrase.
+    let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
+    if let Some(path) = secrets_config::discover_secrets_path(None, inv_dir) {
+        print!("Validating secrets '{}'... ", path.display());
+        match secret_store::read(&path).and_then(|c| secrets_config::parse_secrets_file(&c)) {
+            Ok(secrets_file) => {
+                let count = secrets_file.vars.len() + secrets_file.structured.len();
+                match secrets_file.config {
+                    Some(cfg) => println!(
+                        "OK ({count} values, provider {}{})",
+                        cfg.provider.as_str(),
+                        provider_detail(&cfg)
+                    ),
+                    None => println!("OK ({count} values, no provider block)"),
+                }
+            }
+            Err(e) => {
+                println!("FAILED: {}", e);
+                valid = false;
+            }
+        }
+    }
+
     if args.plan.is_none() && args.inventory.is_none() {
         println!("No files specified. Use --plan and/or --inventory.");
     }
@@ -715,275 +781,6 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     } else {
         Err(GlideshError::Other("Validation failed".to_string()))
     }
-}
-
-fn cmd_secret(args: cli::SecretArgs) -> Result<(), GlideshError> {
-    use cli::SecretCommand::*;
-    match args.command {
-        Init(a) => secret_init(&a.file),
-        Set(a) => secret_set(&a.file, &a.key, a.value),
-        Get(a) | Decrypt(a) => secret_get(&a.file, &a.key),
-        Encrypt(a) => secret_encrypt(&a.file),
-        Rekey(a) => secret_rekey(&a.file),
-        Edit(a) => secret_edit(&a.file),
-    }
-}
-
-fn read_secret_pass(prompt: &str) -> Result<String, GlideshError> {
-    rpassword::prompt_password(prompt).map_err(|e| GlideshError::Secret {
-        message: format!("failed to read passphrase: {e}"),
-    })
-}
-
-/// The non-empty `GLIDESH_SECRET_PASS` value, if set.
-fn secret_pass_from_env() -> Option<String> {
-    std::env::var("GLIDESH_SECRET_PASS")
-        .ok()
-        .filter(|p| !p.is_empty())
-}
-
-/// Unlock passphrase for existing files: `GLIDESH_SECRET_PASS` or an interactive prompt.
-fn unlock_pass() -> Result<String, GlideshError> {
-    match secret_pass_from_env() {
-        Some(p) => Ok(p),
-        None => read_secret_pass("secret passphrase: "),
-    }
-}
-
-/// Prompt for a new passphrase twice and require the two entries to match.
-fn prompt_new_passphrase_confirmed() -> Result<String, GlideshError> {
-    let a = read_secret_pass("new passphrase: ")?;
-    let b = read_secret_pass("confirm passphrase: ")?;
-    if a != b {
-        return Err(GlideshError::Secret {
-            message: "passphrases do not match".to_string(),
-        });
-    }
-    Ok(a)
-}
-
-/// A brand-new passphrase: `GLIDESH_SECRET_PASS` (for CI), else prompt with confirmation.
-fn new_pass() -> Result<String, GlideshError> {
-    match secret_pass_from_env() {
-        Some(p) => Ok(p),
-        None => prompt_new_passphrase_confirmed(),
-    }
-}
-
-fn not_initialized(file: &std::path::Path) -> GlideshError {
-    GlideshError::Secret {
-        message: format!(
-            "{} has no `secrets` block — run `glidesh secret init`",
-            file.display()
-        ),
-    }
-}
-
-/// Read a secrets file and return its raw content plus the required provider block.
-fn load_config(
-    file: &std::path::Path,
-) -> Result<(String, secrets_config::SecretsConfig), GlideshError> {
-    let content = secret_store::read(file)?;
-    let cfg = secrets_config::parse_secrets_file(&content)?
-        .config
-        .ok_or_else(|| not_initialized(file))?;
-    Ok((content, cfg))
-}
-
-fn secret_init(file: &std::path::Path) -> Result<(), GlideshError> {
-    if file.exists() {
-        return Err(GlideshError::Secret {
-            message: format!("{} already exists", file.display()),
-        });
-    }
-    let pass = new_pass()?;
-    let dek = secret_passphrase::generate_dek();
-    let wrapped = secret_passphrase::PassphraseProvider::new(pass).wrap_dek(&dek)?;
-    secret_store::write(file, &secret_store::init_content(&wrapped))?;
-    println!("Initialized {}", file.display());
-    Ok(())
-}
-
-fn secret_set(
-    file: &std::path::Path,
-    key: &str,
-    value: Option<String>,
-) -> Result<(), GlideshError> {
-    let (content, cfg) = load_config(file)?;
-    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
-    let plaintext = match value {
-        Some(v) => v,
-        None => read_secret_pass(&format!("value for '{key}': "))?,
-    };
-    let token = secret_token::encrypt_value(&dek, plaintext.as_bytes())?;
-    let updated = secret_store::upsert_scalar(&content, key, &token);
-    secret_store::write(file, &updated)?;
-    println!("Set '{key}' in {}", file.display());
-    Ok(())
-}
-
-fn secret_get(file: &std::path::Path, key: &str) -> Result<(), GlideshError> {
-    let content = secret_store::read(file)?;
-    let parsed = secrets_config::parse_secrets_file(&content)?;
-    let value = parsed.vars.get(key).ok_or_else(|| GlideshError::Secret {
-        message: format!("no secret named '{key}' in {}", file.display()),
-    })?;
-    if !secret_token::is_secret_token(value) {
-        println!("{value}");
-        return Ok(());
-    }
-    let cfg = parsed.config.ok_or_else(|| not_initialized(file))?;
-    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
-    let plaintext = secret_token::decrypt_value(&dek, value)?;
-    println!("{}", plaintext.as_str());
-    Ok(())
-}
-
-fn secret_encrypt(file: &std::path::Path) -> Result<(), GlideshError> {
-    let (_content, cfg) = load_config(file)?;
-    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
-    use std::io::Read;
-    let mut input = String::new();
-    std::io::stdin()
-        .read_to_string(&mut input)
-        .map_err(|e| GlideshError::Secret {
-            message: format!("failed to read stdin: {e}"),
-        })?;
-    let plaintext = input.strip_suffix('\n').unwrap_or(&input);
-    let token = secret_token::encrypt_value(&dek, plaintext.as_bytes())?;
-    println!("{token}");
-    Ok(())
-}
-
-fn secret_rekey(file: &std::path::Path) -> Result<(), GlideshError> {
-    let (content, cfg) = load_config(file)?;
-    let dek = secrets::unwrap_dek(&cfg, &read_secret_pass("current passphrase: ")?)?;
-    let new = prompt_new_passphrase_confirmed()?;
-    let wrapped = secret_passphrase::PassphraseProvider::new(new).wrap_dek(&dek)?;
-    let updated = secret_store::replace_encryptedkey(&content, &wrapped)?;
-    secret_store::write(file, &updated)?;
-    println!("Rekeyed {} (value tokens unchanged)", file.display());
-    Ok(())
-}
-
-/// Removes and best-effort shreds a temp file on every exit path.
-struct TempShredder(PathBuf);
-
-impl Drop for TempShredder {
-    fn drop(&mut self) {
-        if let Ok(meta) = std::fs::metadata(&self.0) {
-            let _ = std::fs::write(&self.0, vec![0u8; meta.len() as usize]);
-        }
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn secret_edit(file: &std::path::Path) -> Result<(), GlideshError> {
-    let content = secret_store::read(file)?;
-    let parsed = secrets_config::parse_secrets_file(&content)?;
-    let cfg = parsed.config.ok_or_else(|| not_initialized(file))?;
-    if !parsed.structured.is_empty() {
-        return Err(GlideshError::Secret {
-            message:
-                "`secret edit` supports scalar values only; use `secret set` for structured secrets"
-                    .to_string(),
-        });
-    }
-    let dek = secrets::unwrap_dek(&cfg, &unlock_pass()?)?;
-
-    // Decrypt values into an editable view; remember which keys were secret so they are
-    // re-encrypted on save (new keys added in the editor are stored as plaintext — use
-    // `secret set` to encrypt them).
-    let mut secret_keys = std::collections::HashSet::new();
-    let mut keys: Vec<&String> = parsed.vars.keys().collect();
-    keys.sort();
-    let mut editable = String::from(
-        "// glidesh secret edit — values are decrypted here and re-encrypted on save.\n\
-         // The secrets{} provider block is managed separately. Add new secrets with `secret set`.\n\n",
-    );
-    for key in &keys {
-        let value = &parsed.vars[*key];
-        if secret_token::is_secret_token(value) {
-            secret_keys.insert((*key).clone());
-            let plaintext = secret_token::decrypt_value(&dek, value)?;
-            editable.push_str(&format!("{key} {}\n", kdl_quote(plaintext.as_str())));
-        } else {
-            editable.push_str(&format!("{key} {}\n", kdl_quote(value)));
-        }
-    }
-
-    let tmp = file.with_extension("kdl.edit");
-    let _guard = TempShredder(tmp.clone());
-    secret_store::write_private(&tmp, &editable)?;
-    launch_editor(&tmp)?;
-
-    let edited = secret_store::read(&tmp)?;
-    let doc: kdl::KdlDocument =
-        edited
-            .parse()
-            .map_err(|e: kdl::KdlError| GlideshError::Secret {
-                message: format!("edited file is not valid KDL: {e}"),
-            })?;
-
-    let mut out = secret_store::init_content(&cfg.encryptedkey);
-    for node in doc.nodes() {
-        let key = node.name().to_string();
-        let value = node
-            .entries()
-            .iter()
-            .find(|e| e.name().is_none())
-            .and_then(|e| e.value().as_string())
-            .unwrap_or("");
-        let stored = if secret_keys.contains(&key) {
-            secret_token::encrypt_value(&dek, value.as_bytes())?
-        } else {
-            value.to_string()
-        };
-        out.push_str(&format!("{key} {}\n", kdl_quote(&stored)));
-    }
-    secret_store::write(file, &out)?;
-    println!("Updated {}", file.display());
-    Ok(())
-}
-
-fn launch_editor(path: &std::path::Path) -> Result<(), GlideshError> {
-    let editor = std::env::var("VISUAL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                "notepad".to_string()
-            } else {
-                "vi".to_string()
-            }
-        });
-    let mut parts = editor.split_whitespace();
-    let program = parts.next().unwrap_or("vi");
-    let status = std::process::Command::new(program)
-        .args(parts)
-        .arg(path)
-        .status()
-        .map_err(|e| GlideshError::Secret {
-            message: format!("failed to launch editor '{editor}': {e}"),
-        })?;
-    if !status.success() {
-        return Err(GlideshError::Secret {
-            message: "editor exited with an error; secrets unchanged".to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// Quote and escape a string as a KDL basic string value.
-fn kdl_quote(s: &str) -> String {
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\t', "\\t")
-        .replace('\r', "\\r");
-    format!("\"{escaped}\"")
 }
 
 /// Build `TemplateData` from an inventory for `@inventory.*` and `@group.*` template references.
@@ -1446,5 +1243,70 @@ fn expand_tilde(path: &std::path::Path) -> PathBuf {
             .join(rest)
     } else {
         path.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wrapped-key blob with a chosen cost byte. `wrap_cost` reads only that byte, so the
+    /// rest need not be real ciphertext.
+    fn blob_at(cost: u8) -> String {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        format!("v1:{}", URL_SAFE_NO_PAD.encode([cost, 0, 0, 0]))
+    }
+
+    fn passphrase_cfg(encryptedkey: String) -> secrets_config::SecretsConfig {
+        secrets_config::SecretsConfig {
+            provider: secrets_config::Provider::Passphrase,
+            encryptedkey,
+            recipients: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validate_nudges_a_key_wrapped_below_the_current_cost() {
+        let current = secret_passphrase::current_cost();
+        let weak = provider_detail(&passphrase_cfg(blob_at(current - 1)));
+        assert!(weak.contains("secret rekey"), "no nudge: {weak}");
+        assert!(weak.contains(&format!("2^{}", current - 1)), "{weak}");
+
+        // At the current cost there is nothing to say beyond the cost itself.
+        let fine = provider_detail(&passphrase_cfg(blob_at(current)));
+        assert!(fine.contains(&format!("2^{current}")), "{fine}");
+        assert!(!fine.contains("rekey"), "spurious nudge: {fine}");
+    }
+
+    #[test]
+    fn validate_reports_recipient_count_for_age_files() {
+        let cfg = secrets_config::SecretsConfig {
+            provider: secrets_config::Provider::Age,
+            encryptedkey: "agev1:AAAA".to_string(),
+            recipients: vec![glidesh::secrets::config::SecretRecipient {
+                name: "alice".to_string(),
+                key: "ssh-ed25519 AAAA".to_string(),
+            }],
+        };
+        let detail = provider_detail(&cfg);
+        assert!(detail.contains("1 recipient(s)"), "{detail}");
+        // An age blob has no scrypt cost to report.
+        assert!(!detail.contains("scrypt"), "{detail}");
+    }
+
+    #[test]
+    fn pass_file_flag_outranks_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pass");
+        std::fs::write(&path, "from-file\n").unwrap();
+        // Parsed the way the CLI parses it, so this also pins the flag's spelling.
+        let args =
+            cli::RunArgs::try_parse_from(["run", "--secret-pass-file", path.to_str().unwrap()])
+                .unwrap();
+        // Holds whether or not GLIDESH_SECRET_PASS is set in this environment.
+        assert_eq!(
+            source_secret_pass(&args).unwrap().as_deref(),
+            Some("from-file")
+        );
     }
 }

@@ -21,26 +21,48 @@ use std::path::{Path, PathBuf};
 /// The DEK-wrapping provider named in `secrets { provider "…" }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provider {
+    /// One shared passphrase wraps the data key.
     Passphrase,
+    /// The data key is wrapped to a set of SSH public keys, age-style.
+    Age,
 }
 
 impl Provider {
+    /// The name as it is written in `secrets { provider "…" }`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Provider::Passphrase => "passphrase",
+            Provider::Age => "age",
+        }
+    }
+
     fn parse(s: &str) -> Result<Provider, GlideshError> {
         match s {
             "passphrase" => Ok(Provider::Passphrase),
+            "age" => Ok(Provider::Age),
             other => Err(GlideshError::Secret {
-                message: format!("unknown secrets provider '{other}' (supported: passphrase)"),
+                message: format!("unknown secrets provider '{other}' (supported: passphrase, age)"),
             }),
         }
     }
+}
+
+/// One party who can unwrap the data key: a name for humans and their SSH public key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretRecipient {
+    pub name: String,
+    pub key: String,
 }
 
 /// The provider block from a `secrets.kdl` file.
 #[derive(Debug, Clone)]
 pub struct SecretsConfig {
     pub provider: Provider,
-    /// The `v1:<base64url>` wrapped-DEK blob.
+    /// The wrapped-DEK blob: `v1:…` for the passphrase provider, `agev1:…` for age.
     pub encryptedkey: String,
+    /// Who can unwrap it. Always empty for the passphrase provider, where the passphrase
+    /// itself is the only credential.
+    pub recipients: Vec<SecretRecipient>,
 }
 
 /// A parsed `secrets.kdl`: the optional provider block plus its variable nodes.
@@ -98,6 +120,7 @@ fn parse_secrets_block(node: &kdl::KdlNode) -> Result<SecretsConfig, GlideshErro
 
     let mut provider = None;
     let mut encryptedkey = None;
+    let mut recipients = Vec::new();
     for child in children.nodes() {
         let key = child.name().to_string();
         let value = child
@@ -111,7 +134,7 @@ fn parse_secrets_block(node: &kdl::KdlNode) -> Result<SecretsConfig, GlideshErro
                 provider = Some(Provider::parse(value.as_deref().unwrap_or(""))?);
             }
             "encryptedkey" => encryptedkey = value,
-            "recipients" => { /* reserved for the age provider */ }
+            "recipients" => recipients = parse_recipients(child)?,
             other => {
                 return Err(GlideshError::Secret {
                     message: format!("unknown key '{other}' in `secrets` block"),
@@ -120,14 +143,45 @@ fn parse_secrets_block(node: &kdl::KdlNode) -> Result<SecretsConfig, GlideshErro
         }
     }
 
+    let provider = provider.ok_or_else(|| GlideshError::Secret {
+        message: "`secrets` block is missing `provider`".to_string(),
+    })?;
+    if provider == Provider::Age && recipients.is_empty() {
+        return Err(GlideshError::Secret {
+            message: "the `age` provider needs at least one recipient, or nobody could \
+                      unlock this file"
+                .to_string(),
+        });
+    }
     Ok(SecretsConfig {
-        provider: provider.ok_or_else(|| GlideshError::Secret {
-            message: "`secrets` block is missing `provider`".to_string(),
-        })?,
+        provider,
         encryptedkey: encryptedkey.ok_or_else(|| GlideshError::Secret {
             message: "`secrets` block is missing `encryptedkey`".to_string(),
         })?,
+        recipients,
     })
+}
+
+/// Parse the `recipients { - name=… key=… }` rows inside a `secrets` block.
+fn parse_recipients(node: &kdl::KdlNode) -> Result<Vec<SecretRecipient>, GlideshError> {
+    let rows = crate::config::parse_structured_var(node).ok_or_else(|| GlideshError::Secret {
+        message: "`recipients` must be a block of `- name=… key=…` rows".to_string(),
+    })?;
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let key = row.get("key").ok_or_else(|| GlideshError::Secret {
+                message: format!("recipient #{} is missing `key`", i + 1),
+            })?;
+            Ok(SecretRecipient {
+                name: row
+                    .get("name")
+                    .cloned()
+                    .unwrap_or_else(|| format!("recipient-{}", i + 1)),
+                key: key.clone(),
+            })
+        })
+        .collect()
 }
 
 fn dup(name: &str) -> GlideshError {

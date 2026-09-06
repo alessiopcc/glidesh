@@ -5,8 +5,9 @@
 //! Because the AEAD tag authenticates the DEK, a wrong passphrase fails decryption
 //! cleanly — the blob is its own verifier, so no separate check value is needed.
 //!
-//! This is the envelope's passphrase mode. The `age`-recipient provider (SSH/X25519
-//! keys) is a follow-up that wraps the same DEK to a set of recipients instead.
+//! This is the envelope's passphrase mode: one shared secret opens the file. See
+//! [`super::age`] for the provider that wraps the same DEK to a set of SSH recipients
+//! instead, which is what makes per-person access and revocation possible.
 
 use crate::error::GlideshError;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -55,7 +56,12 @@ impl PassphraseProvider {
     /// blob self-describing: raising [`SCRYPT_LOG_N`] later only affects new wraps, and
     /// every existing `encryptedkey` still unwraps with the cost it was written at.
     pub fn wrap_dek(&self, dek: &[u8; DEK_LEN]) -> Result<String, GlideshError> {
-        let log_n = SCRYPT_LOG_N;
+        self.wrap_dek_at(dek, SCRYPT_LOG_N)
+    }
+
+    /// Wrap at an explicit cost. Production always uses the current default; tests use this
+    /// to build the older, weaker blobs that must keep opening.
+    fn wrap_dek_at(&self, dek: &[u8; DEK_LEN], log_n: u8) -> Result<String, GlideshError> {
         let mut salt = [0u8; SALT_LEN];
         super::random_bytes(&mut salt);
         let kek = derive_kek(&self.passphrase, &salt, log_n)?;
@@ -88,6 +94,16 @@ impl PassphraseProvider {
             return Err(wrap_err("encryptedkey blob too short"));
         }
         let log_n = blob[0];
+        if log_n < SCRYPT_LOG_N {
+            // Self-describing blobs mean an old file keeps working forever, including one
+            // written by a debug build at the low test cost. Nothing would ever tell you to
+            // strengthen it, so say so at the one moment the cost is known.
+            tracing::warn!(
+                "this secrets file's data key was wrapped at scrypt cost 2^{log_n}, below \
+                 this build's default of 2^{SCRYPT_LOG_N}: run `glidesh secret rekey` to \
+                 re-wrap it at full strength"
+            );
+        }
         let salt = &blob[1..1 + SALT_LEN];
         let nonce = &blob[1 + SALT_LEN..1 + SALT_LEN + NONCE_LEN];
         let sealed = &blob[1 + SALT_LEN + NONCE_LEN..];
@@ -108,6 +124,18 @@ impl PassphraseProvider {
         dek.copy_from_slice(&dek_bytes[..]);
         Ok(dek)
     }
+}
+
+/// The scrypt cost this build wraps new keys at, as log2(N).
+pub fn current_cost() -> u8 {
+    SCRYPT_LOG_N
+}
+
+/// The scrypt cost a wrapped blob was written at, or `None` if it is not a passphrase blob.
+/// Lets `validate` report a weak file without unwrapping it.
+pub fn wrap_cost(wrapped: &str) -> Option<u8> {
+    let body = wrapped.strip_prefix(WRAP_PREFIX)?;
+    URL_SAFE_NO_PAD.decode(body).ok()?.first().copied()
 }
 
 /// Generate a random 256-bit DEK.
@@ -172,6 +200,33 @@ mod tests {
         let recovered = old.unwrap_dek(&blob).unwrap();
         let rewrapped = new.wrap_dek(&recovered).unwrap();
         assert_eq!(*new.unwrap_dek(&rewrapped).unwrap(), *dek);
+    }
+
+    #[test]
+    fn a_weaker_blob_still_opens_and_reports_its_cost() {
+        // A file written by a debug build, or by an older release with a lower default,
+        // must keep working — the cost travels with the blob.
+        let dek = generate_dek();
+        let provider = PassphraseProvider::new("pw".to_string());
+        let weak = provider.wrap_dek_at(&dek, 10).unwrap();
+
+        assert_eq!(wrap_cost(&weak), Some(10));
+        assert!(
+            wrap_cost(&weak).unwrap() < current_cost(),
+            "test cost must be low"
+        );
+        assert_eq!(*provider.unwrap_dek(&weak).unwrap(), *dek);
+    }
+
+    #[test]
+    fn wrap_cost_reads_the_current_default_and_ignores_other_blobs() {
+        let wrapped = PassphraseProvider::new("pw".to_string())
+            .wrap_dek(&generate_dek())
+            .unwrap();
+        assert_eq!(wrap_cost(&wrapped), Some(current_cost()));
+        // An age-wrapped key, or junk, is not this provider's to report on.
+        assert_eq!(wrap_cost("agev1:AAAA"), None);
+        assert_eq!(wrap_cost("v1:!!!not-base64"), None);
     }
 
     #[test]

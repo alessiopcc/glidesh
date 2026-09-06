@@ -76,6 +76,34 @@ pub fn decrypt_value(dek: &[u8; 32], token: &str) -> Result<Zeroizing<String>, G
     Ok(Zeroizing::new(text))
 }
 
+/// Replace every `secret:v1:…` token in `text` with whatever `rewrite` returns for it.
+///
+/// Tokens are self-delimiting — the prefix followed by a run of base64url characters — so a
+/// textual sweep reaches every one of them: top-level values, fields inside a `- row`, and
+/// tokens pasted anywhere else. That is what lets a data-key rotation be total without the
+/// rewriter having to model the file's structure. The `encryptedkey` blob is untouched: it
+/// carries a bare `v1:` prefix, not `secret:v1:`.
+pub fn rewrite_tokens<F>(text: &str, mut rewrite: F) -> Result<String, GlideshError>
+where
+    F: FnMut(&str) -> Result<String, GlideshError>,
+{
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(SECRET_PREFIX) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos..];
+        let body = SECRET_PREFIX.len();
+        let end = after[body..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .map(|i| body + i)
+            .unwrap_or(after.len());
+        out.push_str(&rewrite(&after[..end])?);
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 fn malformed(reason: &str) -> GlideshError {
     GlideshError::Secret {
         message: format!("malformed secret token: {reason}"),
@@ -119,6 +147,44 @@ mod tests {
     fn malformed_token_is_rejected() {
         assert!(decrypt_value(&dek(), "secret:v1:not-base64!!").is_err());
         assert!(decrypt_value(&dek(), "plain text").is_err());
+    }
+
+    #[test]
+    fn rewrite_tokens_reaches_every_token_and_nothing_else() {
+        let k = dek();
+        let a = encrypt_value(&k, b"one").unwrap();
+        let b = encrypt_value(&k, b"two").unwrap();
+        // A token at top level, one inside a block row, and an `encryptedkey` blob that
+        // must not be mistaken for a value token.
+        let doc = format!(
+            "secrets {{\n    encryptedkey \"v1:AAAA\"\n}}\nfirst \"{a}\"\nrows {{\n    - name=\"x\" value=\"{b}\"\n}}\n"
+        );
+        let mut seen = 0;
+        let out = rewrite_tokens(&doc, |tok| {
+            seen += 1;
+            Ok(format!("<{}>", decrypt_value(&k, tok).unwrap().as_str()))
+        })
+        .unwrap();
+        assert_eq!(seen, 2, "both tokens must be visited: {out}");
+        assert!(out.contains("first \"<one>\""), "{out}");
+        assert!(out.contains("value=\"<two>\""), "{out}");
+        assert!(
+            out.contains("encryptedkey \"v1:AAAA\""),
+            "wrap blob touched: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_tokens_propagates_failure() {
+        let doc = format!("k \"{}\"", encrypt_value(&dek(), b"v").unwrap());
+        let err = rewrite_tokens(&doc, |_| Err(malformed("nope")));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn rewrite_tokens_leaves_plain_text_alone() {
+        let text = "nothing to see here";
+        assert_eq!(rewrite_tokens(text, |_| unreachable!()).unwrap(), text);
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl EventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glidesh::secrets::Secrets;
+    use glidesh::secrets::{Identity, Secrets};
 
     /// A registry seeded with a known plaintext by decrypting a real token.
     fn registry_with(plaintext: &str) -> Arc<SecretRegistry> {
@@ -100,8 +100,9 @@ mod tests {
         let cfg = SecretsConfig {
             provider: Provider::Passphrase,
             encryptedkey: wrapped,
+            recipients: Vec::new(),
         };
-        let secrets = Secrets::open(Some(&cfg), Some("pw")).unwrap();
+        let secrets = Secrets::open(Some(&cfg), Some(&Identity::Passphrase("pw".into()))).unwrap();
         let tok = token::encrypt_value(&dek, plaintext.as_bytes()).unwrap();
         secrets.decrypt_token(&tok).unwrap();
         secrets.registry()

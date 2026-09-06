@@ -95,6 +95,8 @@ glidesh run [OPTIONS]
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
 | `--secrets <PATH>` | — | Path to the secrets file | `secrets.kdl` next to the inventory |
 | `--ask-secret-pass` | — | Prompt for the secrets passphrase (else `GLIDESH_SECRET_PASS`) | `false` |
+| `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
+| `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key`, else `~/.ssh/id_ed25519` |
 
 ### SSH Key Resolution
 
@@ -192,6 +194,10 @@ glidesh validate -i inventory.kdl
 glidesh validate -p plan.kdl -i inventory.kdl
 ```
 
+A `secrets.kdl` discovered beside the inventory is parsed too, so a malformed provider block or an
+unknown provider is caught here rather than mid-run. Only the file is parsed — validation never
+asks for the passphrase and never decrypts a value.
+
 ## `glidesh secret`
 
 Manage encrypted secrets. See [Secrets](/concepts/secrets/) for the full workflow and how
@@ -203,16 +209,25 @@ glidesh secret <COMMAND>
 
 | Command | Description |
 |---------|-------------|
-| `init` | Create a secrets file and generate + wrap a data key |
+| `init` | Create a secrets file and generate + wrap a data key. `--provider age --recipient <KEY_OR_PATH>` wraps it to SSH public keys instead of a passphrase (repeatable) |
+| `list` | List the names in the file and whether each is encrypted (no passphrase needed) |
 | `set <KEY> [VALUE]` | Encrypt a value under a key (prompts for the value if omitted) |
-| `get <KEY>` | Decrypt and print a stored value |
+| `get <KEY>` | Decrypt and print a stored value. Pass a `secret:v1:…` token instead of a key to decrypt it directly |
 | `decrypt <KEY>` | Alias for `get` |
+| `rm <KEY>` | Delete a value from the file (alias: `remove`) |
 | `encrypt` | Read plaintext on stdin, print a `secret:v1:…` token |
 | `rekey` | Re-wrap the data key under a new passphrase (value tokens unchanged) |
-| `edit` | Open the secrets file in `$EDITOR` with values transiently decrypted |
+| `rekey --rotate-data-key` | Generate a new data key and re-encrypt every value in the file under it |
+| `recipients list` | Show who can unlock an age-wrapped file (no key needed) |
+| `recipients add <KEY_OR_PATH>` | Grant access to another SSH public key |
+| `recipients rm <NAME>` | Revoke a recipient, rotating the data key unless `--keep-data-key` |
+| `edit` | Open the secrets file in `$VISUAL`/`$EDITOR` with values transiently decrypted |
 
 Every subcommand accepts `--file <PATH>` (default `secrets.kdl`). The passphrase comes from
-`GLIDESH_SECRET_PASS` or an interactive prompt.
+`GLIDESH_SECRET_PASS`, then `GLIDESH_SECRET_PASS_FILE`, then an interactive prompt. `list` and
+`rm` need no passphrase at all. `rekey` takes the *new* passphrase from `--new-pass-file <PATH>`
+when given, since the ordinary sources already hold the current one. An age-wrapped file takes an
+SSH private key instead of a passphrase — see `--secret-identity` and `GLIDESH_SECRET_IDENTITY`.
 
 ```bash
 glidesh secret init
@@ -226,7 +241,9 @@ GLIDESH_SECRET_PASS=… glidesh secret get db-password
 |----------|-------------|
 | `RUST_LOG` | Control log verbosity. Default is `glidesh=info`. Set to `glidesh=debug` or `glidesh=trace` for troubleshooting. |
 | `GLIDESH_SECRET_PASS` | Secrets passphrase, for non-interactive `run` / `secret` commands (else `--ask-secret-pass` / prompt). |
+| `GLIDESH_SECRET_PASS_FILE` | Path to a file whose first line is the secrets passphrase. Honoured by every subcommand; outranked by `--secret-pass-file` and `GLIDESH_SECRET_PASS`. |
 | `GLIDESH_SECRETS` | Path to the secrets file, overriding auto-discovery. |
+| `GLIDESH_SECRET_IDENTITY` | SSH private key that unlocks an age-wrapped secrets file. Honoured by every subcommand; outranked by `--secret-identity`. |
 | `GLIDESH_RUNAS_PASS` | Privilege-escalation password for `run-as` (else `--ask-pass`). |
 
 ```bash

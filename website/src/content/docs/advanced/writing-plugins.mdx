@@ -5,7 +5,7 @@ description: Build custom external modules for glidesh using the JSON-over-stdio
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-External modules are standalone executables that communicate with glidesh via newline-delimited JSON on stdin/stdout. They can be written in any language — scripted or compiled. Plugins never receive SSH credentials — they request operations through glidesh, which proxies them over the existing SSH session.
+External modules are standalone executables that communicate with glidesh via newline-delimited JSON on stdin/stdout. They can be written in any language — scripted or compiled. Plugins never receive SSH credentials — they request operations through glidesh, which proxies them over the existing SSH session. They do not receive the [secrets vault](/concepts/secrets/) either: a plugin sees only the secrets the plan passes it as arguments.
 
 ## Protocol Overview
 
@@ -63,6 +63,15 @@ After the handshake, glidesh sends `check` or `apply` requests:
     "dry_run": false
 }
 ```
+
+:::note[`vars` never carries the vault]
+Any variable whose value holds a decrypted secret is stripped from `vars` before the request is
+sent — including values that merely embed one, such as a connection string built from a password.
+Arguments are interpolated first, so a secret the plan passes explicitly
+(`external "acme/widget" "app" token="${api-token}"`) still arrives in `args`. If your plugin needs
+a secret, document that the plan must pass it as an argument. See
+[Secrets](/concepts/secrets/#what-external-plugins-see).
+:::
 
 ### Check Response
 
@@ -542,6 +551,8 @@ glidesh runs every plugin process inside a sandbox:
 | Measure | Platform | Effect |
 |---------|----------|--------|
 | **Env scrub** | All | Only `PATH`, `HOME`/`USERPROFILE`, `LANG`, temp dir vars are passed. Secrets are stripped. |
+| **Vault isolation** | All | Secret-carrying values are stripped from the request's `vars`; a plugin sees only what the plan passes it explicitly. |
+| **stderr redaction** | All | Plugin stderr is scrubbed of decrypted secrets before it reaches the debug log. |
 | **Temp workdir** | All | Plugin CWD is the system temp directory, not the project directory. |
 | **Session isolation** | Unix | `setsid()` — plugin cannot signal glidesh's process group. |
 | **Filesystem restriction** | Linux 5.13+ | [landlock](https://docs.kernel.org/userspace-api/landlock.html) limits access to `/tmp`, `/usr`, `/lib`, `/lib64`. Home dirs, project files, and SSH keys are blocked. |
@@ -556,6 +567,6 @@ Landlock filesystem restriction is **only available on Linux 5.13+**. On macOS a
 
 - Use `dry_run` in the check/apply request to avoid side effects during `--dry-run` runs
 - The `os_info` field tells you the target OS, package manager, and init system — use it to adapt behavior
-- Template variables from the plan are available in `vars` — the plugin receives them already interpolated
+- Template variables from the plan are available in `vars` — the plugin receives them already interpolated, minus any value carrying a secret (pass those explicitly as arguments)
 - Keep plugins stateless between check and apply — glidesh may call them in any order
 - Return descriptive `plan` messages in `Pending` responses — they appear in dry-run output

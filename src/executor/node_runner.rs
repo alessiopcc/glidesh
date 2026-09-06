@@ -470,6 +470,7 @@ impl NodeRunner {
                 dry_run: self.dry_run,
                 plan_base_dir: &self.plan_base_dir,
                 run_as,
+                secrets: Some(self.secrets.registry()),
             };
 
             let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {

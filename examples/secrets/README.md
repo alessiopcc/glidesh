@@ -25,11 +25,26 @@ though the shell commands echo them — because decrypted values are redacted at
 ```bash
 export GLIDESH_SECRET_PASS=example
 
+glidesh secret list          --file secrets.kdl       # what the file holds (no passphrase)
 glidesh secret set db-password --file secrets.kdl     # prompts for the new value
 glidesh secret get db-password --file secrets.kdl     # decrypt and print
-glidesh secret edit          --file secrets.kdl       # edit all values in $EDITOR
-glidesh secret rekey         --file secrets.kdl        # rotate the passphrase (values unchanged)
+glidesh secret rm  api-token   --file secrets.kdl     # delete a value
+glidesh secret edit          --file secrets.kdl       # edit all values in $VISUAL/$EDITOR
+glidesh secret rekey         --file secrets.kdl       # change the passphrase (values unchanged)
+glidesh secret rekey --rotate-data-key --file secrets.kdl   # replace the key itself
 ```
+
+## Sharing with a team
+
+This example uses one shared passphrase. To give each person their own key instead, initialize with
+the `age` provider and their SSH public keys — then `secret recipients add` / `rm` grants and
+revokes access per person, with no shared secret to distribute:
+
+```bash
+glidesh secret init --provider age --recipient ~/.ssh/id_ed25519.pub --file team.kdl
+```
+
+See the [Secrets documentation](https://glidesh.dev/concepts/secrets/#sharing-a-vault-with-a-team).
 
 ## How it works
 

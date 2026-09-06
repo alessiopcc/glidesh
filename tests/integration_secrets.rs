@@ -5,7 +5,7 @@ use glidesh::modules::shell::ShellModule;
 use glidesh::modules::{Module, ModuleParams};
 use glidesh::secrets::config::{Provider, SecretsConfig};
 use glidesh::secrets::passphrase::{PassphraseProvider, generate_dek};
-use glidesh::secrets::{Secrets, token};
+use glidesh::secrets::{Identity, Secrets, token};
 use std::collections::HashMap;
 
 /// A secret value decrypts, flows into an interpolated shell command run over real SSH,
@@ -20,11 +20,12 @@ async fn secret_value_reaches_remote_command_and_is_redacted() {
     let cfg = SecretsConfig {
         provider: Provider::Passphrase,
         encryptedkey: wrapped,
+        recipients: Vec::new(),
     };
     let token = token::encrypt_value(&dek, b"s3cr3t-value").unwrap();
 
     // Unlock and run the up-front decrypt sweep the executor performs per host.
-    let secrets = Secrets::open(Some(&cfg), Some("pw")).unwrap();
+    let secrets = Secrets::open(Some(&cfg), Some(&Identity::Passphrase("pw".into()))).unwrap();
     let mut vars: HashMap<String, String> = HashMap::from([("db_password".to_string(), token)]);
     secrets.decrypt_vars(&mut vars).unwrap();
     assert_eq!(vars.get("db_password").unwrap(), "s3cr3t-value");

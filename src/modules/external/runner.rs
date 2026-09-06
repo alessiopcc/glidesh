@@ -4,7 +4,11 @@ use crate::modules::external::protocol::{
     CheckResponse, ModuleRequest, PluginMessage, ShutdownRequest, SshRequest, SshResponse,
 };
 use crate::modules::{ModuleParams, ModuleResult, ModuleStatus};
+use crate::secrets::SecretRegistry;
 use async_trait::async_trait;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
@@ -23,7 +27,7 @@ impl ExternalModule {
         Self { info }
     }
 
-    fn spawn_plugin(&self) -> Result<Child, GlideshError> {
+    fn spawn_plugin(&self, secrets: Option<Arc<SecretRegistry>>) -> Result<Child, GlideshError> {
         let mut cmd = super::discovery::build_tokio_command(&self.info);
         super::sandbox::apply_runtime_sandbox(&mut cmd, &self.info.name);
         cmd.stdin(std::process::Stdio::piped())
@@ -47,6 +51,13 @@ impl ExternalModule {
                 while reader.read_line(&mut buf).await.unwrap_or(0) > 0 {
                     let line = buf.trim_end();
                     if !line.is_empty() {
+                        // A plugin may echo a value the plan handed it. This log line does
+                        // not pass through the executor's EventSink, so scrub it here or
+                        // `RUST_LOG=glidesh=debug` would print secrets in the clear.
+                        let line = match &secrets {
+                            Some(registry) => registry.redact(line),
+                            None => line.to_string(),
+                        };
                         tracing::debug!(plugin = %name, "stderr: {}", line);
                     }
                     buf.clear();
@@ -63,7 +74,7 @@ impl ExternalModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<PluginMessage, GlideshError> {
-        let mut child = self.spawn_plugin()?;
+        let mut child = self.spawn_plugin(ctx.secrets.clone())?;
 
         let stdin = child.stdin.take().ok_or_else(|| GlideshError::Module {
             module: self.info.name.clone(),
@@ -117,12 +128,13 @@ impl ExternalModule {
         W: tokio::io::AsyncWrite + Unpin,
         R: tokio::io::AsyncRead + Unpin,
     {
+        let visible = visible_vars(ctx.vars, ctx.secrets.as_deref());
         let request = ModuleRequest {
             method,
             resource_name: &params.resource_name,
             args: &params.args,
             os_info: ctx.os_info,
-            vars: ctx.vars,
+            vars: visible.as_ref(),
             dry_run: ctx.dry_run,
         };
 
@@ -148,6 +160,30 @@ impl ExternalModule {
                 terminal => return Ok(terminal),
             }
         }
+    }
+}
+
+/// The variables an external plugin is allowed to see.
+///
+/// A plugin is a third-party executable, so the vault is not its to read: every var whose
+/// value carries a decrypted secret is withheld. Nothing the plan asked for is lost by
+/// this — whatever it explicitly wired into the task (a `${db-password}` reference in an
+/// argument, or an inline `secret:v1:` token) has already been interpolated into
+/// `resource_name` and `args` by the executor. The plugin therefore receives exactly the
+/// secrets the plan chose to hand it, and no others.
+fn visible_vars<'a>(
+    vars: &'a HashMap<String, String>,
+    secrets: Option<&SecretRegistry>,
+) -> Cow<'a, HashMap<String, String>> {
+    match secrets {
+        Some(registry) if !registry.is_empty() => Cow::Owned(
+            vars.iter()
+                .filter(|(_, value)| !registry.contains_secret(value))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        ),
+        // No secrets in this run: nothing to withhold, and no map to rebuild.
+        _ => Cow::Borrowed(vars),
     }
 }
 
@@ -374,6 +410,7 @@ async fn read_line<R: tokio::io::AsyncRead + Unpin>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::modules::external::protocol::*;
 
     #[test]
@@ -467,5 +504,68 @@ mod tests {
         // `nix_installed: false` must be omitted so the wire format stays
         // unchanged for non-Nix hosts (protocol v1 compatibility).
         assert!(!json.contains("nix_installed"));
+    }
+
+    /// A registry populated the way a real run populates it: by decrypting a token.
+    fn registry_holding(plaintext: &str) -> Arc<SecretRegistry> {
+        use crate::secrets::config::{Provider, SecretsConfig};
+        use crate::secrets::passphrase::{PassphraseProvider, generate_dek};
+        use crate::secrets::{Identity, Secrets, token};
+        let dek = generate_dek();
+        let wrapped = PassphraseProvider::new("pw".into()).wrap_dek(&dek).unwrap();
+        let cfg = SecretsConfig {
+            provider: Provider::Passphrase,
+            encryptedkey: wrapped,
+            recipients: Vec::new(),
+        };
+        let secrets = Secrets::open(Some(&cfg), Some(&Identity::Passphrase("pw".into()))).unwrap();
+        let tok = token::encrypt_value(&dek, plaintext.as_bytes()).unwrap();
+        secrets.decrypt_token(&tok).unwrap();
+        secrets.registry()
+    }
+
+    #[test]
+    fn secret_bearing_vars_are_withheld_from_plugins() {
+        let registry = registry_holding("hunter2");
+        let vars = HashMap::from([
+            ("db-password".to_string(), "hunter2".to_string()),
+            (
+                "dsn".to_string(),
+                "postgres://app:hunter2@db/prod".to_string(),
+            ),
+            ("region".to_string(), "us-east-1".to_string()),
+        ]);
+
+        let visible = visible_vars(&vars, Some(&registry));
+
+        // The whole-value secret and the connection string embedding it are both gone.
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible.get("region").unwrap(), "us-east-1");
+        assert!(!visible.contains_key("db-password"));
+        assert!(!visible.contains_key("dsn"));
+    }
+
+    #[test]
+    fn a_run_without_secrets_hands_over_the_map_unchanged() {
+        let vars = HashMap::from([("region".to_string(), "us-east-1".to_string())]);
+        let empty = crate::secrets::Secrets::locked().registry();
+
+        assert!(matches!(visible_vars(&vars, None), Cow::Borrowed(_)));
+        assert!(matches!(
+            visible_vars(&vars, Some(&empty)),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(visible_vars(&vars, None).len(), 1);
+    }
+
+    #[test]
+    fn plugin_stderr_is_scrubbed_before_it_reaches_the_log() {
+        // The stderr pump logs through tracing, not the EventSink, so it scrubs its own
+        // lines; this is the transform it applies.
+        let registry = registry_holding("hunter2");
+        assert_eq!(
+            registry.redact("connecting with hunter2"),
+            "connecting with ***"
+        );
     }
 }

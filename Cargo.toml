@@ -36,6 +36,7 @@ chacha20poly1305 = "0.10"
 scrypt = "0.11"
 zeroize = "1"
 rand = "0.8"
+age = { version = "0.12.1", features = ["ssh"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
