@@ -36,6 +36,12 @@ pub enum GlideshError {
     #[error("Template interpolation error: {message}")]
     TemplateError { message: String },
 
+    #[error("Secret error: {message}")]
+    #[diagnostic(help(
+        "Manage secrets with `glidesh secret`; unlock with GLIDESH_SECRET_PASS or --ask-secret-pass"
+    ))]
+    Secret { message: String },
+
     #[error("Module error in {module}: {message}")]
     Module { module: String, message: String },
 

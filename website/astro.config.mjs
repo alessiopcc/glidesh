@@ -23,6 +23,7 @@ export default defineConfig({
 						{ label: 'Plans', slug: 'concepts/plans' },
 						{ label: 'Execution Modes', slug: 'concepts/execution-modes' },
 						{ label: 'Variables', slug: 'concepts/variables' },
+						{ label: 'Secrets', slug: 'concepts/secrets' },
 						{ label: 'TUI', slug: 'concepts/tui' },
 						{ label: 'Logs', slug: 'concepts/logs' },
 					],

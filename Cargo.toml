@@ -32,6 +32,11 @@ russh-sftp = "2.1"
 sha2 = "0.11"
 base64 = "0.22"
 rpassword = "7"
+chacha20poly1305 = "0.10"
+scrypt = "0.11"
+zeroize = "1"
+rand = "0.8"
+age = { version = "0.12.1", features = ["ssh"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -44,4 +49,3 @@ tempfile = "3"
 tokio-test = "0.4"
 assert_cmd = "2"
 predicates = "3"
-rand = "0.8"

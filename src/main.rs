@@ -1,6 +1,7 @@
 mod cli;
 mod executor;
 mod logging;
+mod secret_cmd;
 mod tui;
 
 use clap::Parser;
@@ -11,8 +12,15 @@ use glidesh::config::template::TemplateData;
 use glidesh::config::types::{ExecutionMode, Inventory, RunAsMethod, RunAsSpec, RunAsUser};
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
+use glidesh::secrets::{
+    config as secrets_config, passphrase as secret_passphrase, store as secret_store,
+};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use logging::RunLogger;
+use secret_cmd::{
+    cmd_secret, read_pass_file, secret_identity_path, secret_pass_file_from_env,
+    secret_pass_from_env,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +63,7 @@ async fn main() -> miette::Result<()> {
         Some(Commands::Logs(args)) => cmd_logs(args)?,
         Some(Commands::Validate(args)) => cmd_validate(args)?,
         Some(Commands::Console(args)) => cmd_console(args).await?,
+        Some(Commands::Secret(args)) => cmd_secret(args)?,
         None => cmd_console(cli::ConsoleArgs::default()).await?,
     }
 
@@ -92,6 +101,27 @@ fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, Glidesh
     if args.ask_pass {
         let p = rpassword::prompt_password("run-as password: ")
             .map_err(|e| GlideshError::Other(format!("Failed to read password: {}", e)))?;
+        return Ok(Some(p));
+    }
+    Ok(None)
+}
+
+/// Source the secrets passphrase, most explicit first: `--secret-pass-file`, then
+/// `GLIDESH_SECRET_PASS`, then `GLIDESH_SECRET_PASS_FILE`, then `--ask-secret-pass`.
+/// A flag the operator typed for this run outranks whatever the environment carries.
+fn source_secret_pass(args: &cli::RunArgs) -> Result<Option<String>, GlideshError> {
+    if let Some(path) = &args.secret_pass_file {
+        return Ok(Some(read_pass_file(&expand_tilde(path))?));
+    }
+    if let Some(p) = secret_pass_from_env() {
+        return Ok(Some(p));
+    }
+    if let Some(p) = secret_pass_file_from_env()? {
+        return Ok(Some(p));
+    }
+    if args.ask_secret_pass {
+        let p = rpassword::prompt_password("secret passphrase: ")
+            .map_err(|e| GlideshError::Other(format!("Failed to read passphrase: {}", e)))?;
         return Ok(Some(p));
     }
     Ok(None)
@@ -171,6 +201,43 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         .and_then(|p| p.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
+    // Discover and load secrets.kdl: its provider block configures decryption, and its
+    // variable nodes merge in at the inventory-global tier (lowest, overridable).
+    let secrets_arg = args.secrets.as_ref().map(|p| expand_tilde(p));
+    let secrets_path =
+        glidesh::secrets::config::discover_secrets_path(secrets_arg.as_deref(), Some(inv_base_dir));
+    let mut secret_vars: HashMap<String, String> = HashMap::new();
+    let mut secret_structured: HashMap<String, Vec<HashMap<String, String>>> = HashMap::new();
+    let mut secrets_config = None;
+    if let Some(ref sp) = secrets_path {
+        let content = glidesh::secrets::store::read(sp)?;
+        let sf = glidesh::secrets::config::parse_secrets_file(&content)?;
+        secrets_config = sf.config;
+        secret_vars = sf.vars;
+        secret_structured = sf.structured;
+    }
+    // Which credential to look for depends on how the file was wrapped, so this happens
+    // after the config is parsed rather than from the flags alone.
+    let identity = match secrets_config.as_ref().map(|c| &c.provider) {
+        Some(glidesh::secrets::config::Provider::Age) => Some(glidesh::secrets::Identity::SshKey(
+            secret_identity_path(args.secret_identity.as_deref(), args.key.as_deref()),
+        )),
+        _ => source_secret_pass(&args)?.map(glidesh::secrets::Identity::Passphrase),
+    };
+    glidesh::secrets::set_identity(identity);
+    let secrets =
+        glidesh::secrets::Secrets::open(secrets_config.as_ref(), glidesh::secrets::identity())?;
+
+    // Secret-file scalars sit under the inventory-global vars (inline global wins).
+    let inventory = inventory.map(|mut inv| {
+        for (k, v) in &secret_vars {
+            inv.global_vars
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        inv
+    });
+
     let inv_template_data = Arc::new(
         inventory
             .as_ref()
@@ -195,6 +262,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
         config::resolve_includes(&mut plan, plan_base_dir)?;
+        merge_secret_structured(&mut plan, &secret_structured);
 
         if args.mode == "async" {
             plan.mode = ExecutionMode::Async;
@@ -202,12 +270,15 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
         let targets = if let Some(ref host) = args.host {
             let user = args.user.as_deref().unwrap_or("root").to_string();
+            // Without an inventory, secret-file scalars are the lowest tier under plan vars.
+            let mut host_vars = secret_vars.clone();
+            host_vars.extend(plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
             vec![config::types::ResolvedHost {
                 name: host.clone(),
                 address: host.clone(),
                 user,
                 port: args.port,
-                vars: plan.vars.clone(),
+                vars: host_vars,
                 jump: None,
                 run_as: cli_run_as.clone(),
             }]
@@ -326,6 +397,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             let mut plan = config::parse_plan(&fp_content)?;
             let include_base = resolved_path.parent().unwrap_or(inv_base_dir);
             config::resolve_includes(&mut plan, include_base)?;
+            merge_secret_structured(&mut plan, &secret_structured);
 
             if args.mode == "async" {
                 plan.mode = ExecutionMode::Async;
@@ -381,11 +453,24 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         group_plans,
         registry,
         key,
+        secrets,
         &run_name,
         &all_host_names,
         &args,
     )
     .await
+}
+
+/// Merge secret-file structured vars into a plan (the plan's own value wins on conflict).
+fn merge_secret_structured(
+    plan: &mut config::types::Plan,
+    secret_structured: &HashMap<String, Vec<HashMap<String, String>>>,
+) {
+    for (k, v) in secret_structured {
+        plan.structured_vars
+            .entry(k.clone())
+            .or_insert_with(|| v.clone());
+    }
 }
 
 fn display_id(host: &str, display_ids: &std::collections::HashMap<String, String>) -> String {
@@ -598,6 +683,27 @@ fn show_run_details(
     Ok(())
 }
 
+/// The provider-specific tail of a `validate` line: how many people can open an age file,
+/// or how strongly a passphrase file's key is wrapped. Blobs are self-describing, so a file
+/// created by a development build keeps its low scrypt cost forever unless someone is told —
+/// this is where they are told.
+fn provider_detail(cfg: &secrets_config::SecretsConfig) -> String {
+    match cfg.provider {
+        secrets_config::Provider::Age => format!(", {} recipient(s)", cfg.recipients.len()),
+        secrets_config::Provider::Passphrase => {
+            match secret_passphrase::wrap_cost(&cfg.encryptedkey) {
+                Some(cost) if cost < secret_passphrase::current_cost() => format!(
+                    ", key wrapped at scrypt cost 2^{cost}, below this build's default of \
+                     2^{}: run `glidesh secret rekey` to strengthen it",
+                    secret_passphrase::current_cost()
+                ),
+                Some(cost) => format!(", key wrapped at scrypt cost 2^{cost}"),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     let mut valid = true;
 
@@ -634,6 +740,31 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
                     valid = false;
                 }
             },
+            Err(e) => {
+                println!("FAILED: {}", e);
+                valid = false;
+            }
+        }
+    }
+
+    // A secrets file beside the inventory is part of the configuration a run will load, so
+    // check it here rather than letting a malformed provider block surface mid-deploy. Only
+    // the file is parsed — validating never needs the passphrase.
+    let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
+    if let Some(path) = secrets_config::discover_secrets_path(None, inv_dir) {
+        print!("Validating secrets '{}'... ", path.display());
+        match secret_store::read(&path).and_then(|c| secrets_config::parse_secrets_file(&c)) {
+            Ok(secrets_file) => {
+                let count = secrets_file.vars.len() + secrets_file.structured.len();
+                match secrets_file.config {
+                    Some(cfg) => println!(
+                        "OK ({count} values, provider {}{})",
+                        cfg.provider.as_str(),
+                        provider_detail(&cfg)
+                    ),
+                    None => println!("OK ({count} values, no provider block)"),
+                }
+            }
             Err(e) => {
                 println!("FAILED: {}", e);
                 valid = false;
@@ -952,6 +1083,7 @@ async fn run_with_ui(
     group_plans: Vec<executor::GroupPlan>,
     registry: Arc<ModuleRegistry>,
     key: russh_keys::key::PrivateKeyWithHashAlg,
+    secrets: Arc<glidesh::secrets::Secrets>,
     run_name: &str,
     host_names: &[(String, String, String)],
     args: &cli::RunArgs,
@@ -1022,6 +1154,7 @@ async fn run_with_ui(
                 concurrency,
                 dry_run,
                 host_key_policy,
+                secrets,
                 combined_tx,
             )
             .await
@@ -1075,6 +1208,7 @@ async fn run_with_ui(
             concurrency,
             dry_run,
             host_key_policy,
+            secrets,
             event_tx,
         )
         .await?;
@@ -1109,5 +1243,70 @@ fn expand_tilde(path: &std::path::Path) -> PathBuf {
             .join(rest)
     } else {
         path.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wrapped-key blob with a chosen cost byte. `wrap_cost` reads only that byte, so the
+    /// rest need not be real ciphertext.
+    fn blob_at(cost: u8) -> String {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        format!("v1:{}", URL_SAFE_NO_PAD.encode([cost, 0, 0, 0]))
+    }
+
+    fn passphrase_cfg(encryptedkey: String) -> secrets_config::SecretsConfig {
+        secrets_config::SecretsConfig {
+            provider: secrets_config::Provider::Passphrase,
+            encryptedkey,
+            recipients: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validate_nudges_a_key_wrapped_below_the_current_cost() {
+        let current = secret_passphrase::current_cost();
+        let weak = provider_detail(&passphrase_cfg(blob_at(current - 1)));
+        assert!(weak.contains("secret rekey"), "no nudge: {weak}");
+        assert!(weak.contains(&format!("2^{}", current - 1)), "{weak}");
+
+        // At the current cost there is nothing to say beyond the cost itself.
+        let fine = provider_detail(&passphrase_cfg(blob_at(current)));
+        assert!(fine.contains(&format!("2^{current}")), "{fine}");
+        assert!(!fine.contains("rekey"), "spurious nudge: {fine}");
+    }
+
+    #[test]
+    fn validate_reports_recipient_count_for_age_files() {
+        let cfg = secrets_config::SecretsConfig {
+            provider: secrets_config::Provider::Age,
+            encryptedkey: "agev1:AAAA".to_string(),
+            recipients: vec![glidesh::secrets::config::SecretRecipient {
+                name: "alice".to_string(),
+                key: "ssh-ed25519 AAAA".to_string(),
+            }],
+        };
+        let detail = provider_detail(&cfg);
+        assert!(detail.contains("1 recipient(s)"), "{detail}");
+        // An age blob has no scrypt cost to report.
+        assert!(!detail.contains("scrypt"), "{detail}");
+    }
+
+    #[test]
+    fn pass_file_flag_outranks_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pass");
+        std::fs::write(&path, "from-file\n").unwrap();
+        // Parsed the way the CLI parses it, so this also pins the flag's spelling.
+        let args =
+            cli::RunArgs::try_parse_from(["run", "--secret-pass-file", path.to_str().unwrap()])
+                .unwrap();
+        // Holds whether or not GLIDESH_SECRET_PASS is set in this environment.
+        assert_eq!(
+            source_secret_pass(&args).unwrap().as_deref(),
+            Some("from-file")
+        );
     }
 }

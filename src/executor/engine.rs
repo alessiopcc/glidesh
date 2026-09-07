@@ -1,3 +1,4 @@
+use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::HostCoordinator;
 use crate::executor::node_runner::NodeRunner;
 use crate::executor::result::{ExecutorEvent, NodeResult, RunSummary};
@@ -5,6 +6,7 @@ use glidesh::config::template::TemplateData;
 use glidesh::config::types::{Plan, ResolvedHost};
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
+use glidesh::secrets::Secrets;
 use glidesh::ssh::HostKeyPolicy;
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::path::PathBuf;
@@ -21,6 +23,7 @@ pub struct Engine {
     pub host_key_policy: HostKeyPolicy,
     pub inventory_template_data: Arc<TemplateData>,
     pub plan_base_dir: Arc<PathBuf>,
+    pub secrets: Arc<Secrets>,
 }
 
 impl Engine {
@@ -37,6 +40,7 @@ impl Engine {
         let inv_data = self.inventory_template_data.clone();
         let all_targets: Arc<Vec<ResolvedHost>> = Arc::new(self.targets.clone());
         let coordinator: Arc<HostCoordinator> = Arc::new(HostCoordinator::new());
+        let sink = EventSink::new(event_tx.clone(), self.secrets.registry());
 
         for host in self.targets {
             let sem = semaphore.clone();
@@ -45,11 +49,12 @@ impl Engine {
             let key = self.key.clone();
             let dry_run = self.dry_run;
             let host_key_policy = self.host_key_policy;
-            let tx = event_tx.clone();
+            let tx = sink.clone();
             let inv = inv_data.clone();
             let base_dir = self.plan_base_dir.clone();
             let coord = coordinator.clone();
             let targets = all_targets.clone();
+            let secrets = self.secrets.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
@@ -65,6 +70,7 @@ impl Engine {
                     plan_base_dir: base_dir,
                     coordinator: coord,
                     all_targets: targets,
+                    secrets,
                 };
                 runner.run().await
             });
@@ -108,6 +114,7 @@ pub struct GroupPlan {
 /// Run multiple group-plan pairs concurrently. Each group's hosts execute
 /// their plan with sync semantics within the group, but groups are fully
 /// independent of each other.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     group_plans: Vec<GroupPlan>,
     registry: Arc<ModuleRegistry>,
@@ -115,6 +122,7 @@ pub async fn run(
     concurrency: usize,
     dry_run: bool,
     host_key_policy: HostKeyPolicy,
+    secrets: Arc<Secrets>,
     event_tx: mpsc::UnboundedSender<ExecutorEvent>,
 ) -> Result<RunSummary, GlideshError> {
     let mut group_handles = Vec::new();
@@ -123,6 +131,7 @@ pub async fn run(
         let reg = registry.clone();
         let k = key.clone();
         let tx = event_tx.clone();
+        let secrets = secrets.clone();
 
         let handle = tokio::spawn(async move {
             let engine = Engine {
@@ -135,6 +144,7 @@ pub async fn run(
                 host_key_policy,
                 inventory_template_data: gp.inventory_template_data,
                 plan_base_dir: gp.plan_base_dir,
+                secrets,
             };
             // Use a local channel so RunComplete events don't fire per-group.
             // Instead, forward all events except RunComplete to the parent.

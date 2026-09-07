@@ -60,8 +60,9 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
             "vars" => {
                 if let Some(vc) = node.children() {
                     for vnode in vc.nodes() {
+                        super::validate_user_var_name(vnode.name().value())?;
                         let key = vnode.name().to_string();
-                        if let Some(list_of_maps) = parse_structured_var(vnode) {
+                        if let Some(list_of_maps) = super::parse_structured_var(vnode) {
                             if structured_vars.contains_key(&key) || vars.contains_key(&key) {
                                 return Err(GlideshError::ConfigParse {
                                     message: format!(
@@ -84,7 +85,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                                 .entries()
                                 .iter()
                                 .find(|e| e.name().is_none())
-                                .map(|e| kdl_value_to_string(e.value()))
+                                .map(|e| super::kdl_value_to_string(e.value()))
                                 .unwrap_or_default();
                             vars.insert(key, value);
                         }
@@ -229,6 +230,7 @@ fn resolve_vars_files(
                 })?;
         let mut seen_in_file: HashSet<String> = HashSet::new();
         for vnode in doc.nodes() {
+            super::validate_user_var_name(vnode.name().value())?;
             let key = vnode.name().to_string();
             if !seen_in_file.insert(key.clone()) {
                 return Err(GlideshError::ConfigParse {
@@ -249,7 +251,7 @@ fn resolve_vars_files(
                 });
             }
             seen_across_files.insert(key.clone(), path.clone());
-            if let Some(list_of_maps) = parse_structured_var(vnode) {
+            if let Some(list_of_maps) = super::parse_structured_var(vnode) {
                 // Inline structured vars win — only insert if not already present
                 structured_vars.entry(key).or_insert(list_of_maps);
             } else {
@@ -257,7 +259,7 @@ fn resolve_vars_files(
                     .entries()
                     .iter()
                     .find(|e| e.name().is_none())
-                    .map(|e| kdl_value_to_string(e.value()))
+                    .map(|e| super::kdl_value_to_string(e.value()))
                     .unwrap_or_default();
                 // Inline vars win — only insert if not already present
                 vars.entry(key).or_insert(value);
@@ -337,42 +339,6 @@ fn resolve_items(
         }
     }
     Ok(result)
-}
-
-/// Detect whether a vars node is a structured list-of-maps (for template loops).
-///
-/// Returns `Some(list)` if the node has children that are all `"-"` nodes
-/// with at least one named property. Returns `None` for scalar or plain-list vars.
-fn parse_structured_var(node: &kdl::KdlNode) -> Option<Vec<HashMap<String, String>>> {
-    let children = node.children()?;
-    let nodes = children.nodes();
-    if nodes.is_empty() {
-        return None;
-    }
-    if !nodes.iter().all(|n| n.name().to_string() == "-") {
-        return None;
-    }
-    // Must have at least one named property to distinguish from plain lists
-    let has_named = nodes
-        .iter()
-        .any(|n| n.entries().iter().any(|e| e.name().is_some()));
-    if !has_named {
-        return None;
-    }
-
-    let items = nodes
-        .iter()
-        .map(|n| {
-            let mut map = HashMap::new();
-            for entry in n.entries() {
-                if let Some(name) = entry.name() {
-                    map.insert(name.to_string(), kdl_value_to_string(entry.value()));
-                }
-            }
-            map
-        })
-        .collect();
-    Some(items)
 }
 
 fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
@@ -467,6 +433,9 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
             let key = name.to_string();
             if key == "register" {
                 register = entry.value().as_string().map(|s| s.to_string());
+                if let Some(ref name) = register {
+                    super::validate_user_var_name(name)?;
+                }
             } else if key == "run-as" || key == "run-as-method" {
                 // Captured separately as the task's escalation, not a module arg.
             } else {
@@ -510,7 +479,7 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
                         .entries()
                         .iter()
                         .find(|e| e.name().is_none())
-                        .map(|e| kdl_value_to_string(e.value()))
+                        .map(|e| super::kdl_value_to_string(e.value()))
                         .unwrap_or_default();
                     map.insert(mk, mv);
                 }
@@ -545,16 +514,6 @@ fn kdl_value_to_param(value: &kdl::KdlValue) -> ParamValue {
         kdl::KdlValue::Bool(b) => ParamValue::Bool(*b),
         kdl::KdlValue::Float(f) => ParamValue::String(f.to_string()),
         kdl::KdlValue::Null => ParamValue::String(String::new()),
-    }
-}
-
-fn kdl_value_to_string(value: &kdl::KdlValue) -> String {
-    match value {
-        kdl::KdlValue::String(s) => s.clone(),
-        kdl::KdlValue::Integer(i) => i.to_string(),
-        kdl::KdlValue::Bool(b) => b.to_string(),
-        kdl::KdlValue::Float(f) => f.to_string(),
-        kdl::KdlValue::Null => String::new(),
     }
 }
 
@@ -730,7 +689,7 @@ plan "test" {
         let input = r#"
 plan "test" {
     step "Format each" loop="${disks}" {
-        disk "${item}" fs="ext4"
+        disk "${@item}" fs="ext4"
     }
 }
 "#;
@@ -880,7 +839,7 @@ plan "parent" {
         let input = r#"
 plan "test" {
     step "Iterate" loop="alpha" {
-        shell "echo ${item}"
+        shell "echo ${@item}"
     }
 }
 "#;
@@ -899,7 +858,7 @@ plan "test" {
         shell "ls /dev" register="devices"
     }
     step "Process" loop="${devices}" {
-        shell "echo ${item}"
+        shell "echo ${@item}"
     }
 }
 "#;
@@ -1374,6 +1333,20 @@ plan "test" {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reserved_at_var_name_rejected_in_plan() {
+        let input = "plan \"p\" {\n    vars {\n        \"@item\" \"x\"\n    }\n    step \"s\" { shell \"echo\" }\n}";
+        let err = parse_plan(input).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "got: {err}");
+    }
+
+    #[test]
+    fn reserved_at_register_name_rejected() {
+        let input = "plan \"p\" {\n    step \"s\" { shell \"echo\" register=\"@out\" }\n}";
+        let err = parse_plan(input).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "got: {err}");
     }
 
     #[test]

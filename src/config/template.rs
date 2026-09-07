@@ -9,7 +9,7 @@ pub static EMPTY_TEMPLATE_DATA: std::sync::LazyLock<TemplateData> =
 #[derive(Debug, Clone, Default)]
 pub struct TemplateData {
     /// Named collections for `${for item in collection}` loops.
-    /// Each collection is a list of maps with string fields accessible via `${item.field}`.
+    /// Each collection is a list of maps with string fields accessible via `${binding.field}`.
     pub collections: HashMap<String, Vec<HashMap<String, String>>>,
     /// Extra flat vars (e.g., `@inventory.host.address`) injected alongside user vars.
     pub extra_vars: HashMap<String, String>,
@@ -65,6 +65,16 @@ fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, Glid
             });
         }
         let binding = parts[1];
+        // The for-binding introduces `${binding.*}` into the loop body's scope, so it is a
+        // variable-name declaration like any other: it may not shadow a reserved `@` namespace.
+        if binding.starts_with('@') {
+            return Err(GlideshError::TemplateError {
+                message: format!(
+                    "for-loop binding '{}' cannot use the reserved '@' namespace",
+                    binding
+                ),
+            });
+        }
         let collection_name = parts[3];
 
         // Parse optional separator="..." from the header
@@ -327,6 +337,19 @@ mod tests {
         let template = "before\n${for x in items}${x.name}\n${endfor}after";
         let result = render(template, &vars, &data).unwrap();
         assert_eq!(result, "before\nafter");
+    }
+
+    #[test]
+    fn for_binding_cannot_use_reserved_at_namespace() {
+        let vars = HashMap::new();
+        let mut data = TemplateData::default();
+        data.collections.insert(
+            "items".to_string(),
+            vec![HashMap::from([("name".to_string(), "a".to_string())])],
+        );
+        let template = "${for @host in items}${@host.name}${endfor}";
+        let err = render(template, &vars, &data).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "got: {err}");
     }
 
     #[test]

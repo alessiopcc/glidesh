@@ -312,6 +312,7 @@ fn parse_jump(node: &kdl::KdlNode) -> Result<JumpHost, GlideshError> {
 fn parse_vars_block(doc: &kdl::KdlDocument) -> Result<HashMap<String, String>, GlideshError> {
     let mut vars = HashMap::new();
     for node in doc.nodes() {
+        super::validate_user_var_name(node.name().value())?;
         let key = node.name().to_string();
         if vars.contains_key(&key) {
             return Err(GlideshError::ConfigParse {
@@ -322,21 +323,11 @@ fn parse_vars_block(doc: &kdl::KdlDocument) -> Result<HashMap<String, String>, G
             .entries()
             .iter()
             .find(|e| e.name().is_none())
-            .map(|e| kdl_value_to_string(e.value()))
+            .map(|e| super::kdl_value_to_string(e.value()))
             .unwrap_or_default();
         vars.insert(key, value);
     }
     Ok(vars)
-}
-
-fn kdl_value_to_string(value: &kdl::KdlValue) -> String {
-    match value {
-        kdl::KdlValue::String(s) => s.clone(),
-        kdl::KdlValue::Integer(i) => i.to_string(),
-        kdl::KdlValue::Bool(b) => b.to_string(),
-        kdl::KdlValue::Float(f) => f.to_string(),
-        kdl::KdlValue::Null => String::new(),
-    }
 }
 
 #[cfg(test)]
@@ -778,6 +769,18 @@ group "web" run-as="root" run-as-method="doas" {
         let input = r#"host "w1" "10.0.0.1" run-as="root" run-as-method="bogus""#;
         let err = parse_inventory(input).unwrap_err().to_string();
         assert!(err.contains("Unknown run-as-method"), "got: {}", err);
+    }
+
+    #[test]
+    fn reserved_at_var_name_rejected() {
+        // A user may not declare a variable in the reserved `@` namespace, even quoted.
+        for input in [
+            "vars {\n    @host \"nope\"\n}\nhost \"h\" \"10.0.0.1\"\n",
+            "vars {\n    \"@host\" \"nope\"\n}\nhost \"h\" \"10.0.0.1\"\n",
+        ] {
+            let err = parse_inventory(input).unwrap_err().to_string();
+            assert!(err.contains("reserved") || err.contains('@'), "got: {err}");
+        }
     }
 
     #[test]

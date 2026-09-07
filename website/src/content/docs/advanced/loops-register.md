@@ -23,7 +23,7 @@ The output is trimmed of leading/trailing whitespace before being stored.
 
 ## Step Loops
 
-Use `loop="${var_name}"` on a step to iterate over newline-separated values. Each iteration injects the current value as `${item}`:
+Use `loop="${var_name}"` on a step to iterate over newline-separated values. Each iteration injects the current value as `${@item}`:
 
 ```kdl
 step "List disks" {
@@ -31,9 +31,9 @@ step "List disks" {
 }
 
 step "Format each disk" loop="${disks}" {
-    disk "/dev/${item}" {
+    disk "/dev/${@item}" {
         fs "ext4"
-        mount "/mnt/${item}"
+        mount "/mnt/${@item}"
     }
 }
 ```
@@ -48,13 +48,13 @@ step "Find config files" {
 }
 
 step "Validate each config" loop="${config_files}" {
-    shell "myapp validate --config ${item}"
+    shell "myapp validate --config ${@item}"
 }
 ```
 
 ### Looping over structured variables
 
-A step loop can also iterate over a [structured variable](/concepts/variables/#structured-variables) — a list of named-field maps defined in your plan's `vars` block. Each iteration binds the row's fields as `${item.<field>}` (instead of a single `${item}` value):
+A step loop can also iterate over a [structured variable](/concepts/variables/#structured-variables) — a list of named-field maps defined in your plan's `vars` block. Each iteration binds the row's fields as `${@item.<field>}` (instead of a single `${@item}` value):
 
 ```kdl
 plan "provision-vms" {
@@ -66,11 +66,11 @@ plan "provision-vms" {
     }
 
     step "Create each VM" loop="${vms}" {
-        shell "incus launch images:ubuntu/22.04 ${item.name} --config limits.cpu=2"
+        shell "incus launch images:ubuntu/22.04 ${@item.name} --config limits.cpu=2"
     }
 
     step "Wait for cloud-init" loop="${vms}" {
-        shell "incus exec ${item.name} -- cloud-init status --wait" {
+        shell "incus exec ${@item.name} -- cloud-init status --wait" {
             success_codes "0,2"
             retries 30
             delay 5
@@ -79,9 +79,9 @@ plan "provision-vms" {
 }
 ```
 
-Each `${item.<field>}` resolves to the value of that field for the current row. Reference any field defined on the collection's `-` nodes (`${item.name}`, `${item.port}`, …). This is the per-step counterpart to [template loops](#template-loops), which expand the same structured data **inside a file**.
+Each `${@item.<field>}` resolves to the value of that field for the current row. Reference any field defined on the collection's `-` nodes (`${@item.name}`, `${@item.port}`, …). This is the per-step counterpart to [template loops](#template-loops), which expand the same structured data **inside a file**.
 
-> A loop source that is a plain newline-separated string binds `${item}`; one that names a structured collection binds `${item.<field>}`. If the named variable is neither, the step fails with `Loop variable '<name>' is not defined`.
+> A loop source that is a plain newline-separated string binds `${@item}`; one that names a structured collection binds `${@item.<field>}`. If the named variable is neither, the step fails with `Loop variable '<name>' is not defined`.
 
 ## Template Loops
 
@@ -141,8 +141,8 @@ When generating JSON, CSV, or similar formats, you often need a separator betwee
 
 ```
 [
-${for item in items separator=","}
-  {"name": "${item.name}", "key": "${item.key}"}
+${for row in items separator=","}
+  {"name": "${row.name}", "key": "${row.key}"}
 ${endfor}
 ]
 ```
@@ -253,9 +253,9 @@ plan "disk-setup" {
     }
 
     step "Format and mount each disk" loop="${available_disks}" {
-        disk "/dev/${item}" {
+        disk "/dev/${@item}" {
             fs "ext4"
-            mount "/mnt/${item}"
+            mount "/mnt/${@item}"
             opts "defaults,noatime"
         }
     }

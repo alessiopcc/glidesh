@@ -13,6 +13,10 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+// `Run` carries far more flags than the other subcommands, but clap's derive needs each
+// variant to hold its `Args` struct directly — `Box<RunArgs>` does not implement `Args`,
+// so the size spread cannot be boxed away.
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Execute a plan against target hosts
     Run(RunArgs),
@@ -25,6 +29,171 @@ pub enum Commands {
 
     /// Connection console: TUI when no target/command, otherwise shell or one-shot exec
     Console(ConsoleArgs),
+
+    /// Manage encrypted secrets (create, read, edit)
+    Secret(SecretArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretArgs {
+    #[command(subcommand)]
+    pub command: SecretCommand,
+
+    /// SSH private key that unlocks an age-wrapped secrets file
+    /// (defaults to $GLIDESH_SECRET_IDENTITY, then ~/.ssh/id_ed25519)
+    ///
+    /// Global so it may be given before or after the subcommand: every `secret` command
+    /// that touches an age-wrapped file needs the same key, and `run` spells it the same way.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub secret_identity: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretCommand {
+    /// Initialize a secrets file: generate and wrap a data key
+    Init(SecretInitArgs),
+
+    /// Encrypt a value and store it under a key (prompts for the value if omitted)
+    Set(SecretSetArgs),
+
+    /// Decrypt and print a stored value, or a `secret:v1:…` token given directly
+    Get(SecretKeyArgs),
+
+    /// Decrypt and print a stored value or a token (alias for `get`)
+    Decrypt(SecretKeyArgs),
+
+    /// List the names in a secrets file (no passphrase needed, never prints values)
+    List(SecretFileArgs),
+
+    /// Delete a value from a secrets file
+    #[command(alias = "remove")]
+    Rm(SecretKeyArgs),
+
+    /// Read plaintext on stdin and print a `secret:v1:…` token for pasting inline
+    Encrypt(SecretFileArgs),
+
+    /// Re-wrap the data key under a new passphrase (value tokens are unchanged)
+    Rekey(SecretRekeyArgs),
+
+    /// Open the secrets file in $VISUAL/$EDITOR with values transiently decrypted
+    Edit(SecretFileArgs),
+
+    /// Manage who can unlock an age-wrapped secrets file
+    Recipients(RecipientsArgs),
+}
+
+/// Key-wrapping provider for a new secrets file.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderArg {
+    /// One shared passphrase unlocks the file
+    Passphrase,
+    /// The data key is wrapped to SSH public keys; each person unlocks with their own
+    Age,
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretInitArgs {
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+
+    /// How the data key is wrapped
+    #[arg(long, value_enum, default_value = "passphrase")]
+    pub provider: ProviderArg,
+
+    /// SSH public key, or path to a .pub file, that may unlock this file. Repeatable;
+    /// required by --provider age
+    #[arg(long = "recipient", value_name = "KEY_OR_PATH")]
+    pub recipients: Vec<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct RecipientsArgs {
+    #[command(subcommand)]
+    pub command: RecipientsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RecipientsCommand {
+    /// List who can unlock the file
+    List(SecretFileArgs),
+
+    /// Grant access to another SSH public key
+    Add(RecipientAddArgs),
+
+    /// Revoke a recipient, rotating the data key so their old copy is useless
+    #[command(alias = "remove")]
+    Rm(RecipientRmArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct RecipientAddArgs {
+    /// SSH public key, or path to a .pub file
+    pub recipient: String,
+
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub struct RecipientRmArgs {
+    /// Name of the recipient to remove, as shown by `recipients list`
+    pub name: String,
+
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+
+    /// Keep the existing data key. Faster and a smaller diff, but the removed recipient
+    /// can still decrypt every value with the copy they already have
+    #[arg(long)]
+    pub keep_data_key: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretFileArgs {
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretRekeyArgs {
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+
+    /// Also generate a new data key and re-encrypt every value under it
+    #[arg(long)]
+    pub rotate_data_key: bool,
+
+    /// Read the new passphrase from the first line of a file (otherwise prompt)
+    #[arg(long, value_name = "PATH")]
+    pub new_pass_file: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretSetArgs {
+    /// Variable name to store the secret under
+    pub key: String,
+
+    /// The secret value (omit to be prompted without echo)
+    pub value: Option<String>,
+
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub struct SecretKeyArgs {
+    /// Variable name, or a `secret:v1:…` token to decrypt in place
+    pub key: String,
+
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
 }
 
 #[derive(Parser, Debug, Default)]
@@ -127,6 +296,22 @@ pub struct RunArgs {
     /// Prompt for the escalation password (otherwise read from GLIDESH_RUNAS_PASS)
     #[arg(long)]
     pub ask_pass: bool,
+
+    /// Path to the secrets file (defaults to secrets.kdl next to the inventory)
+    #[arg(long)]
+    pub secrets: Option<PathBuf>,
+
+    /// Prompt for the secrets passphrase (otherwise read from GLIDESH_SECRET_PASS)
+    #[arg(long)]
+    pub ask_secret_pass: bool,
+
+    /// Read the secrets passphrase from the first line of a file (for CI)
+    #[arg(long, value_name = "PATH")]
+    pub secret_pass_file: Option<PathBuf>,
+
+    /// SSH private key that unlocks an age-wrapped secrets file (defaults to --key)
+    #[arg(long, value_name = "PATH")]
+    pub secret_identity: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]

@@ -152,5 +152,5 @@ Any explicit `owner`/`group`/`mode` you set is applied afterwards.
 
 ## How it differs from the SSH user
 
-`run-as` is independent of the SSH **login** user (`user="…"` / `${host.user}`). You
+`run-as` is independent of the SSH **login** user (`user="…"` / `${@host.user}`). You
 connect as the login user and escalate to the `run-as` user; both can differ per host.

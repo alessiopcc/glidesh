@@ -63,7 +63,7 @@ Recursive copy supports:
 Download a remote file to the local machine:
 
 ```kdl
-file "backups/${host.name}-dump.sql" {
+file "backups/${@host.name}-dump.sql" {
     src "/var/backups/db.sql"
     fetch #true
 }

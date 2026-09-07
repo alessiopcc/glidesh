@@ -22,7 +22,8 @@
 - **Stateless** — no state files or databases. Desired state is computed fresh every run.
 - **Idempotent** — two-phase check/apply pattern. Run plans repeatedly, only necessary changes are applied.
 - **Modern config** — uses [KDL](https://kdl.dev) for clean, readable inventory and plan files
-- **7 built-in modules** — shell, package, user, systemd, container, file, disk
+- **9 built-in modules** — shell, host, package, user, systemd, container, file, disk, nix
+- **Encrypted secrets** — commit `secrets.kdl` safely; values decrypt in memory and are redacted from every log. Unlock with a shared passphrase or with per-person SSH keys
 - **Dry-run support** — preview changes before applying them
 - **Interactive TUI** — real-time progress with a terminal UI (with non-TTY fallback)
 
@@ -109,6 +110,7 @@ See the [`examples/`](examples/) directory for ready-to-use examples:
 | [external-module](examples/external-module/) | External plugin module to set system MOTD |
 | [jump-host](examples/jump-host/) | Connect to hosts through an SSH bastion |
 | [host-module](examples/host-module/) | Run a command once and broadcast its result to every host |
+| [secrets](examples/secrets/) | Encrypted values in a committed vault, redacted from all output |
 
 ## License
 

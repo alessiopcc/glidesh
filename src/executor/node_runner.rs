@@ -1,21 +1,22 @@
+use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::template::{TemplateData, interpolate_args};
-use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step};
+use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
 use glidesh::error::GlideshError;
 use glidesh::modules::context::ModuleContext;
 use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
+use glidesh::secrets::{Secrets, token};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
-/// One iteration of a step `loop`. A flat item binds `${item}`; a structured
-/// item (a row from a `vars` collection) binds `${item.<field>}` for each field.
+/// One iteration of a step `loop`. A flat item binds `${@item}`; a structured
+/// item (a row from a `vars` collection) binds `${@item.<field>}` for each field.
 #[derive(Debug)]
 enum LoopItem {
     Flat(String),
@@ -23,8 +24,8 @@ enum LoopItem {
 }
 
 /// Resolve a step's `loop` source into the items to iterate over. A `${name}`
-/// referencing a `vars` collection yields structured rows (`${item.field}`);
-/// one referencing a flat var yields its newline-split values (`${item}`); a
+/// referencing a `vars` collection yields structured rows (`${@item.field}`);
+/// one referencing a flat var yields its newline-split values (`${@item}`); a
 /// literal yields its lines.
 fn resolve_loop_items(
     loop_source: &LoopSource,
@@ -50,18 +51,30 @@ fn resolve_loop_items(
     }
 }
 
-/// Bind a loop item's variables into `vars`, returning the keys that were
-/// inserted so the caller can remove them after the iteration.
+/// Built-in per-host variables, exposed under the reserved `@host.*` namespace. Only these
+/// `@`-prefixed names are injected — the legacy bare `host.*` forms were removed.
+fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
+    [
+        ("@host.name".to_string(), host.name.clone()),
+        ("@host.address".to_string(), host.address.clone()),
+        ("@host.user".to_string(), host.user.clone()),
+        ("@host.port".to_string(), host.port.to_string()),
+    ]
+}
+
+/// Bind a loop item's variables into `vars` under the reserved `@item` namespace,
+/// returning the keys that were inserted so the caller can remove them after the iteration.
+/// A flat item binds `@item`; a structured row binds `@item.<field>` for each field.
 fn inject_loop_item(vars: &mut HashMap<String, String>, item: &LoopItem) -> Vec<String> {
     match item {
         LoopItem::Flat(value) => {
-            vars.insert("item".to_string(), value.clone());
-            vec!["item".to_string()]
+            vars.insert("@item".to_string(), value.clone());
+            vec!["@item".to_string()]
         }
         LoopItem::Structured(row) => {
             let mut keys = Vec::with_capacity(row.len());
             for (field, value) in row {
-                let key = format!("item.{field}");
+                let key = format!("@item.{field}");
                 vars.insert(key.clone(), value.clone());
                 keys.push(key);
             }
@@ -77,11 +90,12 @@ pub struct NodeRunner {
     pub key: PrivateKeyWithHashAlg,
     pub dry_run: bool,
     pub host_key_policy: HostKeyPolicy,
-    pub event_tx: mpsc::UnboundedSender<ExecutorEvent>,
+    pub event_tx: EventSink,
     pub inventory_template_data: Arc<TemplateData>,
     pub plan_base_dir: Arc<PathBuf>,
     pub coordinator: Arc<HostCoordinator>,
     pub all_targets: Arc<Vec<ResolvedHost>>,
+    pub secrets: Arc<Secrets>,
 }
 
 impl NodeRunner {
@@ -148,11 +162,9 @@ impl NodeRunner {
         let mut vars = self.host.vars.clone();
         vars.extend(self.plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-        // Inject built-in host vars (cannot be overridden by user vars)
-        vars.insert("host.name".to_string(), self.host.name.clone());
-        vars.insert("host.address".to_string(), self.host.address.clone());
-        vars.insert("host.user".to_string(), self.host.user.clone());
-        vars.insert("host.port".to_string(), self.host.port.to_string());
+        // Last, so nothing can shadow these — and user var names may not start with `@`
+        // anyway, so the reserved namespace cannot be reached from a config file at all.
+        vars.extend(host_builtin_vars(&self.host));
 
         // Build template data: inventory @-refs + plan structured vars.
         // Preserve inventory-provided collections so plan structured vars
@@ -162,6 +174,32 @@ impl NodeRunner {
             if !template_data.collections.contains_key(key) {
                 template_data.collections.insert(key.clone(), value.clone());
             }
+        }
+
+        // Decrypt secret tokens once, up front — across flat vars, inventory @-refs, and
+        // structured collections — so check/apply (and --dry-run) see plaintext, and every
+        // plaintext is registered for redaction before any event is emitted.
+        if let Err(e) = self
+            .secrets
+            .decrypt_vars(&mut vars)
+            .and_then(|_| self.secrets.decrypt_template_data(&mut template_data))
+        {
+            let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
+                host: self.host.name.clone(),
+                module: "secret".to_string(),
+                resource: String::new(),
+                error: e.to_string(),
+            });
+            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+                host: self.host.name.clone(),
+                success: false,
+                changed: 0,
+            });
+            let _ = session.close().await;
+            return Ok(NodeResult {
+                success: false,
+                total_changed: 0,
+            });
         }
 
         let steps = self.plan.steps();
@@ -309,6 +347,68 @@ impl NodeRunner {
         });
     }
 
+    /// Decrypt any `secret:v1:…` tokens written inline in interpolated argument values, in
+    /// place — the var-based ones are already plaintext from the up-front sweep. Only values
+    /// that actually contain a token are rewritten, so a task with no inline secret (the
+    /// common case) pays nothing beyond a substring scan.
+    fn decrypt_inline_params(
+        &self,
+        args: &mut HashMap<String, ParamValue>,
+    ) -> Result<(), GlideshError> {
+        let decrypt = |s: &mut String| -> Result<(), GlideshError> {
+            if token::contains_secret_token(s) {
+                *s = self.secrets.decrypt_inline(s)?;
+            }
+            Ok(())
+        };
+        for value in args.values_mut() {
+            match value {
+                ParamValue::String(s) => decrypt(s)?,
+                ParamValue::List(list) => list.iter_mut().try_for_each(&decrypt)?,
+                ParamValue::Map(map) => map.values_mut().try_for_each(&decrypt)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Interpolate a task's args and resource, decrypt any inline secret tokens, and apply
+    /// the empty-resource `cmd` fallback — the assembly shared by [`Self::run_step_tasks`]
+    /// and [`Self::run_host_task`]. On failure, emits the task-error event and returns the
+    /// `(step name, message)` the task loop propagates.
+    fn build_params(
+        &self,
+        step: &Step,
+        task: &TaskDef,
+        vars: &HashMap<String, String>,
+    ) -> Result<ModuleParams, (String, String)> {
+        let fail = |e: GlideshError| -> (String, String) {
+            self.emit_task_error(&task.module, &task.resource, &e.to_string());
+            (step.name.clone(), e.to_string())
+        };
+
+        let mut args = interpolate_args(&task.args, vars).map_err(fail)?;
+        self.decrypt_inline_params(&mut args).map_err(fail)?;
+
+        let mut resource_name =
+            glidesh::config::template::interpolate(&task.resource, vars).map_err(fail)?;
+        if resource_name.is_empty() {
+            match args.get("cmd") {
+                Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
+                Some(ParamValue::String(s)) => resource_name = s.clone(),
+                _ => {}
+            }
+        }
+        if token::contains_secret_token(&resource_name) {
+            resource_name = self.secrets.decrypt_inline(&resource_name).map_err(fail)?;
+        }
+
+        Ok(ModuleParams {
+            resource_name,
+            args,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_step_tasks(
         &self,
@@ -350,35 +450,7 @@ impl NodeRunner {
                 }
             };
 
-            let interpolated_args = match interpolate_args(&task.args, vars) {
-                Ok(a) => a,
-                Err(e) => {
-                    self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                    return Err((step.name.clone(), e.to_string()));
-                }
-            };
-
-            let mut resource_name =
-                match glidesh::config::template::interpolate(&task.resource, vars) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                        return Err((step.name.clone(), e.to_string()));
-                    }
-                };
-
-            if resource_name.is_empty() {
-                match interpolated_args.get("cmd") {
-                    Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
-                    Some(ParamValue::String(s)) => resource_name = s.clone(),
-                    _ => {}
-                }
-            }
-
-            let params = ModuleParams {
-                resource_name,
-                args: interpolated_args,
-            };
+            let params = self.build_params(step, task, vars)?;
 
             // Escalation precedence: module > step > plan > host (host already
             // carries group/global/CLI defaults merged during target resolution).
@@ -398,6 +470,7 @@ impl NodeRunner {
                 dry_run: self.dry_run,
                 plan_base_dir: &self.plan_base_dir,
                 run_as,
+                secrets: Some(self.secrets.registry()),
             };
 
             let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
@@ -493,37 +566,12 @@ impl NodeRunner {
         step_idx: usize,
         task_idx: usize,
         loop_iter: usize,
-        task: &glidesh::config::types::TaskDef,
+        task: &TaskDef,
         vars: &mut HashMap<String, String>,
         total_changed: &mut usize,
     ) -> Result<bool, (String, String)> {
-        let interpolated_args = match interpolate_args(&task.args, vars) {
-            Ok(a) => a,
-            Err(e) => {
-                self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                return Err((step.name.clone(), e.to_string()));
-            }
-        };
-        let mut resource_name = match glidesh::config::template::interpolate(&task.resource, vars) {
-            Ok(r) => r,
-            Err(e) => {
-                self.emit_task_error(&task.module, &task.resource, &e.to_string());
-                return Err((step.name.clone(), e.to_string()));
-            }
-        };
-
-        if resource_name.is_empty() {
-            match interpolated_args.get("cmd") {
-                Some(ParamValue::List(cmds)) => resource_name = cmds.join(" && "),
-                Some(ParamValue::String(s)) => resource_name = s.clone(),
-                _ => {}
-            }
-        }
-
-        let params = ModuleParams {
-            resource_name: resource_name.clone(),
-            args: interpolated_args,
-        };
+        let params = self.build_params(step, task, vars)?;
+        let resource_name = params.resource_name.clone();
 
         let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
             host: self.host.name.clone(),
@@ -625,8 +673,8 @@ mod tests {
         let mut vars = HashMap::new();
         let injected = inject_loop_item(&mut vars, &LoopItem::Structured(row));
 
-        assert_eq!(vars.get("item.name").map(String::as_str), Some("vm-a"));
-        assert_eq!(vars.get("item.port").map(String::as_str), Some("2301"));
+        assert_eq!(vars.get("@item.name").map(String::as_str), Some("vm-a"));
+        assert_eq!(vars.get("@item.port").map(String::as_str), Some("2301"));
 
         for key in &injected {
             vars.remove(key);
@@ -647,11 +695,34 @@ mod tests {
     }
 
     #[test]
-    fn flat_item_binds_bare_item() {
+    fn host_builtins_use_at_namespace_only() {
+        let host = ResolvedHost {
+            name: "web-1".to_string(),
+            address: "10.0.0.1".to_string(),
+            user: "deploy".to_string(),
+            port: 2222,
+            vars: HashMap::new(),
+            jump: None,
+            run_as: Default::default(),
+        };
+        let vars: HashMap<String, String> = host_builtin_vars(&host).into_iter().collect();
+        assert_eq!(vars.get("@host.name").map(String::as_str), Some("web-1"));
+        assert_eq!(
+            vars.get("@host.address").map(String::as_str),
+            Some("10.0.0.1")
+        );
+        assert_eq!(vars.get("@host.user").map(String::as_str), Some("deploy"));
+        assert_eq!(vars.get("@host.port").map(String::as_str), Some("2222"));
+        assert!(!vars.contains_key("host.name"));
+        assert!(!vars.contains_key("host.port"));
+    }
+
+    #[test]
+    fn flat_item_binds_canonical() {
         let mut vars = HashMap::new();
         let injected = inject_loop_item(&mut vars, &LoopItem::Flat("sda".to_string()));
-        assert_eq!(vars.get("item").map(String::as_str), Some("sda"));
-        assert_eq!(injected, vec!["item".to_string()]);
+        assert_eq!(vars.get("@item").map(String::as_str), Some("sda"));
+        assert_eq!(injected, vec!["@item".to_string()]);
     }
 
     #[test]

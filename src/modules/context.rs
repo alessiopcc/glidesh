@@ -2,10 +2,12 @@ use crate::config::template::TemplateData;
 use crate::config::types::ResolvedRunAs;
 use crate::error::GlideshError;
 use crate::modules::detect::OsInfo;
+use crate::secrets::SecretRegistry;
 use crate::ssh::SshSession;
 use crate::ssh::connection::CommandOutput;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 pub struct ModuleContext<'a> {
     pub ssh: &'a SshSession,
@@ -17,6 +19,10 @@ pub struct ModuleContext<'a> {
     /// Effective privilege escalation for this task, or `None` to run as the login
     /// user. Resolved per task by the executor from module/step/host/group/global/CLI.
     pub run_as: Option<ResolvedRunAs>,
+    /// The run's decrypted-secret registry. Modules that hand data to something outside
+    /// glidesh consult it to decide what may cross that boundary — see the external
+    /// plugin runner. `None` in contexts built without an executor (unit tests).
+    pub secrets: Option<Arc<SecretRegistry>>,
 }
 
 /// Escalation-aware wrappers. Modules call these instead of `ctx.ssh.*` so that the
