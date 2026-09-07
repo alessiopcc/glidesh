@@ -30,7 +30,7 @@ container "myapp" {
 }
 ```
 
-Unknown parameters are rejected at check time, so a typo (`privledged`) fails loudly instead of being silently dropped.
+Unknown parameters are rejected at check time, so a typo (`privledged`) fails loudly instead of being silently dropped. The same applies to values glidesh cannot act on: an unsupported `runtime`, or `wait "healthy"` on a container that has no healthcheck.
 
 ## States
 
@@ -50,8 +50,8 @@ Unknown parameters are rejected at check time, so a typo (`privledged`) fails lo
 | *(positional)* | string | Container name |
 | `image` | string | Container image reference |
 | `state` | string | See [States](#states) |
-| `runtime` | string | `"docker"` or `"podman"` (default: auto-detect) |
-| `install-runtime` | boolean | Auto-install the runtime if not found |
+| `runtime` | string | `"docker"` or `"podman"` (default: auto-detect). Any other value is rejected |
+| `install-runtime` | boolean | Auto-install the runtime if not found. Installing happens during apply, never during check |
 | `command` | string | Command to run in the container. Appended verbatim, so its own quoting is preserved |
 | `entrypoint` | string | Override the image entrypoint |
 | `pull` | string | `"always"`, `"missing"`, or `"never"` |
@@ -117,7 +117,7 @@ container "vllm" {
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `healthcheck` | block | Container healthcheck: `cmd`, `interval`, `timeout`, `retries`, `start-period`. Bare numbers are seconds. `cmd "NONE"` disables the image's healthcheck |
-| `wait` | string | `"healthy"` (runtime health status), `"running"`, or `"none"` (default) |
+| `wait` | string | `"healthy"` (runtime health status), `"running"`, or `"none"` (default). `"healthy"` requires a healthcheck — from a `healthcheck` block or baked into the image — and errors without one |
 | `wait-timeout` | integer | Seconds to wait before failing (default: `300`) |
 | `wait-interval` | integer | Seconds between probes (default: `3`) |
 | `ready-cmd` | string | Probe run **on the target host**, not inside the container. Ready on exit code 0. Implies `wait "running"` |
@@ -158,6 +158,8 @@ container "lmcache" {
 ```
 
 When readiness is not reached in time, the task fails with the container's last 30 log lines attached.
+
+A readiness condition that can never hold is treated as a plan error rather than a wait: `wait "healthy"` on a container with no healthcheck fails immediately, at check time, instead of polling until the timeout and reporting success under `--dry-run`.
 
 ### One-shot jobs
 

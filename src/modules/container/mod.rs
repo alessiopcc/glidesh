@@ -44,6 +44,26 @@ fn desired_state(params: &ModuleParams) -> &str {
         .unwrap_or("running")
 }
 
+const KNOWN_STATES: &[&str] = &["running", "run-once", "stopped", "absent"];
+
+/// Which runtime to drive, and whether it is already on the host.
+///
+/// Kept separate from installing it so `check` can stay read-only: a check that
+/// installs packages mutates a host the operator may never have applied to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeResolution {
+    Present(String),
+    NeedsInstall(String),
+}
+
+impl RuntimeResolution {
+    fn runtime(&self) -> &str {
+        match self {
+            RuntimeResolution::Present(rt) | RuntimeResolution::NeedsInstall(rt) => rt,
+        }
+    }
+}
+
 #[async_trait]
 impl Module for ContainerModule {
     fn name(&self) -> &str {
@@ -59,7 +79,28 @@ impl Module for ContainerModule {
 
         let name = &params.resource_name;
         let state = desired_state(params);
-        let runtime = self.resolve_runtime(ctx, params).await?;
+        if !KNOWN_STATES.contains(&state) {
+            return Ok(ModuleStatus::Unknown {
+                reason: format!("Unknown container state: {}", state),
+            });
+        }
+
+        let runtime = match self.resolve_runtime(ctx, params).await? {
+            RuntimeResolution::Present(rt) => rt,
+            // Nothing can exist on a host with no runtime, so there is nothing to
+            // inspect — and installing one is `apply`'s job, not this one's.
+            RuntimeResolution::NeedsInstall(rt) => {
+                return Ok(match state {
+                    "stopped" | "absent" => ModuleStatus::Satisfied,
+                    "run-once" => ModuleStatus::Pending {
+                        plan: format!("Install {} and run container {} to completion", rt, name),
+                    },
+                    _ => ModuleStatus::Pending {
+                        plan: format!("Install {} and create container {}", rt, name),
+                    },
+                });
+            }
+        };
 
         match state {
             "running" => self.check_running(ctx, params, &runtime).await,
@@ -78,9 +119,7 @@ impl Module for ContainerModule {
                 }),
                 None => Ok(ModuleStatus::Satisfied),
             },
-            other => Ok(ModuleStatus::Unknown {
-                reason: format!("Unknown container state: {}", other),
-            }),
+            other => unreachable!("state {} rejected above", other),
         }
     }
 
@@ -93,27 +132,49 @@ impl Module for ContainerModule {
 
         let name = &params.resource_name;
         let state = desired_state(params);
-        let runtime = self.resolve_runtime(ctx, params).await?;
+        if !KNOWN_STATES.contains(&state) {
+            return Err(GlideshError::Module {
+                module: "container".to_string(),
+                message: format!("Unknown state: {}", state),
+            });
+        }
+
+        let resolution = self.resolve_runtime(ctx, params).await?;
+        let runtime = resolution.runtime().to_string();
+        let needs_install = matches!(resolution, RuntimeResolution::NeedsInstall(_));
 
         if ctx.dry_run {
             let planned = match state {
                 "running" => run_args::build_run_command(&runtime, name, params)?,
                 "run-once" => run_args::build_run_once_command(&runtime, name, params)?,
                 "stopped" => format!("{} stop {}", runtime, shell_escape(name)),
-                "absent" => format!("{} rm -f {}", runtime, shell_escape(name)),
-                other => {
-                    return Err(GlideshError::Module {
-                        module: "container".to_string(),
-                        message: format!("Unknown state: {}", other),
-                    });
-                }
+                _ => format!("{} rm -f {}", runtime, shell_escape(name)),
+            };
+            let prefix = if needs_install {
+                format!("install {}; ", runtime)
+            } else {
+                String::new()
             };
             return Ok(ModuleResult {
                 changed: false,
-                output: format!("[dry-run] {}", planned),
+                output: format!("[dry-run] {}{}", prefix, planned),
                 stderr: String::new(),
                 exit_code: 0,
             });
+        }
+
+        if needs_install {
+            // Tearing down a container on a host with no runtime is a no-op;
+            // installing one to discover that would be worse than pointless.
+            if matches!(state, "stopped" | "absent") {
+                return Ok(ModuleResult {
+                    changed: false,
+                    output: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                });
+            }
+            self.install_runtime(ctx, &runtime).await?;
         }
 
         match state {
@@ -121,10 +182,7 @@ impl Module for ContainerModule {
             "run-once" => self.run_once(ctx, params, &runtime).await,
             "stopped" => Self::ensure_stopped(ctx, name, &runtime).await,
             "absent" => Self::ensure_absent(ctx, name, &runtime).await,
-            other => Err(GlideshError::Module {
-                module: "container".to_string(),
-                message: format!("Unknown state: {}", other),
-            }),
+            other => unreachable!("state {} rejected above", other),
         }
     }
 }
@@ -166,13 +224,20 @@ impl ContainerModule {
         }
 
         if let Some(spec) = health::parse_wait(params)? {
-            if !matches!(
-                health::probe(ctx, runtime, name, &spec).await?,
-                health::Readiness::Ready
-            ) {
-                return Ok(ModuleStatus::Pending {
-                    plan: format!("Wait for container {} to {}", name, health::describe(&spec)),
-                });
+            match health::probe(ctx, runtime, name, &spec).await? {
+                health::Readiness::Ready => {}
+                // It was running a moment ago and is not now; apply will start or
+                // rebuild it as its state warrants.
+                health::Readiness::Failed(reason) => {
+                    return Ok(ModuleStatus::Pending {
+                        plan: format!("Recover container {} ({})", name, reason),
+                    });
+                }
+                health::Readiness::NotReady(_) => {
+                    return Ok(ModuleStatus::Pending {
+                        plan: format!("Wait for container {} to {}", name, health::describe(&spec)),
+                    });
+                }
             }
         }
 
@@ -208,46 +273,41 @@ impl ContainerModule {
         }
     }
 
-    /// Resolve which runtime to use. If `install-runtime` is set and no runtime
-    /// is detected, install the requested one (podman or docker) via the host's
-    /// package manager.
+    /// Decide which runtime to drive, without changing anything on the host.
+    /// `runtime` is validated against [`run_args::SUPPORTED_RUNTIMES`] before this runs.
     async fn resolve_runtime(
         &self,
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
-    ) -> Result<String, GlideshError> {
+    ) -> Result<RuntimeResolution, GlideshError> {
         let preferred = params
             .args
             .get("runtime")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-
-        if let Some(detected) = Self::detected_runtime(ctx) {
-            if !preferred.is_empty() && preferred != detected {
-                let check = ctx
-                    .exec(&format!("which {} 2>/dev/null", preferred))
-                    .await?;
-                if check.exit_code == 0 {
-                    return Ok(preferred.to_string());
-                }
-                let should_install = params
-                    .args
-                    .get("install-runtime")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !should_install {
-                    return Ok(detected.to_string());
-                }
-            } else {
-                return Ok(detected.to_string());
-            }
-        }
-
         let should_install = params
             .args
             .get("install-runtime")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+
+        if let Some(detected) = Self::detected_runtime(ctx) {
+            if preferred.is_empty() || preferred == detected {
+                return Ok(RuntimeResolution::Present(detected.to_string()));
+            }
+            // Detection found one runtime and the plan asks for another: prefer the
+            // plan's if it happens to be installed too.
+            let present = ctx
+                .exec(&format!("which {} 2>/dev/null", shell_escape(preferred)))
+                .await?;
+            if present.exit_code == 0 {
+                return Ok(RuntimeResolution::Present(preferred.to_string()));
+            }
+            if !should_install {
+                return Ok(RuntimeResolution::Present(detected.to_string()));
+            }
+            return Ok(RuntimeResolution::NeedsInstall(preferred.to_string()));
+        }
 
         if !should_install {
             return Err(GlideshError::Module {
@@ -257,25 +317,20 @@ impl ContainerModule {
             });
         }
 
-        let runtime_to_install = if !preferred.is_empty() {
-            preferred.to_string()
+        let target = if preferred.is_empty() {
+            "docker"
         } else {
-            "docker".to_string()
+            preferred
         };
-
-        self.install_runtime(ctx, &runtime_to_install).await?;
-        Ok(runtime_to_install)
+        Ok(RuntimeResolution::NeedsInstall(target.to_string()))
     }
 
+    /// Install a runtime. Never reached under `--dry-run`; `apply` gates the call.
     async fn install_runtime(
         &self,
         ctx: &ModuleContext<'_>,
         runtime: &str,
     ) -> Result<(), GlideshError> {
-        if ctx.dry_run {
-            return Ok(());
-        }
-
         let packages = runtime_packages(&ctx.os_info.pkg_manager, runtime);
         let install_cmd = ctx.os_info.pkg_manager.install_cmd(&packages);
 
@@ -373,8 +428,6 @@ impl ContainerModule {
             None => StartAction::Recreate,
         };
 
-        // Reuse the existing container only when its recorded spec still matches
-        // the plan and it can be revived without a rebuild.
         let spec_matches = state.is_some()
             && inspect_spec_hash(ctx, runtime, name).await?
                 == run_args::spec_hash(runtime, params)?;
@@ -648,11 +701,8 @@ fn runtime_packages(pkg: &PkgManager, runtime: &str) -> Vec<String> {
         _ => match pkg {
             // Debian/Ubuntu use docker.io from distro repos
             PkgManager::Apt => vec!["docker.io".to_string()],
-            // Arch uses docker
             PkgManager::Pacman => vec!["docker".to_string()],
-            // Alpine
             PkgManager::Apk => vec!["docker".to_string()],
-            // RPM-based and SUSE
             _ => vec!["docker-ce".to_string()],
         },
     }

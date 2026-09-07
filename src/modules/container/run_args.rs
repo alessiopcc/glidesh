@@ -90,6 +90,11 @@ const SPECIAL_PARAMS: &[&str] = &["command", "extra-args", "gpus", "healthcheck"
 /// Recognised keys inside a `healthcheck` block.
 const HEALTHCHECK_KEYS: &[&str] = &["cmd", "interval", "retries", "start-period", "timeout"];
 
+/// The runtimes glidesh knows how to drive. `runtime` reaches a shell command and
+/// selects the package set for `install-runtime`, so an unrecognised value would
+/// otherwise produce nonsense commands and install the wrong packages.
+pub(super) const SUPPORTED_RUNTIMES: &[&str] = &["docker", "podman"];
+
 /// Reject unknown parameters. A silently ignored `privledged` is exactly the kind
 /// of failure that only shows up as strange runtime behaviour hours later.
 pub(super) fn validate_params(params: &ModuleParams) -> Result<(), GlideshError> {
@@ -110,18 +115,34 @@ pub(super) fn validate_params(params: &ModuleParams) -> Result<(), GlideshError>
         .filter(|k| !known(k))
         .collect();
 
-    if unknown.is_empty() {
-        return Ok(());
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        return Err(GlideshError::Module {
+            module: "container".to_string(),
+            message: format!(
+                "unknown parameter(s) for container '{}': {}",
+                params.resource_name,
+                unknown.join(", ")
+            ),
+        });
     }
-    unknown.sort_unstable();
-    Err(GlideshError::Module {
-        module: "container".to_string(),
-        message: format!(
-            "unknown parameter(s) for container '{}': {}",
-            params.resource_name,
-            unknown.join(", ")
-        ),
-    })
+
+    if let Some(runtime) = params.args.get("runtime") {
+        let value = runtime.as_str().unwrap_or("");
+        if !value.is_empty() && !SUPPORTED_RUNTIMES.contains(&value) {
+            return Err(GlideshError::Module {
+                module: "container".to_string(),
+                message: format!(
+                    "container '{}': unsupported runtime '{}' (expected one of: {})",
+                    params.resource_name,
+                    value,
+                    SUPPORTED_RUNTIMES.join(", ")
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Build every token that follows `run [-d] --name <name>`, in a fixed order so
@@ -664,8 +685,32 @@ mod tests {
             .chain(LIST_FLAGS.iter().map(|(k, _)| k))
             .chain(MAP_FLAGS.iter().map(|(k, _)| k))
         {
-            let params = make_params(vec![(key, ParamValue::String("v".into()))]);
+            let value = if *key == "runtime" { "docker" } else { "v" };
+            let params = make_params(vec![(key, ParamValue::String(value.into()))]);
             assert!(validate_params(&params).is_ok(), "{key} rejected");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_runtime() {
+        for value in ["containerd", "Docker", "docker; rm -rf /"] {
+            let params = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                ("runtime", ParamValue::String(value.into())),
+            ]);
+            let err = validate_params(&params).unwrap_err().to_string();
+            assert!(err.contains("unsupported runtime"), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_supported_runtimes() {
+        for value in SUPPORTED_RUNTIMES {
+            let params = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                ("runtime", ParamValue::String((*value).into())),
+            ]);
+            assert!(validate_params(&params).is_ok(), "{value} rejected");
         }
     }
 

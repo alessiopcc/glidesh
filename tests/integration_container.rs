@@ -136,7 +136,6 @@ async fn test_container_lifecycle_reuses_before_recreating() {
         "a stopped container whose spec still matches must be started, not recreated"
     );
 
-    // A changed spec must recreate.
     let changed_spec = params(
         "webapp",
         &[
@@ -341,6 +340,82 @@ async fn test_wait_healthy_blocks_then_times_out() {
     );
 }
 
+/// `wait "healthy"` on a container with no healthcheck can never be satisfied.
+/// That is a plan error, so both check and apply must say so outright rather
+/// than reporting a wait that will deterministically fail.
+#[tokio::test]
+async fn test_wait_healthy_without_healthcheck_is_a_plan_error() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    install_fake_docker(&ssh).await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+
+    let spec = params(
+        "unchecked",
+        &[
+            ("image", s("nginx:alpine")),
+            ("wait", s("healthy")),
+            ("wait-timeout", ParamValue::Integer(3)),
+            ("wait-interval", ParamValue::Integer(1)),
+        ],
+    );
+
+    let err = ContainerModule
+        .apply(&ctx, &spec)
+        .await
+        .expect_err("apply must reject an unsatisfiable readiness condition");
+    assert!(
+        err.to_string().contains("no healthcheck"),
+        "unexpected error: {err}"
+    );
+
+    // The container is now running, so check reaches the readiness probe. It must
+    // surface the same error instead of returning Pending.
+    assert_eq!(read_state(&ssh, "unchecked", "status").await, "running");
+    let err = ContainerModule
+        .check(&ctx, &spec)
+        .await
+        .expect_err("check must not report a wait that can never be satisfied");
+    assert!(
+        err.to_string().contains("no healthcheck"),
+        "unexpected error: {err}"
+    );
+}
+
+/// An unsupported `runtime` is rejected before any command reaches the host.
+#[tokio::test]
+async fn test_unsupported_runtime_is_rejected() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    install_fake_docker(&ssh).await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+
+    let spec = params(
+        "bad-runtime",
+        &[("image", s("nginx:alpine")), ("runtime", s("containerd"))],
+    );
+
+    for err in [
+        ContainerModule.check(&ctx, &spec).await.err(),
+        ContainerModule.apply(&ctx, &spec).await.err(),
+    ] {
+        let message = err.expect("an unsupported runtime must fail").to_string();
+        assert!(
+            message.contains("unsupported runtime 'containerd'"),
+            "unexpected error: {message}"
+        );
+    }
+    assert!(!container_exists(&ssh, "bad-runtime").await);
+}
+
 /// `ready-cmd` probes from the host, for images with no shell of their own.
 #[tokio::test]
 async fn test_ready_cmd_gates_the_step() {
@@ -439,7 +514,6 @@ async fn test_run_once_guard_and_retries() {
         "a satisfied guard must skip the job"
     );
 
-    // A job that keeps failing surfaces the exit code it kept returning.
     let failing = params(
         "always-fails",
         &[
@@ -460,7 +534,6 @@ async fn test_run_once_guard_and_retries() {
         "unexpected error: {err}"
     );
 
-    // ...unless that code is declared successful.
     let tolerated = params(
         "tolerated",
         &[

@@ -38,7 +38,9 @@ pub(super) enum Readiness {
     Ready,
     /// Not there yet, but still plausibly on its way.
     NotReady(String),
-    /// Terminal — waiting longer cannot help.
+    /// The container stopped. Terminal for this wait; the caller decides whether
+    /// to recover it. A readiness condition that can never hold is not this — it
+    /// is a plan error, and [`probe`] returns `Err` for that instead.
     Failed(String),
 }
 
@@ -138,12 +140,15 @@ pub(super) async fn probe(
 
     if spec.target == WaitTarget::Healthy {
         match health_status(ctx, runtime, name).await? {
+            // Not a state to wait out: no amount of polling gives a container a
+            // healthcheck it was never given. Failing here rather than reporting
+            // "waiting" keeps `check` honest, including under --dry-run.
             None => {
-                return Ok(Readiness::Failed(
-                    "wait=\"healthy\" but the container has no healthcheck — declare a \
-                     `healthcheck` block, or use `ready-cmd` to probe from the host"
-                        .to_string(),
-                ));
+                return Err(invalid(&format!(
+                    "container '{}' declares wait=\"healthy\" but has no healthcheck — \
+                     add a `healthcheck` block, or use `ready-cmd` to probe from the host",
+                    name
+                )));
             }
             Some(status) if status == "healthy" => {}
             Some(status) => return Ok(Readiness::NotReady(format!("health is {}", status))),
