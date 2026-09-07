@@ -12,26 +12,31 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ## Installation
 
-Download the latest binary from [GitHub Releases](https://github.com/alessiopcc/glidesh/releases):
+Download a release archive from [GitHub Releases](https://github.com/alessiopcc/glidesh/releases).
+Each release ships one archive per target, plus `checksums-sha256.txt` to verify against.
 
 <Tabs>
   <TabItem label="Linux">
     ```bash
-    curl -L https://github.com/alessiopcc/glidesh/releases/latest/download/glidesh-linux-amd64 -o glidesh
+    # x86_64 — for arm64, use aarch64-unknown-linux-gnu
+    curl -L https://github.com/alessiopcc/glidesh/releases/download/v1.2.0/glidesh-v1.2.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
     chmod +x glidesh
     sudo mv glidesh /usr/local/bin/
     ```
   </TabItem>
   <TabItem label="macOS">
     ```bash
-    curl -L https://github.com/alessiopcc/glidesh/releases/latest/download/glidesh-darwin-arm64 -o glidesh
+    # Apple silicon — for Intel Macs, use x86_64-apple-darwin
+    curl -L https://github.com/alessiopcc/glidesh/releases/download/v1.2.0/glidesh-v1.2.0-aarch64-apple-darwin.tar.gz | tar xz
     chmod +x glidesh
     sudo mv glidesh /usr/local/bin/
     ```
   </TabItem>
   <TabItem label="Windows">
     ```powershell
-    Invoke-WebRequest -Uri https://github.com/alessiopcc/glidesh/releases/latest/download/glidesh-windows-amd64.exe -OutFile glidesh.exe
+    # x86_64 — for arm64, use aarch64-pc-windows-msvc
+    Invoke-WebRequest -Uri https://github.com/alessiopcc/glidesh/releases/download/v1.2.0/glidesh-v1.2.0-x86_64-pc-windows-msvc.zip -OutFile glidesh.zip
+    Expand-Archive glidesh.zip -DestinationPath .
     Move-Item glidesh.exe C:\Windows\System32\
     ```
   </TabItem>
