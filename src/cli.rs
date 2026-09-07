@@ -38,6 +38,14 @@ pub enum Commands {
 pub struct SecretArgs {
     #[command(subcommand)]
     pub command: SecretCommand,
+
+    /// SSH private key that unlocks an age-wrapped secrets file
+    /// (defaults to $GLIDESH_SECRET_IDENTITY, then ~/.ssh/id_ed25519)
+    ///
+    /// Global so it may be given before or after the subcommand: every `secret` command
+    /// that touches an age-wrapped file needs the same key, and `run` spells it the same way.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub secret_identity: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

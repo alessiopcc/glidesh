@@ -690,6 +690,76 @@ fn keypair(dir: &std::path::Path, name: &str) -> (String, String) {
 /// The whole point of the age provider: access is granted and revoked per person, with no
 /// shared secret, and revocation actually locks the removed person out.
 #[test]
+fn secret_identity_flag_unlocks_an_age_vault_and_outranks_the_environment() {
+    let dir = tempdir().unwrap();
+    let (alice_key, alice_pub) = keypair(dir.path(), "alice");
+    let (bob_key, _bob_pub) = keypair(dir.path(), "bob");
+    let sf = dir.path().join("secrets.kdl");
+    let sf = sf.to_str().unwrap();
+
+    glidesh()
+        .args([
+            "secret",
+            "init",
+            "--provider",
+            "age",
+            "--recipient",
+            &alice_pub,
+            "--file",
+            sf,
+        ])
+        .assert()
+        .success();
+
+    // The flag alone unlocks the vault, with no GLIDESH_SECRET_IDENTITY set and the key
+    // nowhere near ~/.ssh — the gap that made `secret` unusable with a non-default key.
+    glidesh()
+        .args([
+            "secret",
+            "set",
+            "db-password",
+            "hunter2-value",
+            "--file",
+            sf,
+            "--secret-identity",
+            &alice_key,
+        ])
+        .assert()
+        .success();
+
+    // Global, so it is equally accepted ahead of the subcommand.
+    glidesh()
+        .args([
+            "secret",
+            "--secret-identity",
+            &alice_key,
+            "get",
+            "db-password",
+            "--file",
+            sf,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hunter2-value"));
+
+    // And it outranks the environment: the env names a key that was never a recipient.
+    glidesh()
+        .env("GLIDESH_SECRET_IDENTITY", &bob_key)
+        .args([
+            "secret",
+            "get",
+            "db-password",
+            "--file",
+            sf,
+            "--secret-identity",
+            &alice_key,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hunter2-value"));
+}
+
+#[test]
 fn age_provider_grants_and_revokes_access() {
     let dir = tempdir().unwrap();
     let (alice_key, alice_pub) = keypair(dir.path(), "alice");

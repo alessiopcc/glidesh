@@ -227,7 +227,13 @@ Every subcommand accepts `--file <PATH>` (default `secrets.kdl`). The passphrase
 `GLIDESH_SECRET_PASS`, then `GLIDESH_SECRET_PASS_FILE`, then an interactive prompt. `list` and
 `rm` need no passphrase at all. `rekey` takes the *new* passphrase from `--new-pass-file <PATH>`
 when given, since the ordinary sources already hold the current one. An age-wrapped file takes an
-SSH private key instead of a passphrase — see `--secret-identity` and `GLIDESH_SECRET_IDENTITY`.
+SSH private key instead of a passphrase: `--secret-identity <PATH>` is accepted by every `secret`
+subcommand and may be given before or after it, falling back to `GLIDESH_SECRET_IDENTITY` and then
+`~/.ssh/id_ed25519`.
+
+```bash
+glidesh secret get db-password --secret-identity ~/.ssh/work_ed25519
+```
 
 ```bash
 glidesh secret init

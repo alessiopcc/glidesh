@@ -16,22 +16,23 @@ use std::path::PathBuf;
 
 pub(crate) fn cmd_secret(args: cli::SecretArgs) -> Result<(), GlideshError> {
     use cli::SecretCommand::*;
+    let id = args.secret_identity.as_deref();
     match args.command {
         Init(a) => secret_init(&a.file, a.provider, &a.recipients),
         Recipients(a) => match a.command {
             cli::RecipientsCommand::List(a) => secret_recipients_list(&a.file),
-            cli::RecipientsCommand::Add(a) => secret_recipients_add(&a.file, &a.recipient),
+            cli::RecipientsCommand::Add(a) => secret_recipients_add(&a.file, &a.recipient, id),
             cli::RecipientsCommand::Rm(a) => {
-                secret_recipients_rm(&a.file, &a.name, a.keep_data_key)
+                secret_recipients_rm(&a.file, &a.name, a.keep_data_key, id)
             }
         },
-        Set(a) => secret_set(&a.file, &a.key, a.value),
-        Get(a) | Decrypt(a) => secret_get(&a.file, &a.key),
+        Set(a) => secret_set(&a.file, &a.key, a.value, id),
+        Get(a) | Decrypt(a) => secret_get(&a.file, &a.key, id),
         List(a) => secret_list(&a.file),
         Rm(a) => secret_remove(&a.file, &a.key),
-        Encrypt(a) => secret_encrypt(&a.file),
-        Rekey(a) => secret_rekey(&a.file, a.rotate_data_key, a.new_pass_file.as_deref()),
-        Edit(a) => secret_edit(&a.file),
+        Encrypt(a) => secret_encrypt(&a.file, id),
+        Rekey(a) => secret_rekey(&a.file, a.rotate_data_key, a.new_pass_file.as_deref(), id),
+        Edit(a) => secret_edit(&a.file, id),
     }
 }
 
@@ -151,11 +152,13 @@ pub(crate) fn secret_identity_path(
     ssh_key.map(expand_tilde).unwrap_or_else(default_ssh_key)
 }
 
-/// Unwrap the data key with whatever credential this file's provider calls for.
+/// Unwrap the data key with whatever credential this file's provider calls for. `identity`
+/// is `--secret-identity`, ignored unless the file is age-wrapped.
 fn unlock_dek(
     cfg: &secrets_config::SecretsConfig,
+    identity: Option<&std::path::Path>,
 ) -> Result<zeroize::Zeroizing<[u8; 32]>, GlideshError> {
-    unlock_dek_with_prompt(cfg, "secret passphrase: ")
+    unlock_dek_with_prompt(cfg, "secret passphrase: ", identity)
 }
 
 /// [`unlock_dek`] with a prompt of its own, so `rekey` can ask for the *current* passphrase.
@@ -164,13 +167,14 @@ fn unlock_dek(
 fn unlock_dek_with_prompt(
     cfg: &secrets_config::SecretsConfig,
     prompt: &str,
+    identity: Option<&std::path::Path>,
 ) -> Result<zeroize::Zeroizing<[u8; 32]>, GlideshError> {
     let identity = match cfg.provider {
         secrets_config::Provider::Passphrase => {
             secrets::Identity::Passphrase(unlock_pass_with_prompt(prompt)?)
         }
         secrets_config::Provider::Age => {
-            secrets::Identity::SshKey(secret_identity_path(None, None))
+            secrets::Identity::SshKey(secret_identity_path(identity, None))
         }
     };
     secrets::unwrap_dek(cfg, &identity)
@@ -263,9 +267,10 @@ fn secret_set(
     file: &std::path::Path,
     key: &str,
     value: Option<String>,
+    identity: Option<&std::path::Path>,
 ) -> Result<(), GlideshError> {
     let (content, cfg) = load_config(file)?;
-    let dek = unlock_dek(&cfg)?;
+    let dek = unlock_dek(&cfg, identity)?;
     let plaintext = match value {
         Some(v) => v,
         None => read_secret_pass(&format!("value for '{key}': "))?,
@@ -316,9 +321,13 @@ fn secret_recipients_list(file: &std::path::Path) -> Result<(), GlideshError> {
     Ok(())
 }
 
-fn secret_recipients_add(file: &std::path::Path, spec: &str) -> Result<(), GlideshError> {
+fn secret_recipients_add(
+    file: &std::path::Path,
+    spec: &str,
+    identity: Option<&std::path::Path>,
+) -> Result<(), GlideshError> {
     let (content, cfg) = age_config(file)?;
-    let dek = unlock_dek(&cfg)?;
+    let dek = unlock_dek(&cfg, identity)?;
 
     let recipient = resolve_recipient(spec, cfg.recipients.len())?;
     if cfg.recipients.iter().any(|r| r.key == recipient.key) {
@@ -340,9 +349,10 @@ fn secret_recipients_rm(
     file: &std::path::Path,
     name: &str,
     keep_data_key: bool,
+    identity: Option<&std::path::Path>,
 ) -> Result<(), GlideshError> {
     let (content, cfg) = age_config(file)?;
-    let dek = unlock_dek(&cfg)?;
+    let dek = unlock_dek(&cfg, identity)?;
 
     let remaining: Vec<SecretRecipient> = cfg
         .recipients
@@ -436,13 +446,17 @@ fn secret_remove(file: &std::path::Path, key: &str) -> Result<(), GlideshError> 
     Ok(())
 }
 
-fn secret_get(file: &std::path::Path, key: &str) -> Result<(), GlideshError> {
+fn secret_get(
+    file: &std::path::Path,
+    key: &str,
+    identity: Option<&std::path::Path>,
+) -> Result<(), GlideshError> {
     // A `secret:v1:…` argument is a token to decrypt in place rather than a name to look
     // up. `secret encrypt` mints tokens for pasting inline into a plan, and this is the
     // only way to read one back without first storing it under some scratch key.
     if secret_token::is_secret_token(key) {
         let (_content, cfg) = load_config(file)?;
-        let dek = unlock_dek(&cfg)?;
+        let dek = unlock_dek(&cfg, identity)?;
         println!("{}", secret_token::decrypt_value(&dek, key)?.as_str());
         return Ok(());
     }
@@ -457,7 +471,7 @@ fn secret_get(file: &std::path::Path, key: &str) -> Result<(), GlideshError> {
         return Ok(());
     }
     let cfg = parsed.config.ok_or_else(|| not_initialized(file))?;
-    let dek = unlock_dek(&cfg)?;
+    let dek = unlock_dek(&cfg, identity)?;
     let plaintext = secret_token::decrypt_value(&dek, value)?;
     println!("{}", plaintext.as_str());
     Ok(())
@@ -472,9 +486,12 @@ fn strip_trailing_newline(input: &str) -> &str {
         .unwrap_or(input)
 }
 
-fn secret_encrypt(file: &std::path::Path) -> Result<(), GlideshError> {
+fn secret_encrypt(
+    file: &std::path::Path,
+    identity: Option<&std::path::Path>,
+) -> Result<(), GlideshError> {
     let (_content, cfg) = load_config(file)?;
-    let dek = unlock_dek(&cfg)?;
+    let dek = unlock_dek(&cfg, identity)?;
     use std::io::Read;
     let mut input = String::new();
     std::io::stdin()
@@ -528,9 +545,10 @@ fn secret_rekey(
     file: &std::path::Path,
     rotate_data_key: bool,
     new_pass_file: Option<&std::path::Path>,
+    identity: Option<&std::path::Path>,
 ) -> Result<(), GlideshError> {
     let (content, cfg) = load_config(file)?;
-    let dek = unlock_dek_with_prompt(&cfg, "current passphrase: ")?;
+    let dek = unlock_dek_with_prompt(&cfg, "current passphrase: ", identity)?;
 
     // An age-wrapped file has no passphrase to change: who can unlock it is the recipient
     // list. Rotating its data key is still meaningful, so that half is honoured here and
@@ -648,7 +666,10 @@ fn edit_temp_path(file: &std::path::Path) -> PathBuf {
     std::env::temp_dir().join(format!("{stem}-{hex}.kdl"))
 }
 
-fn secret_edit(file: &std::path::Path) -> Result<(), GlideshError> {
+fn secret_edit(
+    file: &std::path::Path,
+    identity: Option<&std::path::Path>,
+) -> Result<(), GlideshError> {
     let content = secret_store::read(file)?;
     let parsed = secrets_config::parse_secrets_file(&content)?;
     let cfg = parsed.config.ok_or_else(|| not_initialized(file))?;
@@ -659,7 +680,7 @@ fn secret_edit(file: &std::path::Path) -> Result<(), GlideshError> {
                     .to_string(),
         });
     }
-    let dek = unlock_dek(&cfg)?;
+    let dek = unlock_dek(&cfg, identity)?;
 
     // Decrypt values into an editable view; remember which keys were secret so they are
     // re-encrypted on save (new keys added in the editor are stored as plaintext — use

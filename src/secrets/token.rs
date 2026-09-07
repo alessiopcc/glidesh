@@ -20,7 +20,13 @@ const NONCE_LEN: usize = 24;
 /// Poly1305 authentication tag length.
 const TAG_LEN: usize = 16;
 
-/// True if the whole string is a secret token.
+/// True if the string *starts* with the token prefix — the test for "this whole value is a
+/// secret", as opposed to [`contains_secret_token`]'s test for one embedded in a larger string.
+///
+/// Deliberately a prefix test and not a full validation. Callers use it to route a value to
+/// whole-value decryption, and a value that opens with the prefix but carries trailing junk
+/// is a malformed token, not a plain string: letting [`decrypt_value`] reject it reports the
+/// problem, where a stricter test here would silently pass the ciphertext through untouched.
 pub fn is_secret_token(s: &str) -> bool {
     s.starts_with(SECRET_PREFIX)
 }

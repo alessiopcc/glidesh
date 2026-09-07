@@ -241,10 +241,14 @@ impl Secrets {
     }
 
     fn locked_error(&self) -> GlideshError {
+        // `has_metadata` is false both when no file was found and when one was found without
+        // a `secrets` block, so the hint speaks to the missing provider metadata rather than
+        // claiming a file that may be sitting right there does not exist.
         let hint = if self.has_metadata {
             "provide the passphrase via GLIDESH_SECRET_PASS or --ask-secret-pass"
         } else {
-            "no secrets.kdl found — run `glidesh secret init`, or point at one with --secrets / GLIDESH_SECRETS"
+            "no secrets provider is configured — run `glidesh secret init` to create or \
+             initialize a secrets.kdl, or point at an existing one with --secrets / GLIDESH_SECRETS"
         };
         GlideshError::Secret {
             message: format!("encrypted value found but the secrets key is unavailable — {hint}"),
