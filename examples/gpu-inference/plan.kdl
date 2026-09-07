@@ -1,0 +1,67 @@
+plan "gpu-inference" {
+    mode "sync"
+
+    vars {
+        model "zai-org/GLM-4.6"
+        model-dir "/srv/models"
+        api-port 8000
+    }
+
+    step "Fetch model weights" {
+        container "hf-download" {
+            state "run-once"
+            image "python:3.12-slim"
+            entrypoint "/bin/bash"
+            command #"-c "pip install -q huggingface_hub && hf download ${model} --local-dir /models/${model}""#
+            volumes {
+                - "${model-dir}:/models"
+            }
+            environment {
+                HF_HUB_ENABLE_HF_TRANSFER "1"
+            }
+            check "test -d ${model-dir}/${model}"
+            timeout 7200
+            retries 3
+            delay 30
+        }
+    }
+
+    step "Serve the model" subscribe="Fetch model weights" {
+        container "vllm" {
+            image "vllm/vllm-openai:latest"
+            restart "always"
+
+            // CUDA IPC needs the host IPC namespace: without it a sidecar that
+            // maps vLLM's GPU tensors fails with cudaErrorMapBufferObjectFailed.
+            ipc "host"
+            privileged #true
+            gpus "all"
+            shm-size "16g"
+            ulimits {
+                memlock "-1"
+                stack "67108864"
+            }
+
+            ports {
+                - "${api-port}:8000"
+            }
+            volumes {
+                - "${model-dir}:/models"
+            }
+            command "--model /models/${model} --served-model-name ${model}"
+
+            healthcheck {
+                cmd "curl -sf http://localhost:8000/health"
+                interval 10
+                start-period 120
+                retries 3
+            }
+            wait "healthy"
+            wait-timeout 1800
+        }
+    }
+
+    step "Smoke test the API" subscribe="Serve the model" {
+        shell "curl -sf http://localhost:${api-port}/v1/models"
+    }
+}

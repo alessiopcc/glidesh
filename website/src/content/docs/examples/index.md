@@ -33,9 +33,17 @@ Create deploy users with specific shells, groups, and SSH authorized keys.
 
 Deploy a containerized application with port mappings, environment variables, and persistent volumes.
 
-**Modules used:** container, shell
+**Modules used:** container
 
 [View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/container-app)
+
+## gpu-inference
+
+Deploy a GPU inference server: a one-shot weight download, host IPC namespace and GPU flags, and a readiness gate that blocks until the API is serving.
+
+**Modules used:** container, shell, subscribe
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/gpu-inference)
 
 ## disk-management
 

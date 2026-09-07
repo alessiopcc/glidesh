@@ -1,0 +1,3 @@
+group "gpu" {
+    host "gpu-1" "10.0.2.10" user="deploy"
+}

@@ -140,7 +140,7 @@ pub(crate) async fn exec_timed(
     }
 }
 
-fn accepted(exit_code: i32, success_codes: &Option<HashSet<i32>>) -> bool {
+pub(crate) fn accepted(exit_code: i32, success_codes: &Option<HashSet<i32>>) -> bool {
     match success_codes {
         // Absent success_codes accepts only the conventional success code, 0.
         None => exit_code == 0,
@@ -148,7 +148,7 @@ fn accepted(exit_code: i32, success_codes: &Option<HashSet<i32>>) -> bool {
     }
 }
 
-fn describe_success_codes(success_codes: &Option<HashSet<i32>>) -> String {
+pub(crate) fn describe_success_codes(success_codes: &Option<HashSet<i32>>) -> String {
     match success_codes {
         None => "0".to_string(),
         Some(codes) => {
