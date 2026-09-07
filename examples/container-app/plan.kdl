@@ -21,13 +21,11 @@ plan "container-app" {
             volumes {
                 - "/data/webapp:/usr/share/nginx/html"
             }
-        }
-    }
 
-    step "Health check" {
-        shell "curl -sf http://localhost:${app-port}" {
-            retries 10
-            delay 3
+            // The step does not finish until the app answers, so anything
+            // subscribing to it can rely on the service being up.
+            ready-cmd "curl -sf http://localhost:${app-port}"
+            wait-timeout 60
         }
     }
 }
