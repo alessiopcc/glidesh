@@ -596,11 +596,38 @@ struct TempShredder(PathBuf);
 
 impl Drop for TempShredder {
     fn drop(&mut self) {
-        if let Ok(meta) = std::fs::metadata(&self.0) {
-            let _ = std::fs::write(&self.0, vec![0u8; meta.len() as usize]);
-        }
+        shred(&self.0);
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// Overwrite a file's bytes with zeros, in fixed-size chunks.
+///
+/// The chunk is fixed rather than the file's length because the file is a decrypted view of
+/// a vault of unknown size: allocating a buffer as large as it would mirror the plaintext in
+/// memory at the very moment we are trying to be rid of it, and on a 32-bit target the
+/// `u64 → usize` cast could wrap. Best-effort throughout — this runs from `Drop`, and a
+/// journaling or copy-on-write filesystem may keep the original blocks regardless.
+fn shred(path: &std::path::Path) {
+    use std::io::Write;
+    const CHUNK: usize = 8 * 1024;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path) else {
+        return;
+    };
+    let zeros = [0u8; CHUNK];
+    let mut remaining = meta.len();
+    while remaining > 0 {
+        let n = remaining.min(CHUNK as u64) as usize;
+        if file.write_all(&zeros[..n]).is_err() {
+            return;
+        }
+        remaining -= n as u64;
+    }
+    let _ = file.flush();
 }
 
 /// Path for `secret edit`'s transient decrypted view: a uniquely named file in the system
@@ -647,7 +674,8 @@ fn secret_edit(file: &std::path::Path) -> Result<(), GlideshError> {
     keys.sort();
     let mut editable = String::from(
         "// glidesh secret edit — values are decrypted here and re-encrypted on save.\n\
-         // The secrets{} provider block is managed separately. Add new secrets with `secret set`.\n\n",
+         // The `secrets` block holding the provider and wrapped key is managed separately,\n\
+         // and is not shown here. Add new secrets with `secret set`.\n\n",
     );
     for key in &keys {
         let value = &parsed.vars[*key];
@@ -708,11 +736,54 @@ fn secret_edit(file: &std::path::Path) -> Result<(), GlideshError> {
     Ok(())
 }
 
+/// Split `$VISUAL`/`$EDITOR` into a program and its arguments, honouring quotes.
+///
+/// The variable routinely carries flags (`code --wait`), and on Windows the program is
+/// routinely a quoted path with spaces in it (`"C:\Program Files\…\Code.exe" --wait`).
+/// Splitting on whitespace alone would tear that path into three unusable arguments.
+/// Quotes only group; no escape processing, which is what a shell would do to a Windows
+/// path's backslashes.
+fn split_editor_command(command: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+
+    for ch in command.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                started = true;
+            }
+            None if ch.is_whitespace() => {
+                if started {
+                    parts.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                started = true;
+            }
+        }
+    }
+    if started {
+        parts.push(current);
+    }
+    parts
+}
+
 fn launch_editor(path: &std::path::Path) -> Result<(), GlideshError> {
     let editor = std::env::var("VISUAL")
         .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .unwrap_or_else(|| {
             if cfg!(windows) {
                 "notepad".to_string()
@@ -720,9 +791,11 @@ fn launch_editor(path: &std::path::Path) -> Result<(), GlideshError> {
                 "vi".to_string()
             }
         });
-    let mut parts = editor.split_whitespace();
-    let program = parts.next().unwrap_or("vi");
-    let status = std::process::Command::new(program)
+    let mut parts = split_editor_command(&editor).into_iter();
+    let program = parts.next().ok_or_else(|| GlideshError::Secret {
+        message: format!("could not read an editor command from '{editor}'"),
+    })?;
+    let status = std::process::Command::new(&program)
         .args(parts)
         .arg(path)
         .status()
@@ -770,6 +843,54 @@ mod tests {
         let err = read_pass_file(&path).unwrap_err().to_string();
         assert!(err.contains("empty"), "got: {err}");
         assert!(read_pass_file(&dir.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn editor_command_keeps_a_quoted_program_path_in_one_piece() {
+        assert_eq!(split_editor_command("vi"), ["vi"]);
+        assert_eq!(
+            split_editor_command("  code   --wait  "),
+            ["code", "--wait"]
+        );
+        assert_eq!(
+            split_editor_command(r#""C:\Program Files\Microsoft VS Code\Code.exe" --wait"#),
+            [r"C:\Program Files\Microsoft VS Code\Code.exe", "--wait"]
+        );
+        assert_eq!(
+            split_editor_command("'/usr/local/bin/my editor' -f"),
+            ["/usr/local/bin/my editor", "-f"]
+        );
+        // A quote closing mid-token joins what is on either side of it, the way a shell
+        // would: this is one program name, not two arguments.
+        assert_eq!(
+            split_editor_command(r#"/opt/"my ed"/run"#),
+            ["/opt/my ed/run"]
+        );
+        assert!(split_editor_command("   ").is_empty());
+    }
+
+    #[test]
+    fn shred_zeroes_a_file_without_changing_its_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain");
+        // Larger than one chunk, so the loop runs more than once.
+        let content = "db-password \"hunter2\"\n".repeat(1000);
+        std::fs::write(&path, &content).unwrap();
+
+        shred(&path);
+
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(after.len(), content.len());
+        assert!(
+            after.iter().all(|b| *b == 0),
+            "plaintext survived the shred"
+        );
+    }
+
+    #[test]
+    fn shredding_a_missing_file_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        shred(&dir.path().join("never-existed"));
     }
 
     #[test]

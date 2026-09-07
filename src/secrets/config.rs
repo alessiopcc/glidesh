@@ -86,6 +86,15 @@ pub fn parse_secrets_file(input: &str) -> Result<SecretsFile, GlideshError> {
     for node in doc.nodes() {
         let name = node.name().to_string();
         if name == "secrets" {
+            // Two blocks are almost always a botched merge. Taking the last one silently
+            // would decrypt against provider metadata the file also contradicts.
+            if file.config.is_some() {
+                return Err(GlideshError::Secret {
+                    message: "more than one `secrets` block in the secrets file; keep exactly \
+                              one (a merge may have left two behind)"
+                        .to_string(),
+                });
+            }
             file.config = Some(parse_secrets_block(node)?);
             continue;
         }
@@ -191,8 +200,11 @@ fn dup(name: &str) -> GlideshError {
 }
 
 /// Locate the secrets file: an explicit path, then `$GLIDESH_SECRETS`, then
-/// `secrets.kdl` next to the inventory, then `./secrets.kdl`. Returns the first that
-/// exists.
+/// `secrets.kdl` next to the inventory, then `./secrets.kdl`.
+///
+/// Only the last two are probed for existence. A path the user named outright — by flag or
+/// by environment — is returned whether or not it is there, so a typo fails loudly at open
+/// time instead of being skipped in favour of some other vault that happens to exist.
 pub fn discover_secrets_path(explicit: Option<&Path>, inv_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(p) = explicit {
         return Some(p.to_path_buf());
@@ -218,6 +230,24 @@ pub fn discover_secrets_path(explicit: Option<&Path>, inv_dir: Option<&Path>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_secrets_block_is_rejected_rather_than_silently_winning() {
+        let input = r#"
+secrets {
+    provider "passphrase"
+    encryptedkey "v1:AAAA"
+}
+
+secrets {
+    provider "age"
+    encryptedkey "agev1:BBBB"
+    recipient "alice" key="ssh-ed25519 AAAA"
+}
+"#;
+        let err = parse_secrets_file(input).unwrap_err().to_string();
+        assert!(err.contains("more than one"), "got: {err}");
+    }
 
     #[test]
     fn parses_block_and_vars() {

@@ -162,8 +162,8 @@ impl NodeRunner {
         let mut vars = self.host.vars.clone();
         vars.extend(self.plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-        // Inject built-in host vars under the reserved `@host.*` namespace (cannot be
-        // overridden — user var names may not start with `@`).
+        // Last, so nothing can shadow these — and user var names may not start with `@`
+        // anyway, so the reserved namespace cannot be reached from a config file at all.
         vars.extend(host_builtin_vars(&self.host));
 
         // Build template data: inventory @-refs + plan structured vars.
@@ -713,7 +713,6 @@ mod tests {
         );
         assert_eq!(vars.get("@host.user").map(String::as_str), Some("deploy"));
         assert_eq!(vars.get("@host.port").map(String::as_str), Some("2222"));
-        // The bare aliases were removed.
         assert!(!vars.contains_key("host.name"));
         assert!(!vars.contains_key("host.port"));
     }
