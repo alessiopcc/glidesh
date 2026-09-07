@@ -5,6 +5,7 @@
 //! hand-maintained list of parameters, so a newly supported flag can never be
 //! forgotten by the drift check.
 
+use crate::config::types::ParamValue;
 use crate::error::GlideshError;
 use crate::modules::ModuleParams;
 use crate::util::shell_escape;
@@ -90,6 +91,107 @@ const SPECIAL_PARAMS: &[&str] = &["command", "extra-args", "gpus", "healthcheck"
 /// Recognised keys inside a `healthcheck` block.
 const HEALTHCHECK_KEYS: &[&str] = &["cmd", "interval", "retries", "start-period", "timeout"];
 
+/// List flags whose element order carries no meaning to the runtime. Their values
+/// are sorted before hashing so that reordering `ports` in a plan is a cosmetic
+/// edit rather than a recreate — and therefore not downtime for a running service.
+/// `security-opt` is deliberately absent: repeated options with the same key can
+/// be last-one-wins, so order there can change behaviour.
+const ORDER_INSENSITIVE_LISTS: &[&str] = &[
+    "add-host",
+    "cap-add",
+    "cap-drop",
+    "devices",
+    "dns",
+    "network-alias",
+    "ports",
+    "tmpfs",
+    "volumes",
+];
+
+/// The value shape a parameter accepts. Checked up front so a mistyped value
+/// fails loudly instead of being dropped by a `None` from a typed accessor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// A string.
+    Text,
+    /// A string, or an integer that is stringified (`memory 2048`).
+    Scalar,
+    /// `#true` / `#false`.
+    Flag,
+    /// A `key { - "value" }` list block.
+    List,
+    /// A `key { name "value" }` block.
+    Map,
+    /// An integer.
+    Count,
+}
+
+impl Shape {
+    fn accepts(self, value: &ParamValue) -> bool {
+        match self {
+            Shape::Text => matches!(value, ParamValue::String(_)),
+            Shape::Scalar => matches!(value, ParamValue::String(_) | ParamValue::Integer(_)),
+            Shape::Flag => matches!(value, ParamValue::Bool(_)),
+            Shape::List => matches!(value, ParamValue::List(_)),
+            Shape::Map => matches!(value, ParamValue::Map(_)),
+            Shape::Count => matches!(value, ParamValue::Integer(_)),
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Shape::Text => "a string",
+            Shape::Scalar => "a string or an integer",
+            Shape::Flag => "a boolean (#true or #false)",
+            Shape::List => "a list block, e.g. ports { - \"8080:80\" }",
+            Shape::Map => "a block of key/value pairs",
+            Shape::Count => "an integer",
+        }
+    }
+}
+
+/// The shape a known parameter accepts, or `None` if the parameter is unknown.
+/// `success_codes` is absent on purpose: it accepts a string, an integer or a
+/// list, and `parse_success_codes` already reports a bad value precisely.
+fn shape_of(key: &str) -> Option<Shape> {
+    if key == "success_codes" {
+        return None;
+    }
+    if EQ_FLAGS.iter().any(|(k, _)| *k == key)
+        || VALUE_FLAGS.iter().any(|(k, _)| *k == key)
+        || key == "gpus"
+    {
+        return Some(Shape::Scalar);
+    }
+    if BOOL_FLAGS.iter().any(|(k, _)| *k == key) {
+        return Some(Shape::Flag);
+    }
+    if LIST_FLAGS.iter().any(|(k, _)| *k == key) || key == "extra-args" {
+        return Some(Shape::List);
+    }
+    if MAP_FLAGS.iter().any(|(k, _)| *k == key) || key == "healthcheck" {
+        return Some(Shape::Map);
+    }
+    match key {
+        "image" | "command" | "state" | "runtime" | "check" | "ready-cmd" | "wait" => {
+            Some(Shape::Text)
+        }
+        "install-runtime" | "remove" => Some(Shape::Flag),
+        "timeout" | "retries" | "delay" | "wait-timeout" | "wait-interval" => Some(Shape::Count),
+        _ => None,
+    }
+}
+
+/// A scalar parameter as text. Integers are accepted and stringified so
+/// `memory 2048` behaves like `memory "2048"` rather than being silently dropped.
+fn text_of(params: &ModuleParams, key: &str) -> Option<String> {
+    match params.args.get(key)? {
+        ParamValue::String(s) => Some(s.clone()),
+        ParamValue::Integer(i) => Some(i.to_string()),
+        _ => None,
+    }
+}
+
 /// The runtimes glidesh knows how to drive. `runtime` reaches a shell command and
 /// selects the package set for `install-runtime`, so an unrecognised value would
 /// otherwise produce nonsense commands and install the wrong packages.
@@ -127,6 +229,26 @@ pub(super) fn validate_params(params: &ModuleParams) -> Result<(), GlideshError>
         });
     }
 
+    let mut mistyped: Vec<String> = params
+        .args
+        .iter()
+        .filter_map(|(key, value)| {
+            let shape = shape_of(key)?;
+            (!shape.accepts(value)).then(|| format!("'{}' must be {}", key, shape.describe()))
+        })
+        .collect();
+    if !mistyped.is_empty() {
+        mistyped.sort();
+        return Err(GlideshError::Module {
+            module: "container".to_string(),
+            message: format!(
+                "container '{}': {}",
+                params.resource_name,
+                mistyped.join("; ")
+            ),
+        });
+    }
+
     if let Some(runtime) = params.args.get("runtime") {
         let value = runtime.as_str().unwrap_or("");
         if !value.is_empty() && !SUPPORTED_RUNTIMES.contains(&value) {
@@ -145,16 +267,46 @@ pub(super) fn validate_params(params: &ModuleParams) -> Result<(), GlideshError>
     Ok(())
 }
 
+/// The `run` invocation in two views, built in one pass from the same values.
+pub(super) struct RunArgs {
+    /// Every token following `run [-d] --name <name>`, in emission order.
+    pub tokens: Vec<String>,
+    /// The same content, canonicalised for hashing: values of order-insensitive
+    /// list flags are sorted, so reordering them in a plan is not drift.
+    canonical: Vec<String>,
+}
+
+impl RunArgs {
+    fn push(&mut self, token: String) {
+        self.canonical.push(token.clone());
+        self.tokens.push(token);
+    }
+
+    /// Emit one `--flag value` pair per element, in plan order for the command
+    /// and in sorted order for the hash when the flag is order-insensitive.
+    fn push_list(&mut self, flag: &str, values: &[String], order_matters: bool) {
+        for value in values {
+            self.tokens.push(flag.to_string());
+            self.tokens.push(shell_escape(value));
+        }
+        let mut canonical: Vec<&String> = values.iter().collect();
+        if !order_matters {
+            canonical.sort_unstable();
+        }
+        for value in canonical {
+            self.canonical.push(flag.to_string());
+            self.canonical.push(shell_escape(value));
+        }
+    }
+}
+
 /// Build every token that follows `run [-d] --name <name>`, in a fixed order so
 /// the command — and the hash taken over it — is stable across runs.
 pub(super) fn build_run_args(
     runtime: &str,
     params: &ModuleParams,
-) -> Result<Vec<String>, GlideshError> {
-    let raw_image = params
-        .args
-        .get("image")
-        .and_then(|v| v.as_str())
+) -> Result<RunArgs, GlideshError> {
+    let raw_image = text_of(params, "image")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| GlideshError::Module {
             module: "container".to_string(),
@@ -164,18 +316,21 @@ pub(super) fn build_run_args(
             ),
         })?;
 
-    let mut args: Vec<String> = Vec::new();
+    let mut args = RunArgs {
+        tokens: Vec::new(),
+        canonical: Vec::new(),
+    };
 
     for (key, flag) in EQ_FLAGS {
-        if let Some(value) = params.args.get(*key).and_then(|v| v.as_str()) {
-            args.push(format!("{}={}", flag, shell_escape(value)));
+        if let Some(value) = text_of(params, key) {
+            args.push(format!("{}={}", flag, shell_escape(&value)));
         }
     }
 
     for (key, flag) in VALUE_FLAGS {
-        if let Some(value) = params.args.get(*key).and_then(|v| v.as_str()) {
+        if let Some(value) = text_of(params, key) {
             args.push(flag.to_string());
-            args.push(shell_escape(value));
+            args.push(shell_escape(&value));
         }
     }
 
@@ -185,16 +340,15 @@ pub(super) fn build_run_args(
         }
     }
 
-    if let Some(gpus) = params.args.get("gpus").and_then(|v| v.as_str()) {
-        args.extend(gpu_args(runtime, gpus));
+    if let Some(gpus) = text_of(params, "gpus") {
+        for token in gpu_args(runtime, &gpus) {
+            args.push(token);
+        }
     }
 
     for (key, flag) in LIST_FLAGS {
         if let Some(values) = params.args.get(*key).and_then(|v| v.as_list()) {
-            for value in values {
-                args.push(flag.to_string());
-                args.push(shell_escape(value));
-            }
+            args.push_list(flag, values, !ORDER_INSENSITIVE_LISTS.contains(key));
         }
     }
 
@@ -209,21 +363,26 @@ pub(super) fn build_run_args(
         }
     }
 
-    args.extend(healthcheck_args(params)?);
-
-    // Escape hatch: forwarded verbatim, unquoted, for flags glidesh has no
-    // first-class parameter for.
-    if let Some(extra) = params.args.get("extra-args").and_then(|v| v.as_list()) {
-        args.extend(extra.iter().cloned());
+    for token in healthcheck_args(params)? {
+        args.push(token);
     }
 
-    args.push(shell_escape(&qualify_image(raw_image, runtime)));
+    // Escape hatch: forwarded verbatim, unquoted, for flags glidesh has no
+    // first-class parameter for. Order is preserved everywhere, including in the
+    // hash — these are raw flags whose order can matter.
+    if let Some(extra) = params.args.get("extra-args").and_then(|v| v.as_list()) {
+        for token in extra {
+            args.push(token.clone());
+        }
+    }
+
+    args.push(shell_escape(&qualify_image(&raw_image, runtime)));
 
     // The command keeps its own quoting so shell metacharacters written in the
     // plan (`nginx -g 'daemon off;'`) reach the container intact.
-    if let Some(command) = params.args.get("command").and_then(|v| v.as_str()) {
+    if let Some(command) = text_of(params, "command") {
         if !command.is_empty() {
-            args.push(command.to_string());
+            args.push(command);
         }
     }
 
@@ -323,7 +482,7 @@ fn hash_args(args: &[String]) -> String {
 /// Hash of the container's full desired spec, stored as a label so a later run
 /// can tell whether the plan has changed under a live container.
 pub(super) fn spec_hash(runtime: &str, params: &ModuleParams) -> Result<String, GlideshError> {
-    Ok(hash_args(&build_run_args(runtime, params)?))
+    Ok(hash_args(&build_run_args(runtime, params)?.canonical))
 }
 
 /// `<runtime> run -d` for a long-lived container, labelled with its spec hash.
@@ -333,14 +492,14 @@ pub(super) fn build_run_command(
     params: &ModuleParams,
 ) -> Result<String, GlideshError> {
     let args = build_run_args(runtime, params)?;
-    let hash = hash_args(&args);
+    let hash = hash_args(&args.canonical);
     Ok(format!(
         "{} run -d --name {} --label {}={} {}",
         runtime,
         shell_escape(container_name),
         PARAM_HASH_LABEL,
         hash,
-        args.join(" ")
+        args.tokens.join(" ")
     ))
 }
 
@@ -371,7 +530,7 @@ pub(super) fn build_run_once_command(
         runtime,
         if remove { " --rm" } else { "" },
         shell_escape(container_name),
-        args.join(" ")
+        args.tokens.join(" ")
     ))
 }
 
@@ -402,7 +561,6 @@ pub(super) fn is_builtin_network(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::ParamValue;
     use std::collections::HashMap;
 
     fn make_params(args: Vec<(&str, ParamValue)>) -> ModuleParams {
@@ -674,9 +832,8 @@ mod tests {
         assert!(err.contains("privledged"));
     }
 
-    #[test]
-    fn validate_accepts_every_documented_param() {
-        for key in GLIDESH_PARAMS
+    fn every_param() -> impl Iterator<Item = &'static &'static str> {
+        GLIDESH_PARAMS
             .iter()
             .chain(SPECIAL_PARAMS)
             .chain(EQ_FLAGS.iter().map(|(k, _)| k))
@@ -684,10 +841,167 @@ mod tests {
             .chain(BOOL_FLAGS.iter().map(|(k, _)| k))
             .chain(LIST_FLAGS.iter().map(|(k, _)| k))
             .chain(MAP_FLAGS.iter().map(|(k, _)| k))
-        {
-            let value = if *key == "runtime" { "docker" } else { "v" };
-            let params = make_params(vec![(key, ParamValue::String(value.into()))]);
+    }
+
+    fn sample_for(key: &str) -> ParamValue {
+        if key == "runtime" {
+            return ParamValue::String("docker".into());
+        }
+        match shape_of(key) {
+            Some(Shape::Flag) => ParamValue::Bool(true),
+            Some(Shape::List) => ParamValue::List(vec!["v".into()]),
+            Some(Shape::Map) => map(&[("cmd", "true")]),
+            Some(Shape::Count) => ParamValue::Integer(1),
+            _ => ParamValue::String("v".into()),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_every_documented_param() {
+        for key in every_param() {
+            let params = make_params(vec![(key, sample_for(key))]);
             assert!(validate_params(&params).is_ok(), "{key} rejected");
+        }
+    }
+
+    /// Every documented parameter must declare a shape, or a mistyped value for
+    /// it would still be dropped in silence.
+    #[test]
+    fn every_param_has_a_declared_shape() {
+        for key in every_param() {
+            assert!(
+                shape_of(key).is_some() || *key == "success_codes",
+                "{key} has no declared shape"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_mistyped_values() {
+        for (key, value, expected) in [
+            // The dangerous one: a string where a list block belongs would
+            // otherwise produce a container with no published ports.
+            ("ports", ParamValue::String("8080:80".into()), "list block"),
+            ("volumes", ParamValue::String("/a:/b".into()), "list block"),
+            ("privileged", ParamValue::String("yes".into()), "boolean"),
+            ("runtime", ParamValue::Bool(true), "must be a string"),
+            ("wait", ParamValue::Integer(1), "must be a string"),
+            ("wait-timeout", ParamValue::String("900".into()), "integer"),
+            ("environment", ParamValue::String("A=1".into()), "key/value"),
+            (
+                "healthcheck",
+                ParamValue::String("true".into()),
+                "key/value",
+            ),
+            (
+                "install-runtime",
+                ParamValue::String("true".into()),
+                "boolean",
+            ),
+        ] {
+            let params = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                (key, value),
+            ]);
+            let err = validate_params(&params).unwrap_err().to_string();
+            assert!(err.contains(key), "{key}: {err}");
+            assert!(err.contains(expected), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn scalar_flags_accept_integers() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("x".into())),
+            ("memory", ParamValue::Integer(2048)),
+            ("shm-size", ParamValue::Integer(16)),
+        ]);
+        validate_params(&params).unwrap();
+        let cmd = build_run_command("docker", "x", &params).unwrap();
+        assert!(cmd.contains("--memory '2048'"), "{cmd}");
+        assert!(cmd.contains("--shm-size '16'"), "{cmd}");
+    }
+
+    /// Reordering a list whose order the runtime ignores is a cosmetic edit, not
+    /// drift: recreating a live container over it would be needless downtime.
+    #[test]
+    fn reordering_order_insensitive_lists_is_not_drift() {
+        for key in ORDER_INSENSITIVE_LISTS {
+            let forward = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                (
+                    key,
+                    ParamValue::List(vec!["a".into(), "b".into(), "c".into()]),
+                ),
+            ]);
+            let shuffled = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                (
+                    key,
+                    ParamValue::List(vec!["c".into(), "a".into(), "b".into()]),
+                ),
+            ]);
+            assert_eq!(
+                spec_hash("docker", &forward).unwrap(),
+                spec_hash("docker", &shuffled).unwrap(),
+                "{key} reorder was treated as drift"
+            );
+        }
+    }
+
+    #[test]
+    fn the_command_keeps_the_plan_order_it_was_written_in() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("x".into())),
+            (
+                "ports",
+                ParamValue::List(vec!["9090:90".into(), "8080:80".into()]),
+            ),
+        ]);
+        let cmd = build_run_command("docker", "x", &params).unwrap();
+        assert!(
+            cmd.find("9090:90").unwrap() < cmd.find("8080:80").unwrap(),
+            "sorting is for the hash only: {cmd}"
+        );
+    }
+
+    #[test]
+    fn changing_a_list_value_is_still_drift() {
+        let before = make_params(vec![
+            ("image", ParamValue::String("x".into())),
+            ("ports", ParamValue::List(vec!["8080:80".into()])),
+        ]);
+        let after = make_params(vec![
+            ("image", ParamValue::String("x".into())),
+            ("ports", ParamValue::List(vec!["9090:80".into()])),
+        ]);
+        assert_ne!(
+            spec_hash("docker", &before).unwrap(),
+            spec_hash("docker", &after).unwrap()
+        );
+    }
+
+    /// `extra-args` and `security-opt` are raw enough that order can change
+    /// behaviour, so a reorder must still count as drift.
+    #[test]
+    fn reordering_order_sensitive_lists_is_drift() {
+        for (key, a, b) in [
+            ("extra-args", "--cpuset-cpus=0", "--cpuset-cpus=1"),
+            ("security-opt", "seccomp=unconfined", "label=disable"),
+        ] {
+            let forward = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                (key, ParamValue::List(vec![a.into(), b.into()])),
+            ]);
+            let reversed = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                (key, ParamValue::List(vec![b.into(), a.into()])),
+            ]);
+            assert_ne!(
+                spec_hash("docker", &forward).unwrap(),
+                spec_hash("docker", &reversed).unwrap(),
+                "{key} reorder must be drift"
+            );
         }
     }
 
@@ -711,6 +1025,45 @@ mod tests {
                 ("runtime", ParamValue::String((*value).into())),
             ]);
             assert!(validate_params(&params).is_ok(), "{value} rejected");
+        }
+    }
+
+    /// The examples are documentation people copy. If validation would reject
+    /// them, the docs are wrong or the validation is.
+    #[test]
+    fn shipped_examples_pass_validation() {
+        for (name, source) in [
+            (
+                "gpu-inference",
+                include_str!("../../../examples/gpu-inference/plan.kdl"),
+            ),
+            (
+                "container-app",
+                include_str!("../../../examples/container-app/plan.kdl"),
+            ),
+            (
+                "hello-echo",
+                include_str!("../../../examples/hello-echo/plan.kdl"),
+            ),
+        ] {
+            let plan = crate::config::plan::parse_plan(source)
+                .unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
+            let mut seen = 0;
+            for step in plan.steps() {
+                for task in &step.tasks {
+                    if task.module != "container" {
+                        continue;
+                    }
+                    seen += 1;
+                    let params = ModuleParams {
+                        resource_name: task.resource.clone(),
+                        args: task.args.clone(),
+                    };
+                    validate_params(&params)
+                        .unwrap_or_else(|e| panic!("{name}/{}: {e}", task.resource));
+                }
+            }
+            assert!(seen > 0, "{name} has no container tasks to check");
         }
     }
 

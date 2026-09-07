@@ -30,7 +30,7 @@ container "myapp" {
 }
 ```
 
-Unknown parameters are rejected at check time, so a typo (`privledged`) fails loudly instead of being silently dropped. The same applies to values glidesh cannot act on: an unsupported `runtime`, or `wait "healthy"` on a container that has no healthcheck.
+Unknown parameters are rejected at check time, so a typo (`privledged`) fails loudly instead of being silently dropped. So are mistyped ones: `ports "8080:80"` written as a string rather than a list block would otherwise produce a container with no published ports and no error. Values glidesh cannot act on — an unsupported `runtime`, for instance — are rejected the same way.
 
 ## States
 
@@ -159,7 +159,7 @@ container "lmcache" {
 
 When readiness is not reached in time, the task fails with the container's last 30 log lines attached.
 
-A readiness condition that can never hold is treated as a plan error rather than a wait: `wait "healthy"` on a container with no healthcheck fails immediately, at check time, instead of polling until the timeout and reporting success under `--dry-run`.
+A readiness condition that can never hold is reported as a plan error rather than waited out. `wait "healthy"` on a container with no healthcheck fails as soon as there is a container to inspect — during apply on the first run, at check time on every run after that — rather than polling to `wait-timeout` first. Because glidesh cannot know whether an image carries its own `HEALTHCHECK` until the container exists, a first-run `--dry-run` cannot catch this.
 
 ### One-shot jobs
 
@@ -205,6 +205,8 @@ Every parameter that reaches the runtime is folded into a hash stored on the con
 - **Hash matches, container running** → nothing to do (then the readiness gate, if any, is evaluated).
 
 The hash is computed from the generated `run` arguments rather than a hand-maintained list, so any parameter you set affects drift detection.
+
+Lists whose order the runtime ignores — `ports`, `volumes`, `devices`, `dns`, `add-host`, `network-alias`, `tmpfs`, `cap-add`, `cap-drop` — are compared order-insensitively, so reordering their entries is a cosmetic edit rather than a recreate. `extra-args` and `security-opt` are compared in order, since order can change what they mean.
 
 Removal is verified: if the existing container cannot be removed, the task fails with that reason rather than letting the follow-up `run` fail with the runtime's opaque "name is already in use".
 
