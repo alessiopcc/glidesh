@@ -136,6 +136,7 @@ impl ExternalModule {
             os_info: ctx.os_info,
             vars: visible.as_ref(),
             dry_run: ctx.dry_run,
+            diff: ctx.diff,
         };
 
         send_line(writer, &request, &self.info.name).await?;
@@ -521,9 +522,11 @@ mod tests {
             },
             vars: &std::collections::HashMap::new(),
             dry_run: false,
+            diff: true,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"method\":\"check\""));
+        assert!(json.contains("\"diff\":true"));
         assert!(json.contains("\"resource_name\":\"test\""));
         assert!(json.contains("\"family\":\"debian\""));
         // `nix_installed: false` must be omitted so the wire format stays

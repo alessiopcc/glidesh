@@ -241,6 +241,7 @@ impl TuiState {
                 host,
                 success,
                 changed: _,
+                dry_run: _,
             } => {
                 if let Some(&idx) = self.node_index.get(host) {
                     let already_finished = self.nodes[idx].finished_at.is_some();

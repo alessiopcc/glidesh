@@ -605,13 +605,15 @@ fn event_lines(
             host,
             success,
             changed,
+            dry_run,
         } => (
             OutStream::Out,
             vec![format!(
-                "[{}] {} ({} changed)",
+                "[{}] {} ({} {})",
                 display_id(host, display_ids),
                 if *success { "OK" } else { "FAILED" },
-                changed
+                changed,
+                if *dry_run { "would change" } else { "changed" }
             )],
         ),
         ExecutorEvent::RunComplete { summary } => (
@@ -1389,6 +1391,27 @@ mod tests {
         assert!(lines[0].contains("Run Complete"));
         assert!(!lines[0].contains("Dry Run"));
         assert!(lines[1].ends_with("3 changed"), "got: {:?}", lines[1]);
+    }
+
+    /// The per-host line must agree with the task lines above it and the summary below.
+    #[test]
+    fn the_per_host_count_is_worded_like_the_rest_of_the_run() {
+        let event = |dry_run| ExecutorEvent::NodeComplete {
+            host: "web-1".to_string(),
+            success: true,
+            changed: 1,
+            dry_run,
+        };
+
+        let (_, lines) = event_lines(&event(true), &no_display_ids());
+        assert!(
+            lines[0].ends_with("OK (1 would change)"),
+            "got: {:?}",
+            lines[0]
+        );
+
+        let (_, lines) = event_lines(&event(false), &no_display_ids());
+        assert!(lines[0].ends_with("OK (1 changed)"), "got: {:?}", lines[0]);
     }
 
     #[test]

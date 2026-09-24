@@ -33,6 +33,10 @@ pub struct ModuleRequest<'a> {
     pub os_info: &'a OsInfo,
     pub vars: &'a HashMap<String, String>,
     pub dry_run: bool,
+    /// The run asked for `--diff`. A plugin that can describe a change in detail should
+    /// return it in `CheckResponse::Pending.diff` only when this is set, since the extra
+    /// probes it costs are not wanted otherwise.
+    pub diff: bool,
 }
 
 #[derive(Serialize)]

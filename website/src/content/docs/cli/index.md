@@ -122,10 +122,12 @@ installed, written, or restarted, but those commands do execute.
 
 Two details worth knowing:
 
-- `register` captures nothing in a dry run, since no command produced output. A later
-  `loop="${var}"` over a registered variable therefore iterates zero times.
-- A `shell` task has no desired state to compare against, so it always reports
-  `would change`.
+- `register` captures an empty value in a dry run, because no command actually ran. A
+  later `loop="${var}"` over a registered variable therefore iterates zero times, and a
+  step that depends on a registered value cannot be meaningfully previewed.
+- A `shell` task with no `check=` guard has no state to compare against, so it always
+  reports `would change`. Give it a guard and it reports `ok` whenever the guard
+  succeeds.
 
 ### SSH Key Resolution
 

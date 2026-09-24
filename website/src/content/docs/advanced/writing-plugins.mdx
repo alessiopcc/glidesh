@@ -60,7 +60,8 @@ After the handshake, glidesh sends `check` or `apply` requests:
         "container_runtime": "docker" // may be null if no runtime detected
     },
     "vars": {"@host.name": "web-1", "@host.address": "10.0.0.1"},
-    "dry_run": false
+    "dry_run": false,
+    "diff": false
 }
 ```
 
@@ -89,9 +90,10 @@ Return one of three statuses:
 {"status":"unknown","reason":"cannot determine nginx state"}
 ```
 
-A `pending` response may carry an optional `diff` describing the change in detail. It is
-shown only when the run was started with `--diff`, and the field can be omitted entirely —
-plugins written before it existed keep working unchanged.
+A `pending` response may carry an optional `diff` describing the change in detail. Return
+it only when the request set `diff` to true, since that is the user asking for it and
+paying for whatever extra probes it costs; glidesh discards a diff it did not ask for. The
+field can be omitted entirely — plugins written before it existed keep working unchanged.
 
 ```json
 {"status":"pending","plan":"will update /etc/motd","diff":"-old line\n+new line"}
@@ -574,6 +576,7 @@ Landlock filesystem restriction is **only available on Linux 5.13+**. On macOS a
 ## Tips
 
 - Use `dry_run` in the check/apply request to avoid side effects during `--dry-run` runs
+- `register` captures nothing from a task during a dry run, so do not expect a plugin's preview output to be readable by a later step
 - The `os_info` field tells you the target OS, package manager, and init system — use it to adapt behavior
 - Template variables from the plan are available in `vars` — the plugin receives them already interpolated, minus any value carrying a secret (pass those explicitly as arguments)
 - Keep plugins stateless between check and apply — glidesh may call them in any order

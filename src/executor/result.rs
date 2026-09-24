@@ -77,7 +77,9 @@ pub enum ExecutorEvent {
     NodeComplete {
         host: String,
         success: bool,
+        /// In a dry run this counts what *would* change — see `dry_run`.
         changed: usize,
+        dry_run: bool,
     },
     RunComplete {
         summary: RunSummary,

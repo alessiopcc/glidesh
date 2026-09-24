@@ -220,11 +220,13 @@ impl RunLogger {
                 host,
                 success,
                 changed,
+                dry_run,
             } => {
                 let status = if *success { "ok" } else { "failed" };
+                let counted = if *dry_run { "would_change" } else { "changed" };
                 self.log_line(
                     host,
-                    &format!("[COMPLETE] status={} changed={}", status, changed),
+                    &format!("[COMPLETE] status={} {}={}", status, counted, changed),
                 );
                 if let Some(summary) = self.node_summaries.get_mut(host) {
                     summary.status = status.to_string();
@@ -339,5 +341,29 @@ mod tests {
 
         let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
         assert!(log.contains("would change"), "got: {log}");
+    }
+
+    /// The per-host tally is keyed by what it counted, so a preview's log cannot be read
+    /// as a record of applied changes.
+    #[test]
+    fn the_node_log_keys_the_completion_tally_by_run_mode() {
+        for (dry_run, expected, absent) in [
+            (true, "would_change=1", "changed=1"),
+            (false, "changed=1", "would_change=1"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut logger = logger(tmp.path());
+            logger.handle_event(&module_result(dry_run));
+            logger.handle_event(&ExecutorEvent::NodeComplete {
+                host: "web-1".to_string(),
+                success: true,
+                changed: 1,
+                dry_run,
+            });
+
+            let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
+            assert!(log.contains(expected), "expected {expected} in: {log}");
+            assert!(!log.contains(absent), "unexpected {absent} in: {log}");
+        }
     }
 }
