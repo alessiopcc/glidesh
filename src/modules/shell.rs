@@ -203,14 +203,10 @@ impl Module for ShellModule {
                 // A timed-out gate is treated as "not satisfied" so `apply` runs.
                 match exec_timed(ctx, &gate_cmd, timeout).await? {
                     Some(output) if output.exit_code == 0 => Ok(ModuleStatus::Satisfied),
-                    _ => Ok(ModuleStatus::Pending {
-                        plan: format!("Run: {}", command),
-                    }),
+                    _ => Ok(ModuleStatus::pending(format!("Run: {}", command))),
                 }
             }
-            None => Ok(ModuleStatus::Pending {
-                plan: format!("Run: {}", command),
-            }),
+            None => Ok(ModuleStatus::pending(format!("Run: {}", command))),
         }
     }
 

@@ -203,11 +203,12 @@ impl TuiState {
                 module,
                 resource,
                 changed,
+                dry_run,
                 stdout,
                 stderr,
                 ..
             } => {
-                let status = if *changed { "changed" } else { "ok" };
+                let status = crate::executor::changed_label(*changed, *dry_run);
                 self.push_node_log(host, format!("  {} '{}': {}", module, resource, status));
                 for line in crate::logging::stream_log_lines("stdout", stdout) {
                     self.push_node_log(host, line);
@@ -259,8 +260,21 @@ impl TuiState {
                 self.run_complete = true;
                 self.finished_at = Some(Instant::now());
                 self.summary_line = Some(format!(
-                    "Complete: {} hosts, {} ok, {} failed, {} changed",
-                    summary.total_hosts, summary.succeeded, summary.failed, summary.total_changed
+                    "{}: {} hosts, {} ok, {} failed, {} {}",
+                    if summary.dry_run {
+                        "Dry run complete (nothing applied)"
+                    } else {
+                        "Complete"
+                    },
+                    summary.total_hosts,
+                    summary.succeeded,
+                    summary.failed,
+                    summary.total_changed,
+                    if summary.dry_run {
+                        "would change"
+                    } else {
+                        "changed"
+                    }
                 ));
             }
         }
@@ -418,5 +432,86 @@ impl TuiState {
 
     pub fn tick_spinner(&mut self) {
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::result::RunSummary;
+
+    fn state() -> TuiState {
+        TuiState::new(
+            &[("web-1".to_string(), "all".to_string(), "deploy".to_string())],
+            Vec::new(),
+        )
+    }
+
+    fn module_result(changed: bool, dry_run: bool) -> ExecutorEvent {
+        ExecutorEvent::ModuleResult {
+            host: "web-1".to_string(),
+            module: "container".to_string(),
+            resource: "lmcache".to_string(),
+            changed,
+            dry_run,
+            stdout: "Recreate container lmcache (configuration changed)".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        }
+    }
+
+    /// A container that would be recreated must not read as `ok`.
+    #[test]
+    fn a_pending_task_in_a_dry_run_reads_as_would_change() {
+        let mut s = state();
+        s.handle_event(&module_result(true, true));
+
+        assert_eq!(s.total_changed, 1);
+        assert_eq!(s.nodes[0].changed, 1);
+        let line = &s.nodes[0].log_lines[0];
+        assert!(line.contains("would change"), "got: {line}");
+        assert!(
+            s.nodes[0]
+                .log_lines
+                .iter()
+                .any(|l| l.contains("Recreate container lmcache")),
+            "the reason must reach the log: {:?}",
+            s.nodes[0].log_lines
+        );
+    }
+
+    #[test]
+    fn an_applied_task_still_reads_as_changed() {
+        let mut s = state();
+        s.handle_event(&module_result(true, false));
+        assert!(s.nodes[0].log_lines[0].contains("changed"));
+        assert!(!s.nodes[0].log_lines[0].contains("would change"));
+    }
+
+    #[test]
+    fn a_satisfied_task_is_ok_in_either_mode() {
+        for dry_run in [true, false] {
+            let mut s = state();
+            s.handle_event(&module_result(false, dry_run));
+            assert_eq!(s.total_changed, 0);
+            assert!(s.nodes[0].log_lines[0].contains("ok"));
+        }
+    }
+
+    #[test]
+    fn the_summary_says_nothing_was_applied_in_a_dry_run() {
+        let mut s = state();
+        s.handle_event(&ExecutorEvent::RunComplete {
+            summary: RunSummary {
+                total_hosts: 1,
+                succeeded: 1,
+                failed: 0,
+                total_changed: 2,
+                dry_run: true,
+            },
+        });
+        let line = s.summary_line.unwrap();
+        assert!(line.contains("nothing applied"), "got: {line}");
+        assert!(line.contains("2 would change"), "got: {line}");
     }
 }

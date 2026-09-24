@@ -11,6 +11,9 @@ pub struct RunSummaryFile {
     pub plan: String,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// Absent from older run logs, which were all real runs.
+    #[serde(default)]
+    pub dry_run: bool,
     pub nodes: HashMap<String, NodeSummary>,
 }
 
@@ -67,4 +70,24 @@ pub fn read_node_log(run_dir: &Path, node: &str) -> Result<String, GlideshError>
 pub fn delete_run(run_dir: &Path) -> Result<(), GlideshError> {
     fs::remove_dir_all(run_dir)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunSummaryFile;
+
+    /// Summaries written before this field existed must still load.
+    #[test]
+    fn summary_without_dry_run_key_still_loads() {
+        let json = r#"{
+            "run_id": "abc123",
+            "plan": "deploy",
+            "started_at": "2026-09-11T10:00:00Z",
+            "finished_at": null,
+            "nodes": {}
+        }"#;
+        let summary: RunSummaryFile = serde_json::from_str(json).unwrap();
+        assert_eq!(summary.run_id, "abc123");
+        assert!(!summary.dry_run);
+    }
 }

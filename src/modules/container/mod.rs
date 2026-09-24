@@ -92,12 +92,14 @@ impl Module for ContainerModule {
             RuntimeResolution::NeedsInstall(rt) => {
                 return Ok(match state {
                     "stopped" | "absent" => ModuleStatus::Satisfied,
-                    "run-once" => ModuleStatus::Pending {
-                        plan: format!("Install {} and run container {} to completion", rt, name),
-                    },
-                    _ => ModuleStatus::Pending {
-                        plan: format!("Install {} and create container {}", rt, name),
-                    },
+                    "run-once" => ModuleStatus::pending(format!(
+                        "Install {} and run container {} to completion",
+                        rt, name
+                    )),
+                    _ => ModuleStatus::pending(format!(
+                        "Install {} and create container {}",
+                        rt, name
+                    )),
                 });
             }
         };
@@ -107,16 +109,12 @@ impl Module for ContainerModule {
             "run-once" => Self::check_run_once(ctx, params).await,
             "stopped" => match inspect_state(ctx, &runtime, name).await? {
                 Some(current) if current == "running" || current == "restarting" => {
-                    Ok(ModuleStatus::Pending {
-                        plan: format!("Stop container {}", name),
-                    })
+                    Ok(ModuleStatus::pending(format!("Stop container {}", name)))
                 }
                 _ => Ok(ModuleStatus::Satisfied),
             },
             "absent" => match inspect_state(ctx, &runtime, name).await? {
-                Some(_) => Ok(ModuleStatus::Pending {
-                    plan: format!("Remove container {}", name),
-                }),
+                Some(_) => Ok(ModuleStatus::pending(format!("Remove container {}", name))),
                 None => Ok(ModuleStatus::Satisfied),
             },
             other => unreachable!("state {} rejected above", other),
@@ -197,29 +195,33 @@ impl ContainerModule {
         let name = &params.resource_name;
 
         let Some(state) = inspect_state(ctx, runtime, name).await? else {
-            return Ok(ModuleStatus::Pending {
-                plan: format!("Create and start container {}", name),
-            });
+            return Ok(ModuleStatus::pending(format!(
+                "Create and start container {}",
+                name
+            )));
         };
 
         let desired_hash = run_args::spec_hash(runtime, params)?;
         if inspect_spec_hash(ctx, runtime, name).await? != desired_hash {
-            return Ok(ModuleStatus::Pending {
-                plan: format!("Recreate container {} (configuration changed)", name),
-            });
+            return Ok(ModuleStatus::pending(format!(
+                "Recreate container {} (configuration changed)",
+                name
+            )));
         }
 
         match start_action(&state) {
             StartAction::None => {}
             StartAction::Recreate => {
-                return Ok(ModuleStatus::Pending {
-                    plan: format!("Recreate container {} (currently {})", name, state),
-                });
+                return Ok(ModuleStatus::pending(format!(
+                    "Recreate container {} (currently {})",
+                    name, state
+                )));
             }
             _ => {
-                return Ok(ModuleStatus::Pending {
-                    plan: format!("Start container {} (currently {})", name, state),
-                });
+                return Ok(ModuleStatus::pending(format!(
+                    "Start container {} (currently {})",
+                    name, state
+                )));
             }
         }
 
@@ -229,14 +231,17 @@ impl ContainerModule {
                 // It was running a moment ago and is not now; apply will start or
                 // rebuild it as its state warrants.
                 health::Readiness::Failed(reason) => {
-                    return Ok(ModuleStatus::Pending {
-                        plan: format!("Recover container {} ({})", name, reason),
-                    });
+                    return Ok(ModuleStatus::pending(format!(
+                        "Recover container {} ({})",
+                        name, reason
+                    )));
                 }
                 health::Readiness::NotReady(_) => {
-                    return Ok(ModuleStatus::Pending {
-                        plan: format!("Wait for container {} to {}", name, health::describe(&spec)),
-                    });
+                    return Ok(ModuleStatus::pending(format!(
+                        "Wait for container {} to {}",
+                        name,
+                        health::describe(&spec)
+                    )));
                 }
             }
         }
@@ -250,9 +255,10 @@ impl ContainerModule {
         ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
-        let pending = ModuleStatus::Pending {
-            plan: format!("Run container {} to completion", params.resource_name),
-        };
+        let pending = ModuleStatus::pending(format!(
+            "Run container {} to completion",
+            params.resource_name
+        ));
 
         let Some(gate) = params.args.get("check").and_then(|v| v.as_str()) else {
             return Ok(pending);

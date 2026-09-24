@@ -89,6 +89,7 @@ pub struct NodeRunner {
     pub registry: Arc<ModuleRegistry>,
     pub key: PrivateKeyWithHashAlg,
     pub dry_run: bool,
+    pub diff: bool,
     pub host_key_policy: HostKeyPolicy,
     pub event_tx: EventSink,
     pub inventory_template_data: Arc<TemplateData>,
@@ -96,6 +97,41 @@ pub struct NodeRunner {
     pub coordinator: Arc<HostCoordinator>,
     pub all_targets: Arc<Vec<ResolvedHost>>,
     pub secrets: Arc<Secrets>,
+}
+
+/// Whether a task counts toward the run's changed total.
+///
+/// In a dry run the answer comes from `check` (did it report work outstanding?), because
+/// `apply` deliberately reports `changed: false` when it is told not to touch the host.
+/// That also keeps a `subscribe`-forced task honest: a handler whose module is already
+/// satisfied would have run, but it would not have changed anything, so a preview must
+/// not claim otherwise.
+fn resolve_changed(
+    dry_run: bool,
+    was_pending: bool,
+    applied_changed: bool,
+    force_apply: bool,
+) -> bool {
+    if dry_run {
+        was_pending
+    } else {
+        applied_changed || force_apply
+    }
+}
+
+/// Lead a dry-run task's output with `check`'s description of the pending work, so the
+/// reason ("Recreate container web (configuration changed)") sits above the module's own
+/// "[dry-run] would ..." line. `diff` is present only under `--diff`.
+fn prefix_plan(plan: &str, diff: Option<&str>, output: &str) -> String {
+    let mut out = String::with_capacity(plan.len() + output.len() + 2);
+    out.push_str(plan);
+    for extra in [diff, Some(output)].into_iter().flatten() {
+        if !extra.is_empty() {
+            out.push('\n');
+            out.push_str(extra);
+        }
+    }
+    out
 }
 
 impl NodeRunner {
@@ -468,6 +504,7 @@ impl NodeRunner {
                 vars,
                 template_data,
                 dry_run: self.dry_run,
+                diff: self.diff,
                 plan_base_dir: &self.plan_base_dir,
                 run_as,
                 secrets: Some(self.secrets.registry()),
@@ -498,22 +535,40 @@ impl NodeRunner {
                 ModuleStatus::Unknown { .. } => false,
             };
 
+            let pending_plan = match &status {
+                ModuleStatus::Pending { plan, diff } => Some((plan.clone(), diff.clone())),
+                _ => None,
+            };
+
             if should_apply {
                 match module.apply(&ctx, &params).await {
                     Ok(result) => {
-                        if result.changed || force_apply {
+                        let changed = resolve_changed(
+                            self.dry_run,
+                            pending_plan.is_some(),
+                            result.changed,
+                            force_apply,
+                        );
+                        if changed {
                             *total_changed += 1;
                             any_changed = true;
                         }
                         if let Some(ref var_name) = task.register {
                             vars.insert(var_name.clone(), result.output.trim().to_string());
                         }
+                        let stdout = match (self.dry_run, &pending_plan) {
+                            (true, Some((plan, diff))) => {
+                                prefix_plan(plan, diff.as_deref(), &result.output)
+                            }
+                            _ => result.output.clone(),
+                        };
                         let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                             host: self.host.name.clone(),
                             module: task.module.clone(),
                             resource: params.resource_name.clone(),
-                            changed: result.changed,
-                            stdout: result.output.clone(),
+                            changed,
+                            dry_run: self.dry_run,
+                            stdout,
                             stderr: result.stderr.clone(),
                             exit_code: result.exit_code,
                         });
@@ -539,6 +594,7 @@ impl NodeRunner {
                             module: task.module.clone(),
                             resource: params.resource_name.clone(),
                             changed: false,
+                            dry_run: self.dry_run,
                             stdout: String::new(),
                             stderr: String::new(),
                             exit_code: 0,
@@ -605,15 +661,17 @@ impl NodeRunner {
                 if let Some(ref var_name) = task.register {
                     vars.insert(var_name.clone(), out.stdout.trim().to_string());
                 }
-                let changed = !self.dry_run;
-                if changed {
-                    *total_changed += 1;
-                }
+                // A `host` task is a command, not a desired state: it has nothing to
+                // compare against, so it always counts — and in a dry run it is always
+                // something that *would* run.
+                let changed = true;
+                *total_changed += 1;
                 let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                     host: self.host.name.clone(),
                     module: task.module.clone(),
                     resource: resource_name,
                     changed,
+                    dry_run: self.dry_run,
                     stdout: out.stdout.clone(),
                     stderr: out.stderr.clone(),
                     exit_code: out.exit_code,
@@ -663,6 +721,39 @@ mod tests {
             resolve_loop_items(&LoopSource::Variable("vms".to_string()), &vars, &td).unwrap();
         assert_eq!(items.len(), 2);
         assert!(matches!(items[0], LoopItem::Structured(_)));
+    }
+
+    #[test]
+    fn dry_run_counts_pending_not_the_apply_result() {
+        let applied_changed = false;
+        assert!(resolve_changed(true, true, applied_changed, false));
+        assert!(!resolve_changed(true, false, applied_changed, false));
+    }
+
+    #[test]
+    fn dry_run_does_not_count_a_forced_satisfied_task() {
+        assert!(!resolve_changed(true, false, false, true));
+        assert!(resolve_changed(true, true, false, true));
+    }
+
+    #[test]
+    fn real_run_still_counts_apply_result_and_force() {
+        assert!(resolve_changed(false, true, true, false));
+        assert!(!resolve_changed(false, true, false, false));
+        assert!(resolve_changed(false, false, false, true));
+    }
+
+    #[test]
+    fn plan_leads_the_output_and_skips_empty_parts() {
+        assert_eq!(
+            prefix_plan("Recreate container web", None, "[dry-run] docker run ..."),
+            "Recreate container web\n[dry-run] docker run ..."
+        );
+        assert_eq!(prefix_plan("Upload a -> b", None, ""), "Upload a -> b");
+        assert_eq!(
+            prefix_plan("Upload a -> b", Some("-old\n+new"), "[dry-run] would copy"),
+            "Upload a -> b\n-old\n+new\n[dry-run] would copy"
+        );
     }
 
     #[test]

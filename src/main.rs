@@ -480,104 +480,171 @@ fn display_id(host: &str, display_ids: &std::collections::HashMap<String, String
         .unwrap_or_else(|| host.to_string())
 }
 
-fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<String, String>) {
+/// Which stream an event's lines belong on. Failures go to stderr so a plain-text run
+/// can be piped with the progress narration separated from the problems.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OutStream {
+    Out,
+    Err,
+}
+
+/// Render an event as the lines `print_event` will write, and the stream they go to.
+/// Split out from the printing so the formatting can be asserted directly.
+fn event_lines(
+    event: &ExecutorEvent,
+    display_ids: &std::collections::HashMap<String, String>,
+) -> (OutStream, Vec<String>) {
     match event {
-        ExecutorEvent::NodeConnecting { host } => {
-            println!("[{}] Connecting...", display_id(host, display_ids))
-        }
-        ExecutorEvent::NodeConnected { host, os } => {
-            println!("[{}] Connected ({})", display_id(host, display_ids), os.id)
-        }
-        ExecutorEvent::NodeAuthFailed { host, error } => {
-            eprintln!("[{}] Auth failed: {}", display_id(host, display_ids), error)
-        }
+        ExecutorEvent::NodeConnecting { host } => (
+            OutStream::Out,
+            vec![format!("[{}] Connecting...", display_id(host, display_ids))],
+        ),
+        ExecutorEvent::NodeConnected { host, os } => (
+            OutStream::Out,
+            vec![format!(
+                "[{}] Connected ({})",
+                display_id(host, display_ids),
+                os.id
+            )],
+        ),
+        ExecutorEvent::NodeAuthFailed { host, error } => (
+            OutStream::Err,
+            vec![format!(
+                "[{}] Auth failed: {}",
+                display_id(host, display_ids),
+                error
+            )],
+        ),
         ExecutorEvent::StepStarted {
             host,
             step,
             step_index,
             total_steps,
-        } => {
-            println!(
+        } => (
+            OutStream::Out,
+            vec![format!(
                 "[{}] Step {}/{}: {}",
                 display_id(host, display_ids),
                 step_index + 1,
                 total_steps,
                 step
-            );
-        }
+            )],
+        ),
         ExecutorEvent::ModuleCheck {
             host,
             module,
             resource,
-        } => {
-            println!(
+        } => (
+            OutStream::Out,
+            vec![format!(
                 "[{}]   Checking {} '{}'",
                 display_id(host, display_ids),
                 module,
                 resource
-            );
-        }
+            )],
+        ),
         ExecutorEvent::ModuleResult {
             host,
             module,
             resource,
             changed,
+            dry_run,
+            stdout,
             stderr,
             ..
         } => {
-            let status = if *changed { "changed" } else { "ok" };
-            println!(
+            let id = display_id(host, display_ids);
+            let mut lines = vec![format!(
                 "[{}]   {} '{}': {}",
-                display_id(host, display_ids),
+                id,
                 module,
                 resource,
-                status
-            );
-            for line in crate::logging::stream_log_lines("stderr", stderr) {
-                println!("[{}] {}", display_id(host, display_ids), line);
+                executor::changed_label(*changed, *dry_run)
+            )];
+            // A preview's whole payload is the description of the pending work, so show
+            // it here. A real run's stdout stays in the run log, as before.
+            if *dry_run {
+                lines.extend(
+                    crate::logging::stream_log_lines("stdout", stdout)
+                        .into_iter()
+                        .map(|line| format!("[{}] {}", id, line)),
+                );
             }
+            lines.extend(
+                crate::logging::stream_log_lines("stderr", stderr)
+                    .into_iter()
+                    .map(|line| format!("[{}] {}", id, line)),
+            );
+            (OutStream::Out, lines)
         }
         ExecutorEvent::ModuleFailed {
             host,
             module,
             resource,
             error,
-        } => {
-            eprintln!(
+        } => (
+            OutStream::Err,
+            vec![format!(
                 "[{}]   FAILED {} '{}': {}",
                 display_id(host, display_ids),
                 module,
                 resource,
                 error
-            );
-        }
-        ExecutorEvent::StepFailed { host, step, error } => {
-            eprintln!(
+            )],
+        ),
+        ExecutorEvent::StepFailed { host, step, error } => (
+            OutStream::Err,
+            vec![format!(
                 "[{}]   FAILED step '{}': {}",
                 display_id(host, display_ids),
                 step,
                 error
-            );
-        }
+            )],
+        ),
         ExecutorEvent::NodeComplete {
             host,
             success,
             changed,
-        } => {
-            let status = if *success { "OK" } else { "FAILED" };
-            println!(
+        } => (
+            OutStream::Out,
+            vec![format!(
                 "[{}] {} ({} changed)",
                 display_id(host, display_ids),
-                status,
+                if *success { "OK" } else { "FAILED" },
                 changed
-            );
-        }
-        ExecutorEvent::RunComplete { summary } => {
-            println!("\n--- Run Complete ---");
-            println!(
-                "Hosts: {} total, {} ok, {} failed, {} changed",
-                summary.total_hosts, summary.succeeded, summary.failed, summary.total_changed
-            );
+            )],
+        ),
+        ExecutorEvent::RunComplete { summary } => (
+            OutStream::Out,
+            vec![
+                if summary.dry_run {
+                    "\n--- Dry Run Complete (nothing applied) ---".to_string()
+                } else {
+                    "\n--- Run Complete ---".to_string()
+                },
+                format!(
+                    "Hosts: {} total, {} ok, {} failed, {} {}",
+                    summary.total_hosts,
+                    summary.succeeded,
+                    summary.failed,
+                    summary.total_changed,
+                    if summary.dry_run {
+                        "would change"
+                    } else {
+                        "changed"
+                    }
+                ),
+            ],
+        ),
+    }
+}
+
+fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<String, String>) {
+    let (stream, lines) = event_lines(event, display_ids);
+    for line in lines {
+        match stream {
+            OutStream::Out => println!("{}", line),
+            OutStream::Err => eprintln!("{}", line),
         }
     }
 }
@@ -1107,6 +1174,7 @@ async fn run_with_ui(
 
     let concurrency = args.concurrency;
     let dry_run = args.dry_run;
+    let diff = args.diff;
     let host_key_policy = HostKeyPolicy {
         verify: !args.no_host_key_check,
         accept_new: args.accept_new_host_key,
@@ -1153,6 +1221,7 @@ async fn run_with_ui(
                 key,
                 concurrency,
                 dry_run,
+                diff,
                 host_key_policy,
                 secrets,
                 combined_tx,
@@ -1207,6 +1276,7 @@ async fn run_with_ui(
             key,
             concurrency,
             dry_run,
+            diff,
             host_key_policy,
             secrets,
             event_tx,
@@ -1249,6 +1319,90 @@ fn expand_tilde(path: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_display_ids() -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
+
+    fn module_result(changed: bool, dry_run: bool, stdout: &str) -> ExecutorEvent {
+        ExecutorEvent::ModuleResult {
+            host: "web-1".to_string(),
+            module: "container".to_string(),
+            resource: "lmcache".to_string(),
+            changed,
+            dry_run,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        }
+    }
+
+    #[test]
+    fn plain_output_shows_the_reason_only_for_a_preview() {
+        let reason = "Recreate container lmcache (configuration changed)";
+        let (stream, lines) = event_lines(&module_result(true, true, reason), &no_display_ids());
+        assert_eq!(stream, OutStream::Out);
+        assert!(lines[0].contains("would change"), "got: {:?}", lines[0]);
+        assert!(
+            lines.iter().any(|l| l.contains(reason)),
+            "the reason must be printed: {lines:?}"
+        );
+
+        let (_, lines) = event_lines(
+            &module_result(true, false, "some output"),
+            &no_display_ids(),
+        );
+        assert!(lines[0].contains("changed"));
+        assert!(!lines[0].contains("would change"));
+        assert!(
+            !lines.iter().any(|l| l.contains("some output")),
+            "a real run must not dump stdout: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn plain_output_calls_a_satisfied_task_ok_in_either_mode() {
+        for dry_run in [true, false] {
+            let (_, lines) = event_lines(&module_result(false, dry_run, ""), &no_display_ids());
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].ends_with("ok"), "got: {:?}", lines[0]);
+        }
+    }
+
+    #[test]
+    fn the_plain_summary_says_nothing_was_applied_in_a_preview() {
+        let event = |dry_run| ExecutorEvent::RunComplete {
+            summary: executor::result::RunSummary {
+                total_hosts: 2,
+                succeeded: 2,
+                failed: 0,
+                total_changed: 3,
+                dry_run,
+            },
+        };
+
+        let (_, lines) = event_lines(&event(true), &no_display_ids());
+        assert!(lines[0].contains("Dry Run Complete (nothing applied)"));
+        assert!(lines[1].ends_with("3 would change"), "got: {:?}", lines[1]);
+
+        let (_, lines) = event_lines(&event(false), &no_display_ids());
+        assert!(lines[0].contains("Run Complete"));
+        assert!(!lines[0].contains("Dry Run"));
+        assert!(lines[1].ends_with("3 changed"), "got: {:?}", lines[1]);
+    }
+
+    #[test]
+    fn failures_go_to_stderr() {
+        let (stream, _) = event_lines(
+            &ExecutorEvent::StepFailed {
+                host: "web-1".to_string(),
+                step: "Deploy".to_string(),
+                error: "boom".to_string(),
+            },
+            &no_display_ids(),
+        );
+        assert_eq!(stream, OutStream::Err);
+    }
 
     /// A wrapped-key blob with a chosen cost byte. `wrap_cost` reads only that byte, so the
     /// rest need not be real ciphertext.

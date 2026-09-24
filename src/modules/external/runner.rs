@@ -202,7 +202,7 @@ impl crate::modules::Module for ExternalModule {
         match msg {
             PluginMessage::CheckResponse(resp) => match resp {
                 CheckResponse::Satisfied => Ok(ModuleStatus::Satisfied),
-                CheckResponse::Pending { plan } => Ok(ModuleStatus::Pending { plan }),
+                CheckResponse::Pending { plan, diff } => Ok(ModuleStatus::Pending { plan, diff }),
                 CheckResponse::Unknown { reason } => Ok(ModuleStatus::Unknown { reason }),
             },
             PluginMessage::Error(e) => Err(GlideshError::Module {
@@ -431,6 +431,31 @@ mod tests {
             msg,
             PluginMessage::CheckResponse(CheckResponse::Pending { .. })
         ));
+    }
+
+    #[test]
+    fn test_check_response_pending_without_diff_is_accepted() {
+        let json = r#"{"status":"pending","plan":"Install nginx"}"#;
+        let msg: PluginMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginMessage::CheckResponse(CheckResponse::Pending { plan, diff }) => {
+                assert_eq!(plan, "Install nginx");
+                assert!(diff.is_none());
+            }
+            _ => panic!("expected a pending check response"),
+        }
+    }
+
+    #[test]
+    fn test_check_response_pending_with_diff() {
+        let json = r#"{"status":"pending","plan":"Update config","diff":"-a\n+b"}"#;
+        let msg: PluginMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginMessage::CheckResponse(CheckResponse::Pending { diff, .. }) => {
+                assert_eq!(diff.as_deref(), Some("-a\n+b"));
+            }
+            _ => panic!("expected a pending check response"),
+        }
     }
 
     #[test]

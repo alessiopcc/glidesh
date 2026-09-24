@@ -80,7 +80,12 @@ pub enum CheckResponse {
     #[serde(rename = "satisfied")]
     Satisfied,
     #[serde(rename = "pending")]
-    Pending { plan: String },
+    Pending {
+        plan: String,
+        /// Optional since protocol_version 1 plugins predate `--diff`.
+        #[serde(default)]
+        diff: Option<String>,
+    },
     #[serde(rename = "unknown")]
     Unknown { reason: String },
 }
