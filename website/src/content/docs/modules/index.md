@@ -16,7 +16,7 @@ Every module implements two operations:
 
 2. **apply** — performs the actual change on the target
 
-When you run with `--dry-run`, only the check phase runs. This lets you preview what would change without modifying anything.
+With `--dry-run`, **check** decides the outcome: a task is reported as `would change` exactly when its check returns `Pending`, and the `plan` that check produced is the reason shown against it. **apply** is still invoked, but it is told the run is a preview and only describes the command it would have run, so nothing on the target is modified.
 
 ## Idempotency
 

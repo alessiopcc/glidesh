@@ -89,6 +89,14 @@ Return one of three statuses:
 {"status":"unknown","reason":"cannot determine nginx state"}
 ```
 
+A `pending` response may carry an optional `diff` describing the change in detail. It is
+shown only when the run was started with `--diff`, and the field can be omitted entirely —
+plugins written before it existed keep working unchanged.
+
+```json
+{"status":"pending","plan":"will update /etc/motd","diff":"-old line\n+new line"}
+```
+
 ### Apply Response
 
 ```json
@@ -569,4 +577,5 @@ Landlock filesystem restriction is **only available on Linux 5.13+**. On macOS a
 - The `os_info` field tells you the target OS, package manager, and init system — use it to adapt behavior
 - Template variables from the plan are available in `vars` — the plugin receives them already interpolated, minus any value carrying a secret (pass those explicitly as arguments)
 - Keep plugins stateless between check and apply — glidesh may call them in any order
-- Return descriptive `plan` messages in `Pending` responses — they appear in dry-run output
+- Return descriptive `plan` messages in `Pending` responses — they lead the dry-run output for the task, and a run counts a task as "would change" precisely when `check` returns `pending`
+- `apply` is still called during a `--dry-run` run, with `dry_run: true` in the request. Honor it: report what you would do and change nothing

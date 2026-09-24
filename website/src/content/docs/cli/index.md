@@ -89,7 +89,8 @@ glidesh run [OPTIONS]
 | `--command <CMD>` | `-c` | Ad-hoc command to run | — |
 | `--mode <MODE>` | `-m` | Execution mode: `sync` or `async` | `sync` |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
-| `--dry-run` | — | Check only, no changes applied | `false` |
+| `--dry-run` | — | Report what would change without applying it | `false` |
+| `--diff` | — | Show the detail behind each pending change, where the module can describe it | `false` |
 | `--no-tui` | `-T` | Disable TUI, use plain text output | `false` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
@@ -97,6 +98,34 @@ glidesh run [OPTIONS]
 | `--ask-secret-pass` | — | Prompt for the secrets passphrase (else `GLIDESH_SECRET_PASS`) | `false` |
 | `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
 | `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key`, else `~/.ssh/id_ed25519` |
+
+### Previewing a run
+
+`--dry-run` reports what *would* change without applying anything. Each task is labelled
+`would change` or `ok`, and a task that would change is preceded by the reason its module
+gave — `Recreate container lmcache (configuration changed)`, `Upload app.conf ->
+/etc/app.conf`. The closing summary counts what would change, not what did.
+
+```bash
+glidesh run -i inventory.kdl -p plan.kdl --dry-run
+```
+
+Add `--diff` for the detail behind each pending change, where the module can describe it.
+It works on a real run too, and may cost extra round trips.
+
+:::caution
+A preview is read-only with respect to *desired state*, but it is not a no-op on the
+target: computing it runs the read-only probes a plan asks for. That includes `shell`
+`check=` guards, container readiness gates, and container-runtime detection. Nothing is
+installed, written, or restarted, but those commands do execute.
+:::
+
+Two details worth knowing:
+
+- `register` captures nothing in a dry run, since no command produced output. A later
+  `loop="${var}"` over a registered variable therefore iterates zero times.
+- A `shell` task has no desired state to compare against, so it always reports
+  `would change`.
 
 ### SSH Key Resolution
 
