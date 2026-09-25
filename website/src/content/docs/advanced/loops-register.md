@@ -22,10 +22,15 @@ step "Show disks" {
 The output is trimmed of leading/trailing whitespace before being stored.
 
 :::caution[`register` is empty under `--dry-run`]
-A preview runs no commands, so there is nothing to capture and the variable is set to an
-empty string. A step that consumes a registered value therefore cannot be meaningfully
-previewed: a `loop="${var}"` over one iterates zero times, and a `${var}` interpolated
-into a command shows up blank. Run for real to see those steps.
+A preview never runs the task's own command — that is the change it is declining to make —
+so there is no output to capture and the variable is set to an empty string. A step that
+consumes a registered value therefore cannot be meaningfully previewed: a `loop="${var}"`
+over one iterates zero times, and a `${var}` interpolated into a command shows up blank.
+Run for real to see those steps.
+
+This is narrower than "a preview runs nothing": computing a preview does execute the
+read-only probes a plan asks for, such as a `shell` `check=` guard. Those inform the
+preview; their output is not what `register` captures.
 :::
 
 ## Step Loops
