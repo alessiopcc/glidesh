@@ -102,8 +102,8 @@ glidesh run [OPTIONS]
 ### Previewing a run
 
 `--dry-run` reports what *would* change without applying anything. Each task is labelled
-`would change` or `ok`, and a task that would change is preceded by the reason its module
-gave — `Recreate container lmcache (configuration changed)`, `Upload app.conf ->
+`would change` or `ok`, and a task whose check found work outstanding is preceded by the
+reason it gave — `Recreate container lmcache (configuration changed)`, `Upload app.conf ->
 /etc/app.conf`. The closing summary counts what would change, not what did.
 
 ```bash
@@ -124,14 +124,18 @@ target: computing it runs the read-only probes a plan asks for. That includes `s
 installed, written, or restarted, but those commands do execute.
 :::
 
-Two details worth knowing:
+Three details worth knowing:
 
-- `register` captures an empty value in a dry run, because no command actually ran. A
-  later `loop="${var}"` over a registered variable therefore iterates zero times, and a
-  step that depends on a registered value cannot be meaningfully previewed.
+- `register` captures an empty value in a dry run, because the task's own command never
+  ran. A later `loop="${var}"` over a registered variable therefore iterates zero times,
+  and a step that depends on a registered value cannot be meaningfully previewed.
 - A `shell` task with no `check=` guard has no state to compare against, so it always
   reports `would change`. Give it a guard and it reports `ok` whenever the guard
   succeeds.
+- A step using [`subscribe`](/advanced/subscribe/) whose target changed is reported as
+  `would change` whatever its own check says, and shows no reason line, because the reason
+  it runs is the step it subscribes to rather than its own state. A real run would run it,
+  so the preview counts it.
 
 ### SSH Key Resolution
 
