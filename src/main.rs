@@ -1248,6 +1248,7 @@ async fn run_with_ui(
             connection_info,
             tui_key,
             host_key_policy,
+            dry_run,
         )
         .await
         .map_err(|e| GlideshError::Other(format!("TUI error: {}", e)))?;
