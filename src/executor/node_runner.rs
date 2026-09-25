@@ -103,20 +103,23 @@ pub struct NodeRunner {
 ///
 /// In a dry run the answer comes from `check` (did it report work outstanding?), because
 /// `apply` deliberately reports `changed: false` when it is told not to touch the host.
-/// That also keeps a `subscribe`-forced task honest: a handler whose module is already
-/// satisfied would have run, but it would not have changed anything, so a preview must
-/// not claim otherwise.
+///
+/// `force_apply` counts either way. A handler whose step is subscribed to a changed step
+/// runs even when its own module is satisfied — that is what a handler is for — so a real
+/// run counts it, and a preview of that same state has to count it too or it reports fewer
+/// changes than the run it is previewing.
 fn resolve_changed(
     dry_run: bool,
     was_pending: bool,
     applied_changed: bool,
     force_apply: bool,
 ) -> bool {
-    if dry_run {
+    let would_act = if dry_run {
         was_pending
     } else {
-        applied_changed || force_apply
-    }
+        applied_changed
+    };
+    would_act || force_apply
 }
 
 /// What a task reports, given what `check` found and what the run asked to see.
@@ -777,10 +780,15 @@ mod tests {
         assert!(!resolve_changed(true, false, applied_changed, false));
     }
 
+    /// A preview must reach the same total as the run it previews, so a forced handler
+    /// counts in both. Only the unforced satisfied task is uncounted.
     #[test]
-    fn dry_run_does_not_count_a_forced_satisfied_task() {
-        assert!(!resolve_changed(true, false, false, true));
-        assert!(resolve_changed(true, true, false, true));
+    fn a_forced_handler_counts_in_a_preview_as_it_does_for_real() {
+        let forced = |dry_run| resolve_changed(dry_run, false, false, true);
+        assert!(forced(true));
+        assert!(forced(false));
+
+        assert!(!resolve_changed(true, false, false, false));
     }
 
     #[test]
