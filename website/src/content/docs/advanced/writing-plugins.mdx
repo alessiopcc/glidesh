@@ -583,5 +583,5 @@ Landlock filesystem restriction is **only available on Linux 5.13+**. On macOS a
 - The `os_info` field tells you the target OS, package manager, and init system — use it to adapt behavior
 - Template variables from the plan are available in `vars` — the plugin receives them already interpolated, minus any value carrying a secret (pass those explicitly as arguments)
 - Keep plugins stateless between check and apply — glidesh may call them in any order
-- Return descriptive `plan` messages in `Pending` responses — they lead the dry-run output for the task, and a run counts a task as "would change" precisely when `check` returns `pending`
+- Return descriptive `plan` messages in `Pending` responses — they lead the dry-run output for the task, and a run normally counts a task as "would change" when `check` returns `pending`. The exception is a step using `subscribe`: its target having changed force-applies the step, so it counts as "would change" even on a `satisfied` response
 - `apply` is still called during a `--dry-run` run, with `dry_run: true` in the request. Honor it: report what you would do and change nothing

@@ -16,7 +16,9 @@ Every module implements two operations:
 
 2. **apply** — performs the actual change on the target
 
-With `--dry-run`, **check** decides the outcome: a task is reported as `would change` exactly when its check returns `Pending`, and the `plan` that check produced is the reason shown against it. **apply** is still invoked, but it is told the run is a preview and only describes the command it would have run, so nothing on the target is modified.
+With `--dry-run`, **check** decides the outcome: a task is reported as `would change` when its check returns `Pending`, and the `plan` that check produced is the reason shown against it. **apply** is still invoked, but it is told the run is a preview and only describes the command it would have run, so nothing on the target is modified.
+
+There is one exception. A step with [`subscribe`](/advanced/subscribe/) whose target changed runs regardless of its own check — that is what a handler is for — so it is reported as `would change` even when its check returns `Satisfied`. A preview has to count it, because the real run would.
 
 ## Idempotency
 
