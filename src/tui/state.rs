@@ -80,6 +80,9 @@ pub struct TuiState {
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
     pub total_changed: usize,
+    /// Learned from the first event that carries it. The header renders a count, and a
+    /// preview's count must not read as applied work.
+    pub dry_run: bool,
     pub combined_log: Vec<String>,
     pub combined_scroll: usize,
     pub combined_auto_scroll: bool,
@@ -134,6 +137,7 @@ impl TuiState {
             started_at: now,
             finished_at: None,
             total_changed: 0,
+            dry_run: false,
             combined_log: Vec::new(),
             combined_scroll: usize::MAX,
             combined_auto_scroll: true,
@@ -208,6 +212,7 @@ impl TuiState {
                 stderr,
                 ..
             } => {
+                self.dry_run = *dry_run;
                 let status = crate::executor::changed_label(*changed, *dry_run);
                 self.push_node_log(host, format!("  {} '{}': {}", module, resource, status));
                 for line in crate::logging::stream_log_lines("stdout", stdout) {
@@ -241,8 +246,9 @@ impl TuiState {
                 host,
                 success,
                 changed: _,
-                dry_run: _,
+                dry_run,
             } => {
+                self.dry_run = *dry_run;
                 if let Some(&idx) = self.node_index.get(host) {
                     let already_finished = self.nodes[idx].finished_at.is_some();
                     self.nodes[idx].status = if *success {
@@ -258,6 +264,7 @@ impl TuiState {
                 }
             }
             ExecutorEvent::RunComplete { summary } => {
+                self.dry_run = summary.dry_run;
                 self.run_complete = true;
                 self.finished_at = Some(Instant::now());
                 self.summary_line = Some(format!(
@@ -479,6 +486,18 @@ mod tests {
             "the reason must reach the log: {:?}",
             s.nodes[0].log_lines
         );
+    }
+
+    #[test]
+    fn the_run_mode_is_known_before_the_run_completes() {
+        let mut s = state();
+        assert!(!s.dry_run);
+        s.handle_event(&module_result(true, true));
+        assert!(s.dry_run, "a preview's first task result must set the mode");
+
+        let mut s = state();
+        s.handle_event(&module_result(true, false));
+        assert!(!s.dry_run);
     }
 
     #[test]

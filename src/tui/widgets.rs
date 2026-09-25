@@ -64,22 +64,28 @@ fn render_header(frame: &mut Frame, area: Rect, state: &TuiState) {
         .filter(|n| n.status == NodeStatus::Failed)
         .count();
 
+    let counted = if state.dry_run {
+        "would change"
+    } else {
+        "changed"
+    };
+
     let label = if state.run_complete {
         if failed_count > 0 {
             format!(
-                " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} failed \u{2500}\u{2500} {} changed \u{2500}\u{2500} {} ",
-                state.completed, state.total, failed_count, state.total_changed, elapsed
+                " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} failed \u{2500}\u{2500} {} {} \u{2500}\u{2500} {} ",
+                state.completed, state.total, failed_count, state.total_changed, counted, elapsed
             )
         } else {
             format!(
-                " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} changed \u{2500}\u{2500} {} \u{2500}\u{2500} all ok ",
-                state.completed, state.total, state.total_changed, elapsed
+                " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} {} \u{2500}\u{2500} {} \u{2500}\u{2500} all ok ",
+                state.completed, state.total, state.total_changed, counted, elapsed
             )
         }
     } else {
         format!(
-            " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} changed \u{2500}\u{2500} {} ",
-            state.completed, state.total, state.total_changed, elapsed
+            " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} {} \u{2500}\u{2500} {} ",
+            state.completed, state.total, state.total_changed, counted, elapsed
         )
     };
 

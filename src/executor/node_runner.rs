@@ -119,22 +119,38 @@ fn resolve_changed(
     }
 }
 
-/// A dry-run task's output: `check`'s description of the pending work, so the reason
-/// ("Recreate container web (configuration changed)") sits above the module's own
-/// "[dry-run] would ..." line.
+/// What a task reports, given what `check` found and what the run asked to see.
 ///
-/// A module may hand back a `diff` whether or not it was asked for — an external plugin
-/// decides that for itself — so it is dropped here unless `show_diff` says the run wants
-/// it.
-fn preview_output(plan: &str, diff: Option<&str>, show_diff: bool, output: &str) -> String {
-    let diff = if show_diff { diff } else { None };
-    let mut out = String::with_capacity(plan.len() + output.len() + 2);
-    out.push_str(plan);
-    for extra in [diff, Some(output)].into_iter().flatten() {
-        if !extra.is_empty() {
-            out.push('\n');
-            out.push_str(extra);
+/// A preview leads with `check`'s description of the pending work, so the reason
+/// ("Recreate container web (configuration changed)") sits above the module's own
+/// "[dry-run] would ..." line. A real run leads with its own output, as it always has —
+/// the reason would be describing something that has already happened.
+///
+/// `--diff` applies to both: it is the request to see the detail behind a change, whether
+/// that change is about to be made or has just been made. A module may hand back a `diff`
+/// whether or not it was asked for — an external plugin decides that for itself — so it is
+/// dropped unless `show_diff` says the run wants it.
+fn task_output(
+    dry_run: bool,
+    show_diff: bool,
+    pending: Option<(&str, Option<&str>)>,
+    output: &str,
+) -> String {
+    let (plan, diff) = match pending {
+        Some((plan, diff)) => (Some(plan), if show_diff { diff } else { None }),
+        None => (None, None),
+    };
+    let plan = if dry_run { plan } else { None };
+
+    let mut out = String::new();
+    for part in [plan, diff, Some(output)].into_iter().flatten() {
+        if part.is_empty() {
+            continue;
         }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(part);
     }
     out
 }
@@ -584,12 +600,14 @@ impl NodeRunner {
                                 captured_output(self.dry_run, &result.output),
                             );
                         }
-                        let stdout = match (self.dry_run, &pending_plan) {
-                            (true, Some((plan, diff))) => {
-                                preview_output(plan, diff.as_deref(), self.diff, &result.output)
-                            }
-                            _ => result.output.clone(),
-                        };
+                        let stdout = task_output(
+                            self.dry_run,
+                            self.diff,
+                            pending_plan
+                                .as_ref()
+                                .map(|(plan, diff)| (plan.as_str(), diff.as_deref())),
+                            &result.output,
+                        );
                         let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                             host: self.host.name.clone(),
                             module: task.module.clone(),
@@ -773,31 +791,53 @@ mod tests {
 
     #[test]
     fn plan_leads_the_output_and_skips_empty_parts() {
+        let pending = Some(("Recreate container web", None));
         assert_eq!(
-            preview_output(
-                "Recreate container web",
-                None,
-                false,
-                "[dry-run] docker run ..."
-            ),
+            task_output(true, false, pending, "[dry-run] docker run ..."),
             "Recreate container web\n[dry-run] docker run ..."
         );
         assert_eq!(
-            preview_output("Upload a -> b", None, false, ""),
+            task_output(true, false, Some(("Upload a -> b", None)), ""),
             "Upload a -> b"
         );
     }
 
     #[test]
-    fn a_diff_is_shown_only_when_the_run_asked_for_one() {
-        let diff = Some("-old\n+new");
+    fn a_real_run_does_not_lead_with_the_plan() {
         assert_eq!(
-            preview_output("Upload a -> b", diff, true, "[dry-run] would copy"),
+            task_output(
+                false,
+                false,
+                Some(("Upload a -> b", None)),
+                "copied 40 bytes"
+            ),
+            "copied 40 bytes"
+        );
+    }
+
+    #[test]
+    fn a_diff_is_shown_only_when_the_run_asked_for_one() {
+        let pending = Some(("Upload a -> b", Some("-old\n+new")));
+        assert_eq!(
+            task_output(true, true, pending, "[dry-run] would copy"),
             "Upload a -> b\n-old\n+new\n[dry-run] would copy"
         );
         assert_eq!(
-            preview_output("Upload a -> b", diff, false, "[dry-run] would copy"),
+            task_output(true, false, pending, "[dry-run] would copy"),
             "Upload a -> b\n[dry-run] would copy"
+        );
+    }
+
+    #[test]
+    fn a_diff_is_shown_on_a_real_run_too() {
+        let pending = Some(("Upload a -> b", Some("-old\n+new")));
+        assert_eq!(
+            task_output(false, true, pending, "copied 40 bytes"),
+            "-old\n+new\ncopied 40 bytes"
+        );
+        assert_eq!(
+            task_output(false, false, pending, "copied 40 bytes"),
+            "copied 40 bytes"
         );
     }
 

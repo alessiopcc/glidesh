@@ -130,6 +130,15 @@ fn source_secret_pass(args: &cli::RunArgs) -> Result<Option<String>, GlideshErro
 async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     if let (Some(host), Some(command)) = (&args.host, &args.command) {
         let user = args.user.as_deref().unwrap_or("root");
+
+        // An ad-hoc command is the one thing glidesh cannot preview: there is no desired
+        // state to compare a host against, only a command to run. Honor the flag by
+        // refusing to run it rather than by connecting and running it anyway.
+        if args.dry_run {
+            println!("[dry-run] would run on {}@{}: {}", user, host, command);
+            return Ok(());
+        }
+
         let key_path = expand_tilde(&args.key.clone().unwrap_or_else(default_ssh_key));
 
         tracing::info!("Connecting to {}@{}:{}", user, host, args.port);

@@ -111,7 +111,11 @@ glidesh run -i inventory.kdl -p plan.kdl --dry-run
 ```
 
 Add `--diff` for the detail behind each pending change, where the module can describe it.
-It works on a real run too, and may cost extra round trips.
+It works on a real run too — the detail behind a change is as useful once the change is
+made — and may cost extra round trips.
+
+In [ad-hoc mode](#ad-hoc-mode) there is no desired state to compare against, only a
+command, so `--dry-run` prints the command it would have run and connects to nothing.
 
 :::caution
 A preview is read-only with respect to *desired state*, but it is not a no-op on the

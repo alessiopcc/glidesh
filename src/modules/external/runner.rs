@@ -534,6 +534,30 @@ mod tests {
         assert!(!json.contains("nix_installed"));
     }
 
+    #[test]
+    fn test_module_request_omits_diff_when_not_requested() {
+        let os_info = crate::modules::detect::OsInfo {
+            id: "ubuntu".to_string(),
+            version: "22.04".to_string(),
+            family: crate::modules::detect::OsFamily::Debian,
+            pkg_manager: crate::modules::detect::PkgManager::Apt,
+            init_system: crate::modules::detect::InitSystem::Systemd,
+            container_runtime: None,
+            nix_installed: false,
+        };
+        let req = ModuleRequest {
+            method: "check",
+            resource_name: "test",
+            args: &std::collections::HashMap::new(),
+            os_info: &os_info,
+            vars: &std::collections::HashMap::new(),
+            dry_run: false,
+            diff: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("diff"), "got: {json}");
+    }
+
     /// A registry populated the way a real run populates it: by decrypting a token.
     fn registry_holding(plaintext: &str) -> Arc<SecretRegistry> {
         use crate::secrets::config::{Provider, SecretsConfig};

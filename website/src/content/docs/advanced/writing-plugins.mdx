@@ -60,8 +60,7 @@ After the handshake, glidesh sends `check` or `apply` requests:
         "container_runtime": "docker" // may be null if no runtime detected
     },
     "vars": {"@host.name": "web-1", "@host.address": "10.0.0.1"},
-    "dry_run": false,
-    "diff": false
+    "dry_run": false
 }
 ```
 
@@ -91,9 +90,13 @@ Return one of three statuses:
 ```
 
 A `pending` response may carry an optional `diff` describing the change in detail. Return
-it only when the request set `diff` to true, since that is the user asking for it and
+it only when the request carried `"diff": true`, since that is the user asking for it and
 paying for whatever extra probes it costs; glidesh discards a diff it did not ask for. The
 field can be omitted entirely — plugins written before it existed keep working unchanged.
+
+The request omits `diff` when the flag is absent, exactly as it omits `nix_installed` on a
+host without Nix, so the bytes a v1 plugin receives on an ordinary run are unchanged. Read
+a missing `diff` as false.
 
 ```json
 {"status":"pending","plan":"will update /etc/motd","diff":"-old line\n+new line"}

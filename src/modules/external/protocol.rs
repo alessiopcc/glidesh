@@ -36,6 +36,11 @@ pub struct ModuleRequest<'a> {
     /// The run asked for `--diff`. A plugin that can describe a change in detail should
     /// return it in `CheckResponse::Pending.diff` only when this is set, since the extra
     /// probes it costs are not wanted otherwise.
+    ///
+    /// Skipped when false so the wire format stays byte-identical for plugins that predate
+    /// `--diff` (protocol v1 compatibility, as with `OsInfo::nix_installed`). A plugin that
+    /// sees no `diff` key must read it as false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub diff: bool,
 }
 
