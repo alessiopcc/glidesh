@@ -157,10 +157,11 @@ fn task_output(
 
 /// What `register` captures from a task's output.
 ///
-/// A preview ran nothing, so there is no output to capture: the text a module returns
-/// there describes what it *would* do. Registering that would hand a later
-/// `loop="${var}"` a "[dry-run] ..." sentence to iterate over, so capture nothing
-/// instead — which is what a satisfied task already does.
+/// A preview never runs the task's own command, so there is no output to capture: what a
+/// module returns there describes what it *would* do. Registering that would hand a later
+/// `loop="${var}"` a "[dry-run] ..." sentence to iterate over, so capture nothing instead —
+/// which is what a satisfied task already does. (Read-only probes such as a `shell`
+/// `check=` guard do run during a preview; their output is not a task's output.)
 fn captured_output(dry_run: bool, output: &str) -> String {
     if dry_run {
         String::new()
