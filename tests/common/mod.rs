@@ -24,7 +24,10 @@ macro_rules! skip_unless_integration {
 }
 
 /// Generate an ed25519 keypair. Returns (private key for auth, OpenSSH public key string).
-pub fn generate_keypair() -> (PrivateKeyWithHashAlg, String) {
+/// Returns the wrapped key for in-process SSH, the public key for `authorized_keys`, and
+/// the private key in OpenSSH form for tests that drive the `glidesh` binary, which needs
+/// a key on disk rather than one in memory.
+pub fn generate_keypair() -> (PrivateKeyWithHashAlg, String, String) {
     let private = ssh_key::PrivateKey::random(&mut rand::thread_rng(), ssh_key::Algorithm::Ed25519)
         .expect("failed to generate ed25519 key");
 
@@ -33,10 +36,15 @@ pub fn generate_keypair() -> (PrivateKeyWithHashAlg, String) {
         .to_openssh()
         .expect("failed to serialize public key");
 
+    let private_pem = private
+        .to_openssh(ssh_key::LineEnding::LF)
+        .expect("failed to serialize private key")
+        .to_string();
+
     let key = PrivateKeyWithHashAlg::new(Arc::new(private), None)
         .expect("failed to create PrivateKeyWithHashAlg");
 
-    (key, pubkey_str)
+    (key, pubkey_str, private_pem)
 }
 
 /// A Docker container running Ubuntu with SSH + systemd for integration testing.
@@ -44,6 +52,7 @@ pub struct TestContainer {
     pub container_id: String,
     pub port: u16,
     pub key: PrivateKeyWithHashAlg,
+    key_pem: String,
     image_tag: String,
 }
 
@@ -51,7 +60,7 @@ impl TestContainer {
     /// Build the Docker image and start a privileged container.
     /// Returns a TestContainer with the mapped SSH port.
     pub fn start() -> Self {
-        let (key, pubkey) = generate_keypair();
+        let (key, pubkey, key_pem) = generate_keypair();
         let suffix: u32 = rand::random::<u32>() % 100_000;
         let container_name = format!("glidesh-test-{}", suffix);
         let image_tag = format!("glidesh-test-img:{}", suffix);
@@ -131,6 +140,7 @@ impl TestContainer {
             container_id,
             port,
             key,
+            key_pem,
             image_tag,
         }
     }
@@ -171,7 +181,17 @@ impl TestContainer {
         );
     }
 
+    /// Write this container's private key into `dir` and return its path, for tests that
+    /// drive the `glidesh` binary and therefore need `--key` to point at a real file.
+    #[allow(dead_code)]
+    pub fn write_key_file(&self, dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("id_ed25519");
+        std::fs::write(&path, &self.key_pem).expect("failed to write test key");
+        path
+    }
+
     /// Detect the OS on the container.
+    #[allow(dead_code)]
     pub async fn detect_os(&self, ssh: &SshSession) -> OsInfo {
         detect_os(ssh).await.expect("failed to detect OS")
     }
