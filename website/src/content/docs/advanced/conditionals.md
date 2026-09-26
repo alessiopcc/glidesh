@@ -70,7 +70,7 @@ The grammar is deliberately small — enough to branch, not enough to program.
 | `${a} != value` | `a` does not equal `value` |
 | `${a} == ${b}` | the two variables are equal |
 | `${a}` | `a` is truthy (see below) |
-| `defined ${a}` | `a` exists, whatever its value |
+| `defined ${a}` | `a` exists, whatever its value — including a [structured variable](/concepts/variables/#structured-variables) |
 | `undefined ${a}` | `a` does not exist |
 | `!term` | `term` does not hold |
 | `x && y` | both hold |
@@ -82,6 +82,10 @@ quotes avoid escaping double quotes inside the KDL attribute.
 
 **Comparison is always between strings.** `${@os.version} == 22.04` compares text; there is no
 `<` or `>`.
+
+**Structured variables** — lists of maps, such as a `vms { - name="web" }` block — have no
+single value, so comparing one or testing its truthiness is an error. `defined` and
+`undefined` work on them, which is what guarding a `loop` over one needs.
 
 **Truthiness.** A bare `${a}` is false only if `a` is exactly `""`, `false` or `0`. Anything
 else — including `no`, `False` and `00` — is true.
@@ -198,11 +202,17 @@ because the task that would produce it did not run. A condition that needs that 
 answered, so the preview skips the task and says why instead of guessing:
 
 ```
-[web-1]   shell 'touch /root/probed': skipped (undetermined in preview: when: ${out} == yes needs the value of ${out}, registered earlier in this run)
+[web-1]   shell 'touch /root/probed': skipped (undetermined in preview: when: ${out} == yes depends on ${out}, which is not known until the real run)
 ```
 
-The real run evaluates it normally. Checking only whether a registered variable exists —
-`defined ${out}` — is answered in a preview, since registering always defines the variable.
+The real run evaluates it normally.
+
+Checking only whether a registered variable exists — `defined ${out}` — is usually answered
+in a preview, since registering always defines the variable. The exception is a variable
+registered by a task that was itself undetermined: the real run may or may not run that task,
+so it may or may not define the variable, and a `defined` test on it is undetermined too.
+The uncertainty carries forward rather than turning into a confident answer the real run
+might contradict.
 
 ## Validation
 

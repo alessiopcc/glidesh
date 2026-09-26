@@ -20,7 +20,7 @@ Each run creates a directory named `<timestamp>_<plan-name>`:
 │   └── db-1.log
 ```
 
-- **summary.json** — run metadata: plan name, run ID, timestamps, per-node status, change count and [skipped](/advanced/conditionals/) count
+- **summary.json** — run metadata: plan name, run ID, timestamps, per-node status, change count and, when anything was [skipped](/advanced/conditionals/), skipped count
 - **\<node\>.log** — timestamped log lines for each host
 
 ## Interactive Logs Explorer

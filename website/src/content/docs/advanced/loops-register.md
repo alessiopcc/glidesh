@@ -129,6 +129,8 @@ step "Format extra disks" loop="${extra-disks}" when="defined ${extra-disks}" {
 }
 ```
 
+This works for a [structured variable](#looping-over-structured-variables) as well: `defined ${vms}` holds when the `vms` collection exists.
+
 A step's condition cannot refer to `${@item}`, since no item exists yet when it is checked.
 
 ## Template Loops
