@@ -237,6 +237,25 @@ glidesh validate -i inventory.kdl
 glidesh validate -p plan.kdl -i inventory.kdl
 ```
 
+A plan is loaded exactly as `run` loads it, then checked for everything that can be known
+without contacting a host:
+
+- **Syntax**, including [`when=`](/advanced/conditionals/) conditions and unknown step attributes.
+- **Includes and `vars-file`** are resolved, so a missing or broken included plan is reported.
+- **Step names** are unique across includes, and every `subscribe` names an earlier step.
+- **Modules exist.** A misspelled module name fails here. External modules are looked up next
+  to the inventory when `-i` is given, otherwise in `./modules/` and `~/.glidesh/modules/`.
+- **Local `file` sources exist.** A `src` is resolved from the plan's directory, as a run
+  resolves it. Not checked: a `fetch` source, which is a path on the host, and a `src`
+  containing `${…}`, which only a run can resolve.
+
+Every problem is listed, not only the first.
+
+`validate` never connects, so it cannot tell whether a plan's settings suit a particular host —
+whether a package exists in its repositories, a service is installed, or a container would be
+recreated. Use [`--dry-run`](#previewing-a-run) for that: it checks each task against the host
+without changing anything.
+
 A `secrets.kdl` discovered beside the inventory is parsed too, so a malformed provider block or an
 unknown provider is caught here rather than mid-run. Only the file is parsed — validation never
 asks for the passphrase and never decrypts a value.

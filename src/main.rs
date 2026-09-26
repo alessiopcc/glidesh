@@ -808,24 +808,58 @@ fn provider_detail(cfg: &secrets_config::SecretsConfig) -> String {
     }
 }
 
+/// Load a plan the way `run` does and check everything that can be known without contacting
+/// a host. Returns the step count, or every problem found.
+///
+/// Includes and `vars-file` are resolved from the plan's directory, which is also where step
+/// names and `subscribe` references are checked. External modules are discovered next to the
+/// inventory when one is given, else in the current directory — again as `run` does.
+fn validate_plan_file(
+    plan_path: &std::path::Path,
+    inv_dir: Option<&std::path::Path>,
+) -> Result<usize, Vec<String>> {
+    let one = |e: GlideshError| vec![e.to_string()];
+    let content = std::fs::read_to_string(plan_path).map_err(|e| vec![e.to_string()])?;
+    let mut plan = config::parse_plan(&content).map_err(one)?;
+    let plan_dir = plan_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    config::resolve_includes(&mut plan, plan_dir).map_err(one)?;
+
+    let mut problems = Vec::new();
+    let registry =
+        ModuleRegistry::with_external(Some(inv_dir.unwrap_or_else(|| std::path::Path::new("."))));
+    if let Err(e) = registry.validate_plan(&plan) {
+        problems.push(e.to_string());
+    }
+    problems.extend(config::checks::missing_file_sources(&plan, plan_dir));
+
+    if problems.is_empty() {
+        Ok(plan.steps().len())
+    } else {
+        Err(problems)
+    }
+}
+
 fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     let mut valid = true;
 
     if let Some(ref fp_path) = args.plan {
         print!("Validating plan '{}'... ", fp_path.display());
-        match std::fs::read_to_string(fp_path) {
-            Ok(content) => match config::parse_plan(&content) {
-                Ok(fp) => {
-                    println!("OK ({} steps)", fp.steps().len());
-                }
-                Err(e) => {
-                    println!("FAILED: {}", e);
-                    valid = false;
-                }
-            },
-            Err(e) => {
-                println!("FAILED: {}", e);
+        let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
+        match validate_plan_file(fp_path, inv_dir) {
+            Ok(steps) => println!("OK ({} steps)", steps),
+            Err(problems) => {
                 valid = false;
+                match problems.as_slice() {
+                    [one] => println!("FAILED: {}", one),
+                    many => {
+                        println!("FAILED:");
+                        for problem in many {
+                            println!("  - {}", problem);
+                        }
+                    }
+                }
             }
         }
     }
