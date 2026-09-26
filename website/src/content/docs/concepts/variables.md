@@ -84,7 +84,7 @@ When the same variable is defined at multiple levels, the most specific value wi
 Inventory global vars → Group vars → Host vars → Plan vars
 ```
 
-Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@item`, `@inventory`, `@group`) that user variables cannot collide with — a variable name may not begin with `@`.
+Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@item`, `@inventory`, `@group`) that user variables cannot collide with — a variable name may not begin with `@`.
 
 ## Built-in Host Variables
 
@@ -111,6 +111,43 @@ step "Fetch backup" {
     }
 }
 ```
+
+## Built-in OS Facts
+
+glidesh detects each host's operating system when it connects, and exposes what it found
+under `@os`. Detection happens on every run anyway, so these cost nothing extra.
+
+| Variable | Description | Values |
+|---|---|---|
+| `${@os.id}` | `ID` from `/etc/os-release` | e.g. `ubuntu`, `rocky`, `alpine` |
+| `${@os.version}` | `VERSION_ID` from `/etc/os-release` | e.g. `22.04`, `9.3` |
+| `${@os.family}` | Distribution family | `debian`, `redhat`, `arch`, `alpine`, `suse`, `nixos` — or the raw `ID` for an OS glidesh does not recognise |
+| `${@os.pkg-manager}` | Package manager the `package` module will use | `apt`, `dnf`, `yum`, `pacman`, `apk`, `zypper`, `nix` — `apt` on an OS glidesh does not recognise, since that is what `package` falls back to |
+| `${@os.init}` | Init system | `systemd`, `openrc`, `unknown` |
+| `${@os.container-runtime}` | Container runtime found on the host | `podman`, `docker`, or empty if neither is installed |
+| `${@os.nix-installed}` | Whether Nix is available | `true`, `false` |
+
+`${@os.container-runtime}` is always defined — a host with no runtime expands it to an empty
+string rather than failing the task on an undefined variable.
+
+### Example
+
+```kdl
+step "Report platform" {
+    shell "echo ${@os.id} ${@os.version} uses ${@os.pkg-manager}"
+}
+
+step "Render config" {
+    file "/etc/app/platform.conf" src="templates/platform.conf" template=#true
+}
+```
+
+Inside `templates/platform.conf`, `${@os.family}` and the rest resolve like any other
+variable.
+
+OS facts are per host and only exist once glidesh has connected, so they resolve wherever
+`${@host.*}` does — module arguments and `file` templates — but not in `include` or
+`vars-file` paths, which are read before any host is contacted.
 
 ## Inventory References
 

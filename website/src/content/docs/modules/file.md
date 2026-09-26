@@ -35,6 +35,7 @@ Template mode supports:
 - `${var-name}` — simple variable interpolation
 - `${for item in collection}...${endfor}` — loop over [structured variables](/concepts/variables/#structured-variables)
 - `${@inventory.host.address}` — [inventory references](/concepts/variables/#inventory-references)
+- `${@os.family}` and the other [OS facts](/concepts/variables/#built-in-os-facts) — detected per host
 - `${for h in @group.name}...${endfor}` — loop over hosts in an inventory group
 
 See [Template Loops](/advanced/loops-register/#template-loops) for detailed examples.

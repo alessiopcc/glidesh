@@ -1342,6 +1342,25 @@ plan "test" {
         assert!(err.contains("reserved"), "got: {err}");
     }
 
+    /// A quoted KDL name can start with `@`, so this is the route a plan would take to
+    /// spoof a detected fact.
+    #[test]
+    fn a_plan_cannot_spoof_an_os_fact() {
+        let input = "plan \"p\" {\n    vars {\n        \"@os.family\" \"debian\"\n    }\n    step \"s\" { shell \"echo\" }\n}";
+        let err = parse_plan(input).unwrap_err().to_string();
+        assert!(
+            err.contains("reserved") && err.contains("@os"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_plain_os_var_does_not_collide_with_the_os_namespace() {
+        let input = "plan \"p\" {\n    vars {\n        os \"custom\"\n    }\n    step \"s\" { shell \"echo\" }\n}";
+        let plan = parse_plan(input).unwrap();
+        assert_eq!(plan.vars.get("os").map(String::as_str), Some("custom"));
+    }
+
     #[test]
     fn reserved_at_register_name_rejected() {
         let input = "plan \"p\" {\n    step \"s\" { shell \"echo\" register=\"@out\" }\n}";

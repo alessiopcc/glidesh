@@ -59,10 +59,16 @@ After the handshake, glidesh sends `check` or `apply` requests:
         "init_system": "systemd",
         "container_runtime": "docker" // may be null if no runtime detected
     },
-    "vars": {"@host.name": "web-1", "@host.address": "10.0.0.1"},
+    "vars": {"@host.name": "web-1", "@host.address": "10.0.0.1", "@os.family": "debian"},
     "dry_run": false
 }
 ```
+
+The `os_info` values are the same ones a plan sees as [`${@os.*}`](/concepts/variables/#built-in-os-facts):
+`family` is one of `debian`, `redhat`, `arch`, `alpine`, `suse`, `nixos` (an unrecognised OS
+arrives as `{"unknown": "<ID>"}`), `pkg_manager` one of `apt`, `dnf`, `yum`, `pacman`, `apk`,
+`zypper`, `nix`, and `init_system` one of `systemd`, `openrc`, `unknown`. A `nix_installed: true`
+field is added on hosts where Nix is present.
 
 :::note[`vars` never carries the vault]
 Any variable whose value holds a decrypted secret is stripped from `vars` before the request is
