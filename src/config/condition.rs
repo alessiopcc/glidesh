@@ -56,9 +56,32 @@ enum Op {
 pub enum Outcome {
     True,
     False,
-    /// The answer depends on the *value* of a variable a preview cannot know — one that a
-    /// task registered earlier in the same `--dry-run`, where registration captures nothing.
+    /// The answer depends on a variable a `--dry-run` cannot know yet — see
+    /// [`Scope::unknown`].
     Undetermined(String),
+}
+
+/// Everything a condition can see on one host.
+pub struct Scope<'a> {
+    pub vars: &'a HashMap<String, String>,
+    /// Structured variables (lists of maps). They are not flat values, but they exist, and a
+    /// step guarding a `loop` over one needs `defined` to say so.
+    pub collections: &'a HashMap<String, Vec<HashMap<String, String>>>,
+    /// Variables a preview cannot know yet, because the task that registers them did not
+    /// run. One still present in `vars` is defined but holds a placeholder; one absent from
+    /// `vars` was registered by a task whose own condition could not be decided, so even
+    /// whether it will be defined is unknown.
+    pub unknown: &'a HashSet<String>,
+}
+
+impl Scope<'_> {
+    fn is_defined(&self, var: &str) -> bool {
+        self.vars.contains_key(var) || self.collections.contains_key(var)
+    }
+
+    fn presence_unknown(&self, var: &str) -> bool {
+        self.unknown.contains(var) && !self.vars.contains_key(var)
+    }
 }
 
 impl Condition {
@@ -92,23 +115,17 @@ impl Condition {
         })
     }
 
-    /// Evaluate against a host's variables. `unknown` names variables whose *value* is not
-    /// real — see [`Outcome::Undetermined`]. Their presence is still real: registering always
-    /// defines the variable, so `defined`/`undefined` answer them normally.
+    /// Evaluate against one host's variables.
     ///
     /// Reading an undefined variable is an error, as it is in interpolation. Short-circuiting
     /// is what lets `defined ${x} && ${x} == y` guard against it.
-    pub fn eval(
-        &self,
-        vars: &HashMap<String, String>,
-        unknown: &HashSet<String>,
-    ) -> Result<Outcome, String> {
+    pub fn eval(&self, scope: &Scope) -> Result<Outcome, String> {
         // Kleene logic: an undetermined operand decides nothing on its own, but a later
         // definite answer can still settle the expression. Once undetermined, a later error
         // is reported as undetermined too, since the real run might never have reached it.
         let mut any_undetermined = None;
         for all in &self.any {
-            match self.eval_all(all, vars, unknown) {
+            match self.eval_all(all, scope) {
                 Ok(Outcome::True) => return Ok(Outcome::True),
                 Ok(Outcome::False) => {}
                 Ok(Outcome::Undetermined(v)) => {
@@ -120,15 +137,10 @@ impl Condition {
         Ok(any_undetermined.map_or(Outcome::False, Outcome::Undetermined))
     }
 
-    fn eval_all(
-        &self,
-        all: &[Term],
-        vars: &HashMap<String, String>,
-        unknown: &HashSet<String>,
-    ) -> Result<Outcome, String> {
+    fn eval_all(&self, all: &[Term], scope: &Scope) -> Result<Outcome, String> {
         let mut undetermined = None;
         for term in all {
-            match self.eval_term(term, vars, unknown) {
+            match self.eval_term(term, scope) {
                 Ok(Outcome::False) => return Ok(Outcome::False),
                 Ok(Outcome::True) => {}
                 Ok(Outcome::Undetermined(v)) => {
@@ -140,28 +152,32 @@ impl Condition {
         Ok(undetermined.map_or(Outcome::True, Outcome::Undetermined))
     }
 
-    fn eval_term(
-        &self,
-        term: &Term,
-        vars: &HashMap<String, String>,
-        unknown: &HashSet<String>,
-    ) -> Result<Outcome, String> {
+    fn eval_term(&self, term: &Term, scope: &Scope) -> Result<Outcome, String> {
         let value = |op: &Operand| -> Result<Result<String, String>, String> {
             match op {
                 Operand::Literal(s) => Ok(Ok(s.clone())),
-                Operand::Var(v) if unknown.contains(v) => Ok(Err(v.clone())),
-                Operand::Var(v) => vars.get(v).cloned().map(Ok).ok_or_else(|| {
-                    format!(
+                Operand::Var(v) if scope.unknown.contains(v) => Ok(Err(v.clone())),
+                Operand::Var(v) => match scope.vars.get(v) {
+                    Some(value) => Ok(Ok(value.clone())),
+                    None if scope.collections.contains_key(v) => Err(format!(
+                        "'{v}' in when=\"{}\" is a structured variable, which has no single \
+                         value to compare — test it with `defined ${{{v}}}`",
+                        self.source
+                    )),
+                    None => Err(format!(
                         "undefined variable '{v}' in when=\"{}\" — guard it with \
                          `defined ${{{v}}} && ...`",
                         self.source
-                    )
-                }),
+                    )),
+                },
             }
         };
         let holds = match &term.atom {
-            Atom::Defined(v) => vars.contains_key(v),
-            Atom::Undefined(v) => !vars.contains_key(v),
+            Atom::Defined(v) | Atom::Undefined(v) if scope.presence_unknown(v) => {
+                return Ok(Outcome::Undetermined(v.clone()));
+            }
+            Atom::Defined(v) => scope.is_defined(v),
+            Atom::Undefined(v) => !scope.is_defined(v),
             Atom::Truthy(op) => match value(op)? {
                 Ok(s) => !matches!(s.as_str(), "" | "false" | "0"),
                 Err(v) => return Ok(Outcome::Undetermined(v)),
@@ -390,10 +406,26 @@ mod tests {
             .collect()
     }
 
+    fn eval_in(
+        src: &str,
+        pairs: &[(&str, &str)],
+        collections: &[&str],
+        unknown: &[&str],
+    ) -> Result<Outcome, String> {
+        let collections = collections
+            .iter()
+            .map(|c| (c.to_string(), vec![HashMap::new()]))
+            .collect();
+        let unknown = unknown.iter().map(|s| s.to_string()).collect();
+        Condition::parse(src).unwrap().eval(&Scope {
+            vars: &vars(pairs),
+            collections: &collections,
+            unknown: &unknown,
+        })
+    }
+
     fn eval(src: &str, pairs: &[(&str, &str)]) -> Result<Outcome, String> {
-        Condition::parse(src)
-            .unwrap()
-            .eval(&vars(pairs), &HashSet::new())
+        eval_in(src, pairs, &[], &[])
     }
 
     fn holds(src: &str, pairs: &[(&str, &str)]) -> bool {
@@ -480,11 +512,7 @@ mod tests {
     }
 
     fn eval_unknown(src: &str, pairs: &[(&str, &str)], unknown: &[&str]) -> Outcome {
-        let unknown = unknown.iter().map(|s| s.to_string()).collect();
-        Condition::parse(src)
-            .unwrap()
-            .eval(&vars(pairs), &unknown)
-            .unwrap()
+        eval_in(src, pairs, &[], unknown).unwrap()
     }
 
     #[test]
@@ -513,6 +541,33 @@ mod tests {
             eval_unknown("defined ${out}", &out, &["out"]),
             Outcome::True
         );
+    }
+
+    /// A variable registered by a task the preview could not decide may or may not exist on
+    /// the real run, so even `defined` cannot answer for it.
+    #[test]
+    fn presence_of_a_variable_from_an_undecided_task_is_unknown() {
+        for src in ["defined ${out}", "undefined ${out}", "${out} == yes"] {
+            assert_eq!(
+                eval_unknown(src, &[], &["out"]),
+                Outcome::Undetermined("out".into()),
+                "{src}"
+            );
+        }
+    }
+
+    /// A step guarding a `loop` over a structured variable must see that it exists.
+    #[test]
+    fn a_structured_variable_is_defined() {
+        let holds = |src| eval_in(src, &[], &["vms"], &[]).unwrap();
+        assert_eq!(holds("defined ${vms}"), Outcome::True);
+        assert_eq!(holds("undefined ${vms}"), Outcome::False);
+    }
+
+    #[test]
+    fn a_structured_variable_has_no_value_to_compare() {
+        let err = eval_in("${vms} == x", &[], &["vms"], &[]).unwrap_err();
+        assert!(err.contains("structured variable"), "{err}");
     }
 
     #[test]

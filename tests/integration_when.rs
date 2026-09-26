@@ -15,6 +15,10 @@ const PLAN: &str = r#"
 plan "when" {
     vars {
         items "a\nb\nc"
+        vms {
+            - name="web"
+            - name="db"
+        }
     }
     step "Debian only" when="${@os.family} == debian" {
         shell "touch /root/when-debian"
@@ -44,18 +48,25 @@ plan "when" {
     step "Guard a loop over a missing var" loop="${missing}" when="defined ${missing}" {
         shell "touch /root/when-missing-${@item}"
     }
+    step "Guard a structured loop" loop="${vms}" when="defined ${vms}" {
+        shell "touch /root/when-vm-${@item.name}"
+    }
 }
 "#;
 
 /// A preview cannot know what `Probe` will register, so the step that reads it must be
-/// reported as undetermined rather than silently skipped.
+/// reported as undetermined rather than silently skipped — and so must the step after it,
+/// since whether `probed` gets registered at all depends on that undecided step.
 const PREVIEW_PLAN: &str = r#"
 plan "preview" {
     step "Probe" {
         shell "echo yes" register="out"
     }
     step "Depends on probe" {
-        shell "touch /root/when-probed" when="${out} == yes"
+        shell "touch /root/when-probed" register="probed" when="${out} == yes"
+    }
+    step "Depends on that" {
+        shell "touch /root/when-chained" when="defined ${probed}"
     }
     step "Known either way" {
         shell "touch /root/when-known" when="${@os.family} == debian"
@@ -115,13 +126,17 @@ async fn when_decides_what_runs() {
         "a task condition filters loop items"
     );
     assert!(exists("/root/when-item-c").await);
+    assert!(
+        exists("/root/when-vm-web").await && exists("/root/when-vm-db").await,
+        "`defined` must see a structured variable, or the guard skips its loop"
+    );
 
     // Skipped: RedHat step, the triggered-but-excluded step, the registering task, the
     // `host` task — whose `false` would fail the run had it executed — the `defined` task,
     // item b, and the guarded loop, which must be skipped rather than fail on its undefined
     // loop variable.
     assert!(
-        out.contains("4 changed, 7 skipped"),
+        out.contains("6 changed, 7 skipped"),
         "the summary must count every skip:\n{out}"
     );
     assert!(
@@ -140,22 +155,25 @@ async fn a_preview_flags_a_condition_it_cannot_decide() {
     write_fixtures(dir.path(), container.port, &container, PREVIEW_PLAN);
 
     let preview = run(dir.path(), &["--dry-run"]);
-    assert!(
-        preview.contains("undetermined in preview"),
-        "the preview must say it could not decide:\n{preview}"
+    assert_eq!(
+        preview.matches("undetermined in preview").count(),
+        2,
+        "both dependent steps must say the preview could not decide:\n{preview}"
     );
     assert!(
-        preview.contains("2 would change, 1 skipped"),
-        "only the undecidable step is skipped:\n{preview}"
+        preview.contains("2 would change, 2 skipped"),
+        "only the undecidable steps are skipped:\n{preview}"
     );
 
     let applied = run(dir.path(), &[]);
     assert!(
-        applied.contains("3 changed") && !applied.contains("skipped"),
-        "the real run decides it:\n{applied}"
+        applied.contains("4 changed") && !applied.contains("skipped"),
+        "the real run decides them:\n{applied}"
     );
-    let probed = ssh.exec("test -e /root/when-probed").await.unwrap();
-    assert_eq!(probed.exit_code, 0, "the real run must have run the step");
+    for path in ["/root/when-probed", "/root/when-chained"] {
+        let ran = ssh.exec(&format!("test -e {path}")).await.unwrap();
+        assert_eq!(ran.exit_code, 0, "the real run must have created {path}");
+    }
 }
 
 fn run(dir: &Path, extra: &[&str]) -> String {

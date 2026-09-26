@@ -465,6 +465,18 @@ mod tests {
     }
 
     #[test]
+    fn a_summary_without_skips_has_no_skipped_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&module_result(false));
+        logger.handle_event(&summary(false));
+        logger.write_summary().unwrap();
+
+        let raw = std::fs::read_to_string(logger.run_dir().join("summary.json")).unwrap();
+        assert!(!raw.contains("skipped"), "{raw}");
+    }
+
+    #[test]
     fn a_summary_written_before_when_existed_still_loads() {
         let old = r#"{"status":"ok","changed":2,"steps_completed":0}"#;
         let node: storage::NodeSummary = serde_json::from_str(old).unwrap();

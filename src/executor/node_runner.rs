@@ -1,7 +1,7 @@
 use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
-use glidesh::config::condition::{Condition, Outcome};
+use glidesh::config::condition::{Condition, Outcome, Scope};
 use glidesh::config::template::{TemplateData, interpolate_args};
 use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
 use glidesh::error::GlideshError;
@@ -224,11 +224,20 @@ impl Progress {
         }
     }
 
-    /// A skipped task registers nothing: the variable is left undefined rather than empty,
-    /// so a later reference fails loudly instead of expanding to "" inside a command.
-    fn forget(&mut self, vars: &mut HashMap<String, String>, name: &str) {
+    /// Record what a skipped task's `register` leaves behind.
+    ///
+    /// A skip the real run would also make registers nothing: the variable is left undefined
+    /// rather than empty, so a later reference fails loudly instead of expanding to "" inside
+    /// a command. A skip a preview could not decide might not happen on the real run, which
+    /// could define the variable — so neither its value nor its presence is known, and a later
+    /// `defined` must not answer as if it were.
+    fn skip_register(&mut self, vars: &mut HashMap<String, String>, name: &str, decided: bool) {
         vars.remove(name);
-        self.unknown.remove(name);
+        if decided {
+            self.unknown.remove(name);
+        } else {
+            self.unknown.insert(name.to_string());
+        }
     }
 }
 
@@ -236,7 +245,12 @@ impl Progress {
 #[derive(Debug, PartialEq)]
 enum Gate {
     Run,
-    Skip(String),
+    /// `decided` is false when a preview could not evaluate the condition — the real run may
+    /// not skip at all.
+    Skip {
+        reason: String,
+        decided: bool,
+    },
 }
 
 /// Decide a `when=`.
@@ -244,22 +258,24 @@ enum Gate {
 /// A preview cannot know a value registered earlier in the same run. A condition that needs
 /// one is skipped with a reason saying so, rather than decided against the placeholder ""
 /// the preview registered — which could report a skip the real run would not make.
-fn gate(
-    when: Option<&Condition>,
-    vars: &HashMap<String, String>,
-    unknown: &HashSet<String>,
-) -> Result<Gate, String> {
+fn gate(when: Option<&Condition>, scope: &Scope) -> Result<Gate, String> {
     let Some(cond) = when else {
         return Ok(Gate::Run);
     };
-    Ok(match cond.eval(vars, unknown)? {
+    Ok(match cond.eval(scope)? {
         Outcome::True => Gate::Run,
-        Outcome::False => Gate::Skip(format!("when: {}", cond.source())),
-        Outcome::Undetermined(var) => Gate::Skip(format!(
-            "undetermined in preview: when: {} needs the value of ${{{var}}}, registered \
-             earlier in this run",
-            cond.source()
-        )),
+        Outcome::False => Gate::Skip {
+            reason: format!("when: {}", cond.source()),
+            decided: true,
+        },
+        Outcome::Undetermined(var) => Gate::Skip {
+            reason: format!(
+                "undetermined in preview: when: {} depends on ${{{var}}}, which is not known \
+                 until the real run",
+                cond.source()
+            ),
+            decided: false,
+        },
     })
 }
 
@@ -401,9 +417,14 @@ impl NodeRunner {
 
             // Before the loop is resolved, so a step can guard a loop over a variable that
             // may not exist.
-            match gate(step.when.as_ref(), &vars, &progress.unknown) {
+            let scope = Scope {
+                vars: &vars,
+                collections: &template_data.collections,
+                unknown: &progress.unknown,
+            };
+            match gate(step.when.as_ref(), &scope) {
                 Ok(Gate::Run) => {}
-                Ok(Gate::Skip(reason)) => {
+                Ok(Gate::Skip { reason, decided }) => {
                     let _ = self.event_tx.send(ExecutorEvent::StepSkipped {
                         host: self.host.name.clone(),
                         step: step.name.clone(),
@@ -412,7 +433,7 @@ impl NodeRunner {
                     });
                     progress.skipped += step.tasks.len();
                     for name in step.tasks.iter().filter_map(|t| t.register.as_deref()) {
-                        progress.forget(&mut vars, name);
+                        progress.skip_register(&mut vars, name, decided);
                     }
                     step_changed.insert(step.name.clone(), false);
                     continue;
@@ -597,9 +618,14 @@ impl NodeRunner {
         for (task_idx, task) in step.tasks.iter().enumerate() {
             // Ahead of the `host` branch, so a host that skips a `host` task never joins its
             // run-once cell; the hosts that do still share the single execution.
-            match gate(task.when.as_ref(), vars, &progress.unknown) {
+            let scope = Scope {
+                vars,
+                collections: &template_data.collections,
+                unknown: &progress.unknown,
+            };
+            match gate(task.when.as_ref(), &scope) {
                 Ok(Gate::Run) => {}
-                Ok(Gate::Skip(reason)) => {
+                Ok(Gate::Skip { reason, decided }) => {
                     let _ = self.event_tx.send(ExecutorEvent::TaskSkipped {
                         host: self.host.name.clone(),
                         module: task.module.clone(),
@@ -608,7 +634,7 @@ impl NodeRunner {
                     });
                     progress.skipped += 1;
                     if let Some(name) = &task.register {
-                        progress.forget(vars, name);
+                        progress.skip_register(vars, name, decided);
                     }
                     continue;
                 }
@@ -1036,9 +1062,32 @@ mod tests {
             .collect()
     }
 
+    fn gate_with(
+        when: Option<&Condition>,
+        vars: &HashMap<String, String>,
+        unknown: &[&str],
+    ) -> Result<Gate, String> {
+        let unknown = unknown.iter().map(|s| s.to_string()).collect();
+        gate(
+            when,
+            &Scope {
+                vars,
+                collections: &HashMap::new(),
+                unknown: &unknown,
+            },
+        )
+    }
+
+    fn skip_reason(gate: Result<Gate, String>) -> (String, bool) {
+        match gate {
+            Ok(Gate::Skip { reason, decided }) => (reason, decided),
+            other => panic!("expected a skip, got {other:?}"),
+        }
+    }
+
     #[test]
     fn no_condition_always_runs() {
-        assert_eq!(gate(None, &HashMap::new(), &HashSet::new()), Ok(Gate::Run));
+        assert_eq!(gate_with(None, &HashMap::new(), &[]), Ok(Gate::Run));
     }
 
     #[test]
@@ -1046,11 +1095,14 @@ mod tests {
         let vars = strings(&[("@os.family", "debian")]);
         let c = cond("${@os.family} == redhat");
         assert_eq!(
-            gate(Some(&c), &vars, &HashSet::new()),
-            Ok(Gate::Skip("when: ${@os.family} == redhat".into()))
+            gate_with(Some(&c), &vars, &[]),
+            Ok(Gate::Skip {
+                reason: "when: ${@os.family} == redhat".into(),
+                decided: true,
+            })
         );
         let c = cond("${@os.family} == debian");
-        assert_eq!(gate(Some(&c), &vars, &HashSet::new()), Ok(Gate::Run));
+        assert_eq!(gate_with(Some(&c), &vars, &[]), Ok(Gate::Run));
     }
 
     /// The reason is the condition as written: interpolating it would print the value of
@@ -1059,9 +1111,7 @@ mod tests {
     fn a_skip_reason_never_contains_a_value() {
         let vars = strings(&[("db-password", "hunter2")]);
         let c = cond("${db-password} == ''");
-        let Ok(Gate::Skip(reason)) = gate(Some(&c), &vars, &HashSet::new()) else {
-            panic!("expected a skip");
-        };
+        let (reason, _) = skip_reason(gate_with(Some(&c), &vars, &[]));
         assert!(!reason.contains("hunter2"), "{reason}");
         assert!(reason.contains("${db-password}"), "{reason}");
     }
@@ -1069,21 +1119,16 @@ mod tests {
     #[test]
     fn a_condition_on_a_value_the_preview_cannot_know_says_so() {
         let vars = strings(&[("out", "")]);
-        let unknown = HashSet::from(["out".to_string()]);
-        let Ok(Gate::Skip(reason)) = gate(Some(&cond("${out} == yes")), &vars, &unknown) else {
-            panic!("expected a skip");
-        };
+        let c = cond("${out} == yes");
+        let (reason, decided) = skip_reason(gate_with(Some(&c), &vars, &["out"]));
+        assert!(!decided);
         assert!(reason.starts_with("undetermined in preview"), "{reason}");
         assert!(reason.contains("${out}"), "{reason}");
     }
 
     #[test]
     fn an_undefined_variable_fails_the_gate() {
-        let err = gate(
-            Some(&cond("${nope} == x")),
-            &HashMap::new(),
-            &HashSet::new(),
-        );
+        let err = gate_with(Some(&cond("${nope} == x")), &HashMap::new(), &[]);
         assert!(err.unwrap_err().contains("nope"));
     }
 
@@ -1108,9 +1153,25 @@ mod tests {
         let mut vars = strings(&[("out", "from an earlier iteration")]);
         let mut progress = Progress::default();
         progress.unknown.insert("out".into());
-        progress.forget(&mut vars, "out");
+        progress.skip_register(&mut vars, "out", true);
         assert!(!vars.contains_key("out"));
         assert!(!progress.unknown.contains("out"));
+    }
+
+    /// The real run might not skip, and would then define the variable — so a later
+    /// `defined ${out}` in the preview must be undetermined, not a confident `false`.
+    #[test]
+    fn an_undecided_skip_leaves_even_the_presence_unknown() {
+        let mut vars = strings(&[("out", "")]);
+        let mut progress = Progress::default();
+        progress.skip_register(&mut vars, "out", false);
+        assert!(!vars.contains_key("out"));
+        assert!(progress.unknown.contains("out"));
+
+        let unknown: Vec<&str> = progress.unknown.iter().map(String::as_str).collect();
+        let c = cond("defined ${out}");
+        let (_, decided) = skip_reason(gate_with(Some(&c), &vars, &unknown));
+        assert!(!decided);
     }
 
     fn task(resource: &str, cmd: Option<ParamValue>) -> TaskDef {

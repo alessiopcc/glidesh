@@ -21,14 +21,19 @@ pub struct RunSummaryFile {
 pub struct NodeSummary {
     pub status: String,
     pub changed: usize,
-    /// Absent from run logs written before `when=` existed.
-    #[serde(default)]
+    /// Absent from run logs written before `when=` existed, and omitted when zero so a plan
+    /// without `when=` writes the same summary it always has.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped: usize,
     pub steps_completed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 pub fn glidesh_dir() -> PathBuf {
