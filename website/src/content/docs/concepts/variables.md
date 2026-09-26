@@ -115,7 +115,9 @@ step "Fetch backup" {
 ## Built-in OS Facts
 
 glidesh detects each host's operating system when it connects, and exposes what it found
-under `@os`. Detection happens on every run anyway, so these cost nothing extra.
+under `@os`. Detection happens on every run anyway, so these cost nothing extra. Branch on
+them with [`when=`](/advanced/conditionals/) — for example
+`when="${@os.family} == debian"`.
 
 | Variable | Description | Values |
 |---|---|---|

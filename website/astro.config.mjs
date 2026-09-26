@@ -43,6 +43,7 @@ export default defineConfig({
 						{ label: 'disk', slug: 'modules/disk' },
 						{ label: 'external', slug: 'modules/external' },
 						{ label: 'file', slug: 'modules/file' },
+						{ label: 'host', slug: 'modules/host' },
 						{ label: 'nix', slug: 'modules/nix' },
 						{ label: 'package', slug: 'modules/package' },
 						{ label: 'shell', slug: 'modules/shell' },
@@ -55,6 +56,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Jump Hosts', slug: 'advanced/jump-hosts' },
 						{ label: 'Privilege Escalation', slug: 'advanced/run-as' },
+						{ label: 'Conditionals', slug: 'advanced/conditionals' },
 						{ label: 'Loops & Register', slug: 'advanced/loops-register' },
 						{ label: 'Subscribe', slug: 'advanced/subscribe' },
 						{ label: 'Plan Includes', slug: 'advanced/plan-includes' },

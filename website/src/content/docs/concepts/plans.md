@@ -82,6 +82,19 @@ Paths are resolved relative to the plan file's directory. You can use multiple `
 
 Each `step` node has a human-readable name (displayed in the TUI) and contains one or more module invocations. Steps always execute sequentially within each host. Module invocations within a step also execute sequentially.
 
+A step accepts these attributes:
+
+| Attribute | Purpose |
+|---|---|
+| `when` | Run the step only if a condition holds — see [Conditionals](/advanced/conditionals/) |
+| `loop` | Repeat the step for each value — see [Loops & Register](/advanced/loops-register/#step-loops) |
+| `subscribe` | Run the step when an earlier step changed — see [Subscribe](/advanced/subscribe/) |
+| `run-as`, `run-as-method` | Escalate privileges for every task in the step — see [Privilege Escalation](/advanced/run-as/) |
+
+Any other attribute on a step is an error, so a misspelling such as `wehn=` is caught when the plan is parsed instead of being silently ignored.
+
+Tasks accept `when`, `register` and `run-as` / `run-as-method` in addition to their module's own parameters.
+
 ## Path Resolution
 
 All relative paths in a plan are resolved **relative to the plan file's directory**. This applies to:
@@ -140,6 +153,24 @@ plan "main" {
 ```
 
 See [Plan Includes](/advanced/plan-includes/) for details.
+
+## Conditions
+
+Steps and tasks can run only when a condition holds, using the `when` attribute:
+
+```kdl
+plan "web-server" {
+    step "Install nginx" when="${@os.family} == debian" {
+        package "nginx" state="present"
+    }
+
+    step "Accounts" {
+        user "backup" state="present" when="${enable-backups}"
+    }
+}
+```
+
+A step or task whose condition does not hold is reported as `skipped`. See [Conditionals](/advanced/conditionals/) for the syntax and for what a skip does to `register` and `subscribe`.
 
 ## Subscribe
 

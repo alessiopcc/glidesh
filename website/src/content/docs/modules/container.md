@@ -167,7 +167,7 @@ A readiness condition that can never hold is reported as a plan error rather tha
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `check` | string | Guard command. If it exits 0 the job is already done and is skipped |
+| `check` | string | Guard command. If it exits 0 the job is already done and does not run |
 | `remove` | boolean | Add `--rm` (default: `#true`) |
 | `timeout` | integer | Seconds before the run is abandoned |
 | `retries` | integer | Attempts before failing (default: `1`) |
