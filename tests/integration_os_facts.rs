@@ -9,17 +9,15 @@ use assert_cmd::Command;
 use std::path::Path;
 
 /// One reference through module arguments and one through a `file` template: the two go
-/// through different interpolation paths, and both must see the facts.
+/// through different interpolation paths, and both must see the facts. Each writes what it
+/// saw to the host, because a real run keeps task stdout out of the console.
 const PLAN: &str = r#"
 plan "facts" {
-    step "Echo facts" {
-        shell "echo facts=${@os.id}/${@os.version}/${@os.family}/${@os.pkg-manager}/${@os.init}/rt=${@os.container-runtime}/nix=${@os.nix-installed}"
+    step "Write facts from args" {
+        shell "echo facts=${@os.id}/${@os.version}/${@os.family}/${@os.pkg-manager}/${@os.init}/rt=${@os.container-runtime}/nix=${@os.nix-installed} > /root/os-args.txt"
     }
     step "Render facts" {
         file "/root/os-facts.txt" src="os-facts.tmpl" template=#true
-    }
-    step "Read rendered facts" {
-        shell "cat /root/os-facts.txt"
     }
 }
 "#;
@@ -29,20 +27,23 @@ async fn os_facts_reach_module_args_and_templates() {
     skip_unless_integration!();
 
     let container = common::TestContainer::start();
-    let _ssh = container.ssh_session().await;
+    let ssh = container.ssh_session().await;
     let dir = tempfile::tempdir().unwrap();
     let key = container.write_key_file(dir.path());
     write_fixtures(dir.path(), container.port, &key);
 
-    let out = run(dir.path());
+    run(dir.path());
+
     // The test image installs neither a container runtime nor Nix.
-    assert!(
-        out.contains("facts=ubuntu/22.04/debian/apt/systemd/rt=/nix=false"),
-        "module args must see the detected facts:\n{out}"
+    assert_eq!(
+        read(&ssh, "/root/os-args.txt").await,
+        "facts=ubuntu/22.04/debian/apt/systemd/rt=/nix=false",
+        "module args must see the detected facts"
     );
-    assert!(
-        out.contains("rendered=debian"),
-        "a file template must see the detected facts:\n{out}"
+    assert_eq!(
+        read(&ssh, "/root/os-facts.txt").await,
+        "rendered=debian",
+        "a file template must see the detected facts"
     );
 }
 
@@ -64,20 +65,27 @@ async fn a_detected_runtime_is_exposed() {
     let key = container.write_key_file(dir.path());
     write_fixtures(dir.path(), container.port, &key);
 
-    let out = run(dir.path());
+    run(dir.path());
+
+    let facts = read(&ssh, "/root/os-args.txt").await;
     assert!(
-        out.contains("/rt=docker/"),
-        "a host with docker must expose it:\n{out}"
+        facts.contains("/rt=docker/"),
+        "a host with docker must expose it: {facts}"
     );
 }
 
-fn run(dir: &Path) -> String {
+fn run(dir: &Path) {
     let mut cmd = Command::cargo_bin("glidesh").unwrap();
     cmd.current_dir(dir)
         .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl"])
         .args(["--no-tui", "--no-host-key-check"]);
-    let out = cmd.assert().success().get_output().stdout.clone();
-    String::from_utf8(out).unwrap()
+    cmd.assert().success();
+}
+
+async fn read(ssh: &glidesh::ssh::SshSession, path: &str) -> String {
+    let out = ssh.exec(&format!("cat {path}")).await.unwrap();
+    assert_eq!(out.exit_code, 0, "{path} was not written: {}", out.stderr);
+    out.stdout.trim().to_string()
 }
 
 fn write_fixtures(dir: &Path, port: u16, key: &Path) {

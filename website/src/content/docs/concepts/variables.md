@@ -122,7 +122,7 @@ under `@os`. Detection happens on every run anyway, so these cost nothing extra.
 | `${@os.id}` | `ID` from `/etc/os-release` | e.g. `ubuntu`, `rocky`, `alpine` |
 | `${@os.version}` | `VERSION_ID` from `/etc/os-release` | e.g. `22.04`, `9.3` |
 | `${@os.family}` | Distribution family | `debian`, `redhat`, `arch`, `alpine`, `suse`, `nixos` — or the raw `ID` for an OS glidesh does not recognise |
-| `${@os.pkg-manager}` | Package manager the `package` module will use | `apt`, `dnf`, `yum`, `pacman`, `apk`, `zypper`, `nix` |
+| `${@os.pkg-manager}` | Package manager the `package` module will use | `apt`, `dnf`, `yum`, `pacman`, `apk`, `zypper`, `nix` — `apt` on an OS glidesh does not recognise, since that is what `package` falls back to |
 | `${@os.init}` | Init system | `systemd`, `openrc`, `unknown` |
 | `${@os.container-runtime}` | Container runtime found on the host | `podman`, `docker`, or empty if neither is installed |
 | `${@os.nix-installed}` | Whether Nix is available | `true`, `false` |
