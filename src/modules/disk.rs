@@ -115,9 +115,11 @@ impl Module for DiskModule {
         if needs_change.is_empty() {
             Ok(ModuleStatus::Satisfied)
         } else {
-            Ok(ModuleStatus::Pending {
-                plan: format!("disk {}: {}", device, needs_change.join(", ")),
-            })
+            Ok(ModuleStatus::pending(format!(
+                "disk {}: {}",
+                device,
+                needs_change.join(", ")
+            )))
         }
     }
 

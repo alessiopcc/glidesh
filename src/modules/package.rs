@@ -29,12 +29,11 @@ impl Module for PackageModule {
 
         match (desired_state, is_installed) {
             ("present", true) | ("absent", false) => Ok(ModuleStatus::Satisfied),
-            ("present", false) => Ok(ModuleStatus::Pending {
-                plan: format!("Install package {}", package),
-            }),
-            ("absent", true) => Ok(ModuleStatus::Pending {
-                plan: format!("Remove package {}", package),
-            }),
+            ("present", false) => Ok(ModuleStatus::pending(format!(
+                "Install package {}",
+                package
+            ))),
+            ("absent", true) => Ok(ModuleStatus::pending(format!("Remove package {}", package))),
             _ => Ok(ModuleStatus::Unknown {
                 reason: format!("Unknown state: {}", desired_state),
             }),

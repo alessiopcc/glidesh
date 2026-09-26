@@ -120,7 +120,7 @@ async fn test_container_lifecycle_reuses_before_recreating() {
     // Something stopped it out of band.
     write_state(&ssh, "webapp", "status", "exited").await;
     match ContainerModule.check(&ctx, &spec).await.unwrap() {
-        ModuleStatus::Pending { plan } => assert!(
+        ModuleStatus::Pending { plan, .. } => assert!(
             plan.contains("Start container webapp"),
             "expected a start plan, got: {plan}"
         ),
@@ -145,7 +145,7 @@ async fn test_container_lifecycle_reuses_before_recreating() {
         ],
     );
     match ContainerModule.check(&ctx, &changed_spec).await.unwrap() {
-        ModuleStatus::Pending { plan } => assert!(
+        ModuleStatus::Pending { plan, .. } => assert!(
             plan.contains("configuration changed"),
             "expected a drift plan, got: {plan}"
         ),
@@ -302,7 +302,7 @@ async fn test_wait_healthy_blocks_then_times_out() {
     // Back to starting: check must gate, and a bounded wait must fail loudly.
     write_state(&ssh, "svc", "health", "starting").await;
     match ContainerModule.check(&ctx, &spec).await.unwrap() {
-        ModuleStatus::Pending { plan } => assert!(
+        ModuleStatus::Pending { plan, .. } => assert!(
             plan.contains("become healthy"),
             "expected a readiness plan, got: {plan}"
         ),
@@ -567,7 +567,7 @@ async fn test_absent_removes_container() {
 
     let absent = params("doomed", &[("state", s("absent"))]);
     match ContainerModule.check(&ctx, &absent).await.unwrap() {
-        ModuleStatus::Pending { plan } => assert!(plan.contains("Remove container doomed")),
+        ModuleStatus::Pending { plan, .. } => assert!(plan.contains("Remove container doomed")),
         other => panic!("expected Pending, got {other:?}"),
     }
 
@@ -619,5 +619,57 @@ async fn test_custom_network_is_created() {
     assert_ne!(
         builtin.exit_code, 0,
         "built-in network modes must not be created"
+    );
+}
+
+/// A container that is both stopped and on a stale image must preview as a recreate, and
+/// the preview must not perform it. The generation counter proves it was not torn down.
+#[tokio::test]
+async fn test_container_dry_run_sees_drift_and_changes_nothing() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    install_fake_docker(&ssh).await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+
+    let applied = container.module_context(&ssh, &os_info, &vars, false);
+    let spec = params("lmcache", &[("image", s("lmcache/standalone:stable"))]);
+    ContainerModule.apply(&applied, &spec).await.unwrap();
+    let first_gen = read_state(&ssh, "lmcache", "generation").await;
+
+    // Drift on both axes at once: stopped, and on another image.
+    write_state(&ssh, "lmcache", "status", "exited").await;
+    let drifted = params("lmcache", &[("image", s("lmcache/standalone:nightly"))]);
+
+    let preview = container.module_context(&ssh, &os_info, &vars, true);
+    match ContainerModule.check(&preview, &drifted).await.unwrap() {
+        ModuleStatus::Pending { plan, .. } => assert!(
+            plan.contains("Recreate container lmcache"),
+            "expected a recreate plan, got: {plan}"
+        ),
+        other => panic!("a drifted container must be Pending, got {other:?}"),
+    }
+
+    let result = ContainerModule.apply(&preview, &drifted).await.unwrap();
+    assert!(
+        !result.changed,
+        "a dry-run apply must not report having changed anything"
+    );
+    assert!(
+        result.output.contains("[dry-run]"),
+        "dry-run should still describe the command it would run, got: {}",
+        result.output
+    );
+    assert_eq!(
+        read_state(&ssh, "lmcache", "generation").await,
+        first_gen,
+        "dry-run must not recreate the container"
+    );
+    assert_eq!(
+        read_state(&ssh, "lmcache", "status").await,
+        "exited",
+        "dry-run must leave the container's state alone"
     );
 }

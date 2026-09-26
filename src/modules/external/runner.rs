@@ -136,6 +136,7 @@ impl ExternalModule {
             os_info: ctx.os_info,
             vars: visible.as_ref(),
             dry_run: ctx.dry_run,
+            diff: ctx.diff,
         };
 
         send_line(writer, &request, &self.info.name).await?;
@@ -202,7 +203,7 @@ impl crate::modules::Module for ExternalModule {
         match msg {
             PluginMessage::CheckResponse(resp) => match resp {
                 CheckResponse::Satisfied => Ok(ModuleStatus::Satisfied),
-                CheckResponse::Pending { plan } => Ok(ModuleStatus::Pending { plan }),
+                CheckResponse::Pending { plan, diff } => Ok(ModuleStatus::Pending { plan, diff }),
                 CheckResponse::Unknown { reason } => Ok(ModuleStatus::Unknown { reason }),
             },
             PluginMessage::Error(e) => Err(GlideshError::Module {
@@ -434,6 +435,31 @@ mod tests {
     }
 
     #[test]
+    fn test_check_response_pending_without_diff_is_accepted() {
+        let json = r#"{"status":"pending","plan":"Install nginx"}"#;
+        let msg: PluginMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginMessage::CheckResponse(CheckResponse::Pending { plan, diff }) => {
+                assert_eq!(plan, "Install nginx");
+                assert!(diff.is_none());
+            }
+            _ => panic!("expected a pending check response"),
+        }
+    }
+
+    #[test]
+    fn test_check_response_pending_with_diff() {
+        let json = r#"{"status":"pending","plan":"Update config","diff":"-a\n+b"}"#;
+        let msg: PluginMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginMessage::CheckResponse(CheckResponse::Pending { diff, .. }) => {
+                assert_eq!(diff.as_deref(), Some("-a\n+b"));
+            }
+            _ => panic!("expected a pending check response"),
+        }
+    }
+
+    #[test]
     fn test_apply_response_deserialize() {
         let json = r#"{"changed":true,"output":"done","stderr":"","exit_code":0}"#;
         let msg: PluginMessage = serde_json::from_str(json).unwrap();
@@ -496,14 +522,40 @@ mod tests {
             },
             vars: &std::collections::HashMap::new(),
             dry_run: false,
+            diff: true,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"method\":\"check\""));
+        assert!(json.contains("\"diff\":true"));
         assert!(json.contains("\"resource_name\":\"test\""));
         assert!(json.contains("\"family\":\"debian\""));
         // `nix_installed: false` must be omitted so the wire format stays
         // unchanged for non-Nix hosts (protocol v1 compatibility).
         assert!(!json.contains("nix_installed"));
+    }
+
+    #[test]
+    fn test_module_request_omits_diff_when_not_requested() {
+        let os_info = crate::modules::detect::OsInfo {
+            id: "ubuntu".to_string(),
+            version: "22.04".to_string(),
+            family: crate::modules::detect::OsFamily::Debian,
+            pkg_manager: crate::modules::detect::PkgManager::Apt,
+            init_system: crate::modules::detect::InitSystem::Systemd,
+            container_runtime: None,
+            nix_installed: false,
+        };
+        let req = ModuleRequest {
+            method: "check",
+            resource_name: "test",
+            args: &std::collections::HashMap::new(),
+            os_info: &os_info,
+            vars: &std::collections::HashMap::new(),
+            dry_run: false,
+            diff: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("diff"), "got: {json}");
     }
 
     /// A registry populated the way a real run populates it: by decrypting a token.

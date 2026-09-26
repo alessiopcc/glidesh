@@ -52,14 +52,22 @@ pub struct RunLogger {
     started_at: chrono::DateTime<Utc>,
     node_files: HashMap<String, fs::File>,
     node_summaries: HashMap<String, NodeSummary>,
+    /// Learned from the closing `RunComplete`, so a saved summary records whether its
+    /// `changed` counts were applied or merely previewed.
+    dry_run: bool,
 }
 
 impl RunLogger {
     pub fn new(plan_name: &str) -> Result<Self, GlideshError> {
+        Self::new_in(&storage::runs_dir(), plan_name)
+    }
+
+    /// `new`, with the parent directory given rather than taken from the home directory.
+    fn new_in(runs_dir: &std::path::Path, plan_name: &str) -> Result<Self, GlideshError> {
         let run_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
         let now = Utc::now();
         let dir_name = format!("{}_{}", now.format("%Y-%m-%dT%H-%M-%S"), plan_name);
-        let run_dir = storage::runs_dir().join(&dir_name);
+        let run_dir = runs_dir.join(&dir_name);
         fs::create_dir_all(&run_dir)?;
 
         Ok(RunLogger {
@@ -69,6 +77,7 @@ impl RunLogger {
             started_at: now,
             node_files: HashMap::new(),
             node_summaries: HashMap::new(),
+            dry_run: false,
         })
     }
 
@@ -162,11 +171,12 @@ impl RunLogger {
                 module,
                 resource,
                 changed,
+                dry_run,
                 stdout,
                 stderr,
                 exit_code,
             } => {
-                let status = if *changed { "changed" } else { "ok" };
+                let status = crate::executor::changed_label(*changed, *dry_run);
                 self.log_line(
                     host,
                     &format!(
@@ -210,17 +220,19 @@ impl RunLogger {
                 host,
                 success,
                 changed,
+                dry_run,
             } => {
                 let status = if *success { "ok" } else { "failed" };
+                let counted = if *dry_run { "would_change" } else { "changed" };
                 self.log_line(
                     host,
-                    &format!("[COMPLETE] status={} changed={}", status, changed),
+                    &format!("[COMPLETE] status={} {}={}", status, counted, changed),
                 );
                 if let Some(summary) = self.node_summaries.get_mut(host) {
                     summary.status = status.to_string();
                 }
             }
-            ExecutorEvent::RunComplete { .. } => {}
+            ExecutorEvent::RunComplete { summary } => self.dry_run = summary.dry_run,
         }
     }
 
@@ -230,6 +242,7 @@ impl RunLogger {
             plan: self.plan_name.clone(),
             started_at: self.started_at,
             finished_at: Some(Utc::now()),
+            dry_run: self.dry_run,
             nodes: self.node_summaries.clone(),
         };
 
@@ -260,5 +273,97 @@ mod tests {
         assert!(body.len() <= MAX_STREAM_LOG_BYTES);
         // Truncation must not split a multi-byte char.
         assert!(std::str::from_utf8(body.as_bytes()).is_ok());
+    }
+
+    fn summary(dry_run: bool) -> ExecutorEvent {
+        ExecutorEvent::RunComplete {
+            summary: crate::executor::result::RunSummary {
+                total_hosts: 1,
+                succeeded: 1,
+                failed: 0,
+                total_changed: 1,
+                dry_run,
+            },
+        }
+    }
+
+    fn module_result(dry_run: bool) -> ExecutorEvent {
+        ExecutorEvent::ModuleResult {
+            host: "web-1".to_string(),
+            module: "file".to_string(),
+            resource: "/etc/app.conf".to_string(),
+            changed: true,
+            dry_run,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        }
+    }
+
+    fn logger(runs_dir: &std::path::Path) -> RunLogger {
+        let mut logger = RunLogger::new_in(runs_dir, "deploy").unwrap();
+        logger.handle_event(&ExecutorEvent::NodeConnecting {
+            host: "web-1".to_string(),
+        });
+        logger
+    }
+
+    /// A saved summary must not be mistakable for an applied run.
+    #[test]
+    fn a_previewed_run_is_recorded_as_a_dry_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&module_result(true));
+        logger.handle_event(&summary(true));
+        logger.write_summary().unwrap();
+
+        let saved = storage::read_summary(logger.run_dir()).unwrap();
+        assert!(saved.dry_run);
+        assert_eq!(saved.nodes["web-1"].changed, 1);
+    }
+
+    #[test]
+    fn an_applied_run_is_recorded_as_a_real_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&module_result(false));
+        logger.handle_event(&summary(false));
+        logger.write_summary().unwrap();
+
+        assert!(!storage::read_summary(logger.run_dir()).unwrap().dry_run);
+    }
+
+    #[test]
+    fn the_node_log_labels_a_previewed_task_as_would_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&module_result(true));
+
+        let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
+        assert!(log.contains("would change"), "got: {log}");
+    }
+
+    /// The per-host tally is keyed by what it counted, so a preview's log cannot be read
+    /// as a record of applied changes.
+    #[test]
+    fn the_node_log_keys_the_completion_tally_by_run_mode() {
+        for (dry_run, expected, absent) in [
+            (true, "would_change=1", "changed=1"),
+            (false, "changed=1", "would_change=1"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut logger = logger(tmp.path());
+            logger.handle_event(&module_result(dry_run));
+            logger.handle_event(&ExecutorEvent::NodeComplete {
+                host: "web-1".to_string(),
+                success: true,
+                changed: 1,
+                dry_run,
+            });
+
+            let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
+            assert!(log.contains(expected), "expected {expected} in: {log}");
+            assert!(!log.contains(absent), "unexpected {absent} in: {log}");
+        }
     }
 }

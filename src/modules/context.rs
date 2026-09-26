@@ -15,6 +15,9 @@ pub struct ModuleContext<'a> {
     pub vars: &'a HashMap<String, String>,
     pub template_data: &'a TemplateData,
     pub dry_run: bool,
+    /// The run asked for `--diff`. A module able to describe a change in detail may pay the
+    /// extra round trips doing so costs; one that cannot ignores this.
+    pub diff: bool,
     pub plan_base_dir: &'a Path,
     /// Effective privilege escalation for this task, or `None` to run as the login
     /// user. Resolved per task by the executor from module/step/host/group/global/CLI.

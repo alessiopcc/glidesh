@@ -33,6 +33,15 @@ pub struct ModuleRequest<'a> {
     pub os_info: &'a OsInfo,
     pub vars: &'a HashMap<String, String>,
     pub dry_run: bool,
+    /// The run asked for `--diff`. A plugin that can describe a change in detail should
+    /// return it in `CheckResponse::Pending.diff` only when this is set, since the extra
+    /// probes it costs are not wanted otherwise.
+    ///
+    /// Skipped when false so the wire format stays byte-identical for plugins that predate
+    /// `--diff` (protocol v1 compatibility, as with `OsInfo::nix_installed`). A plugin that
+    /// sees no `diff` key must read it as false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub diff: bool,
 }
 
 #[derive(Serialize)]
@@ -80,7 +89,12 @@ pub enum CheckResponse {
     #[serde(rename = "satisfied")]
     Satisfied,
     #[serde(rename = "pending")]
-    Pending { plan: String },
+    Pending {
+        plan: String,
+        /// Optional since protocol_version 1 plugins predate `--diff`.
+        #[serde(default)]
+        diff: Option<String>,
+    },
     #[serde(rename = "unknown")]
     Unknown { reason: String },
 }

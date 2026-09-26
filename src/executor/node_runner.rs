@@ -89,6 +89,7 @@ pub struct NodeRunner {
     pub registry: Arc<ModuleRegistry>,
     pub key: PrivateKeyWithHashAlg,
     pub dry_run: bool,
+    pub diff: bool,
     pub host_key_policy: HostKeyPolicy,
     pub event_tx: EventSink,
     pub inventory_template_data: Arc<TemplateData>,
@@ -96,6 +97,80 @@ pub struct NodeRunner {
     pub coordinator: Arc<HostCoordinator>,
     pub all_targets: Arc<Vec<ResolvedHost>>,
     pub secrets: Arc<Secrets>,
+}
+
+/// Whether a task counts toward the run's changed total.
+///
+/// In a dry run the answer comes from `check` (did it report work outstanding?), because
+/// `apply` deliberately reports `changed: false` when it is told not to touch the host.
+///
+/// `force_apply` counts either way. A handler whose step is subscribed to a changed step
+/// runs even when its own module is satisfied — that is what a handler is for — so a real
+/// run counts it, and a preview of that same state has to count it too or it reports fewer
+/// changes than the run it is previewing.
+fn resolve_changed(
+    dry_run: bool,
+    was_pending: bool,
+    applied_changed: bool,
+    force_apply: bool,
+) -> bool {
+    let would_act = if dry_run {
+        was_pending
+    } else {
+        applied_changed
+    };
+    would_act || force_apply
+}
+
+/// What a task reports, given what `check` found and what the run asked to see.
+///
+/// A preview leads with `check`'s description of the pending work, so the reason
+/// ("Recreate container web (configuration changed)") sits above the module's own
+/// "[dry-run] would ..." line. A real run leads with its own output, as it always has —
+/// the reason would be describing something that has already happened.
+///
+/// `--diff` applies to both: it is the request to see the detail behind a change, whether
+/// that change is about to be made or has just been made. A module may hand back a `diff`
+/// whether or not it was asked for — an external plugin decides that for itself — so it is
+/// dropped unless `show_diff` says the run wants it.
+fn task_output(
+    dry_run: bool,
+    show_diff: bool,
+    pending: Option<(&str, Option<&str>)>,
+    output: &str,
+) -> String {
+    let (plan, diff) = match pending {
+        Some((plan, diff)) => (Some(plan), if show_diff { diff } else { None }),
+        None => (None, None),
+    };
+    let plan = if dry_run { plan } else { None };
+
+    let mut out = String::new();
+    for part in [plan, diff, Some(output)].into_iter().flatten() {
+        if part.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// What `register` captures from a task's output.
+///
+/// A preview never runs the task's own command, so there is no output to capture: what a
+/// module returns there describes what it *would* do. Registering that would hand a later
+/// `loop="${var}"` a "[dry-run] ..." sentence to iterate over, so capture nothing instead —
+/// which is what a satisfied task already does. (Read-only probes such as a `shell`
+/// `check=` guard do run during a preview; their output is not a task's output.)
+fn captured_output(dry_run: bool, output: &str) -> String {
+    if dry_run {
+        String::new()
+    } else {
+        output.trim().to_string()
+    }
 }
 
 impl NodeRunner {
@@ -107,6 +182,7 @@ impl NodeRunner {
                     host: self.host.name.clone(),
                     success: false,
                     changed: 0,
+                    dry_run: self.dry_run,
                 });
                 NodeResult {
                     success: false,
@@ -194,6 +270,7 @@ impl NodeRunner {
                 host: self.host.name.clone(),
                 success: false,
                 changed: 0,
+                dry_run: self.dry_run,
             });
             let _ = session.close().await;
             return Ok(NodeResult {
@@ -244,6 +321,7 @@ impl NodeRunner {
                                 host: self.host.name.clone(),
                                 success: false,
                                 changed: total_changed,
+                                dry_run: self.dry_run,
                             });
                             let _ = session.close().await;
                             return Ok(NodeResult {
@@ -262,6 +340,7 @@ impl NodeRunner {
                                 host: self.host.name.clone(),
                                 success: false,
                                 changed: total_changed,
+                                dry_run: self.dry_run,
                             });
                             let _ = session.close().await;
                             return Ok(NodeResult {
@@ -299,6 +378,7 @@ impl NodeRunner {
                                     host: self.host.name.clone(),
                                     success: false,
                                     changed: total_changed,
+                                    dry_run: self.dry_run,
                                 });
                                 let _ = session.close().await;
                                 return Ok(NodeResult {
@@ -319,6 +399,7 @@ impl NodeRunner {
             host: self.host.name.clone(),
             success: true,
             changed: total_changed,
+            dry_run: self.dry_run,
         });
 
         Ok(NodeResult {
@@ -468,6 +549,7 @@ impl NodeRunner {
                 vars,
                 template_data,
                 dry_run: self.dry_run,
+                diff: self.diff,
                 plan_base_dir: &self.plan_base_dir,
                 run_as,
                 secrets: Some(self.secrets.registry()),
@@ -498,22 +580,45 @@ impl NodeRunner {
                 ModuleStatus::Unknown { .. } => false,
             };
 
+            let pending_plan = match &status {
+                ModuleStatus::Pending { plan, diff } => Some((plan.clone(), diff.clone())),
+                _ => None,
+            };
+
             if should_apply {
                 match module.apply(&ctx, &params).await {
                     Ok(result) => {
-                        if result.changed || force_apply {
+                        let changed = resolve_changed(
+                            self.dry_run,
+                            pending_plan.is_some(),
+                            result.changed,
+                            force_apply,
+                        );
+                        if changed {
                             *total_changed += 1;
                             any_changed = true;
                         }
                         if let Some(ref var_name) = task.register {
-                            vars.insert(var_name.clone(), result.output.trim().to_string());
+                            vars.insert(
+                                var_name.clone(),
+                                captured_output(self.dry_run, &result.output),
+                            );
                         }
+                        let stdout = task_output(
+                            self.dry_run,
+                            self.diff,
+                            pending_plan
+                                .as_ref()
+                                .map(|(plan, diff)| (plan.as_str(), diff.as_deref())),
+                            &result.output,
+                        );
                         let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                             host: self.host.name.clone(),
                             module: task.module.clone(),
                             resource: params.resource_name.clone(),
-                            changed: result.changed,
-                            stdout: result.output.clone(),
+                            changed,
+                            dry_run: self.dry_run,
+                            stdout,
                             stderr: result.stderr.clone(),
                             exit_code: result.exit_code,
                         });
@@ -539,6 +644,7 @@ impl NodeRunner {
                             module: task.module.clone(),
                             resource: params.resource_name.clone(),
                             changed: false,
+                            dry_run: self.dry_run,
                             stdout: String::new(),
                             stderr: String::new(),
                             exit_code: 0,
@@ -603,17 +709,19 @@ impl NodeRunner {
         match result {
             Ok(out) => {
                 if let Some(ref var_name) = task.register {
-                    vars.insert(var_name.clone(), out.stdout.trim().to_string());
+                    vars.insert(var_name.clone(), captured_output(self.dry_run, &out.stdout));
                 }
-                let changed = !self.dry_run;
-                if changed {
-                    *total_changed += 1;
-                }
+                // A `host` task is a command, not a desired state: it has nothing to
+                // compare against, so it always counts — and in a dry run it is always
+                // something that *would* run.
+                let changed = true;
+                *total_changed += 1;
                 let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                     host: self.host.name.clone(),
                     module: task.module.clone(),
                     resource: resource_name,
                     changed,
+                    dry_run: self.dry_run,
                     stdout: out.stdout.clone(),
                     stderr: out.stderr.clone(),
                     exit_code: out.exit_code,
@@ -663,6 +771,92 @@ mod tests {
             resolve_loop_items(&LoopSource::Variable("vms".to_string()), &vars, &td).unwrap();
         assert_eq!(items.len(), 2);
         assert!(matches!(items[0], LoopItem::Structured(_)));
+    }
+
+    #[test]
+    fn dry_run_counts_pending_not_the_apply_result() {
+        let applied_changed = false;
+        assert!(resolve_changed(true, true, applied_changed, false));
+        assert!(!resolve_changed(true, false, applied_changed, false));
+    }
+
+    /// A preview must reach the same total as the run it previews, so a forced handler
+    /// counts in both. Only the unforced satisfied task is uncounted.
+    #[test]
+    fn a_forced_handler_counts_in_a_preview_as_it_does_for_real() {
+        let forced = |dry_run| resolve_changed(dry_run, false, false, true);
+        assert!(forced(true));
+        assert!(forced(false));
+
+        assert!(!resolve_changed(true, false, false, false));
+    }
+
+    #[test]
+    fn real_run_still_counts_apply_result_and_force() {
+        assert!(resolve_changed(false, true, true, false));
+        assert!(!resolve_changed(false, true, false, false));
+        assert!(resolve_changed(false, false, false, true));
+    }
+
+    #[test]
+    fn plan_leads_the_output_and_skips_empty_parts() {
+        let pending = Some(("Recreate container web", None));
+        assert_eq!(
+            task_output(true, false, pending, "[dry-run] docker run ..."),
+            "Recreate container web\n[dry-run] docker run ..."
+        );
+        assert_eq!(
+            task_output(true, false, Some(("Upload a -> b", None)), ""),
+            "Upload a -> b"
+        );
+    }
+
+    #[test]
+    fn a_real_run_does_not_lead_with_the_plan() {
+        assert_eq!(
+            task_output(
+                false,
+                false,
+                Some(("Upload a -> b", None)),
+                "copied 40 bytes"
+            ),
+            "copied 40 bytes"
+        );
+    }
+
+    #[test]
+    fn a_diff_is_shown_only_when_the_run_asked_for_one() {
+        let pending = Some(("Upload a -> b", Some("-old\n+new")));
+        assert_eq!(
+            task_output(true, true, pending, "[dry-run] would copy"),
+            "Upload a -> b\n-old\n+new\n[dry-run] would copy"
+        );
+        assert_eq!(
+            task_output(true, false, pending, "[dry-run] would copy"),
+            "Upload a -> b\n[dry-run] would copy"
+        );
+    }
+
+    #[test]
+    fn a_diff_is_shown_on_a_real_run_too() {
+        let pending = Some(("Upload a -> b", Some("-old\n+new")));
+        assert_eq!(
+            task_output(false, true, pending, "copied 40 bytes"),
+            "-old\n+new\ncopied 40 bytes"
+        );
+        assert_eq!(
+            task_output(false, false, pending, "copied 40 bytes"),
+            "copied 40 bytes"
+        );
+    }
+
+    #[test]
+    fn a_preview_registers_nothing() {
+        assert_eq!(
+            captured_output(true, "[dry-run] Would run: lsblk -dn -o NAME"),
+            ""
+        );
+        assert_eq!(captured_output(false, "  sda\nsdb\n"), "sda\nsdb");
     }
 
     #[test]

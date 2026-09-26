@@ -12,6 +12,19 @@ pub struct RunSummary {
     pub succeeded: usize,
     pub failed: usize,
     pub total_changed: usize,
+    /// Nothing was applied: `total_changed` counts what *would* change.
+    pub dry_run: bool,
+}
+
+/// How a task's outcome reads. A dry run reports intent, not history, so it must never
+/// claim a change it did not make. Shared by all three renderers (TUI, plain stdout, run
+/// log) so they cannot drift apart.
+pub fn changed_label(changed: bool, dry_run: bool) -> &'static str {
+    match (changed, dry_run) {
+        (true, true) => "would change",
+        (true, false) => "changed",
+        (false, _) => "ok",
+    }
 }
 
 /// Events emitted by the executor for TUI/logging consumption.
@@ -43,7 +56,9 @@ pub enum ExecutorEvent {
         host: String,
         module: String,
         resource: String,
+        /// In a dry run this means "would change" — see `dry_run`.
         changed: bool,
+        dry_run: bool,
         stdout: String,
         stderr: String,
         exit_code: i32,
@@ -62,9 +77,24 @@ pub enum ExecutorEvent {
     NodeComplete {
         host: String,
         success: bool,
+        /// In a dry run this counts what *would* change — see `dry_run`.
         changed: usize,
+        dry_run: bool,
     },
     RunComplete {
         summary: RunSummary,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changed_label;
+
+    #[test]
+    fn a_preview_never_claims_it_changed_something() {
+        assert_eq!(changed_label(true, true), "would change");
+        assert_eq!(changed_label(true, false), "changed");
+        assert_eq!(changed_label(false, true), "ok");
+        assert_eq!(changed_label(false, false), "ok");
+    }
 }

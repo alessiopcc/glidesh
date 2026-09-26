@@ -80,6 +80,10 @@ pub struct TuiState {
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
     pub total_changed: usize,
+    /// Known from the start, not learned from the events: the header renders a count from
+    /// the first frame, before any task has reported, and a preview's count must never read
+    /// as applied work.
+    pub dry_run: bool,
     pub combined_log: Vec<String>,
     pub combined_scroll: usize,
     pub combined_auto_scroll: bool,
@@ -96,6 +100,7 @@ impl TuiState {
     pub fn new(
         hosts: &[(String, String, String)],
         connection_info: Vec<HostConnectionInfo>,
+        dry_run: bool,
     ) -> Self {
         let now = Instant::now();
         let mut nodes = Vec::new();
@@ -134,6 +139,7 @@ impl TuiState {
             started_at: now,
             finished_at: None,
             total_changed: 0,
+            dry_run,
             combined_log: Vec::new(),
             combined_scroll: usize::MAX,
             combined_auto_scroll: true,
@@ -203,11 +209,12 @@ impl TuiState {
                 module,
                 resource,
                 changed,
+                dry_run,
                 stdout,
                 stderr,
                 ..
             } => {
-                let status = if *changed { "changed" } else { "ok" };
+                let status = crate::executor::changed_label(*changed, *dry_run);
                 self.push_node_log(host, format!("  {} '{}': {}", module, resource, status));
                 for line in crate::logging::stream_log_lines("stdout", stdout) {
                     self.push_node_log(host, line);
@@ -240,6 +247,7 @@ impl TuiState {
                 host,
                 success,
                 changed: _,
+                dry_run: _,
             } => {
                 if let Some(&idx) = self.node_index.get(host) {
                     let already_finished = self.nodes[idx].finished_at.is_some();
@@ -259,8 +267,21 @@ impl TuiState {
                 self.run_complete = true;
                 self.finished_at = Some(Instant::now());
                 self.summary_line = Some(format!(
-                    "Complete: {} hosts, {} ok, {} failed, {} changed",
-                    summary.total_hosts, summary.succeeded, summary.failed, summary.total_changed
+                    "{}: {} hosts, {} ok, {} failed, {} {}",
+                    if summary.dry_run {
+                        "Dry run complete (nothing applied)"
+                    } else {
+                        "Complete"
+                    },
+                    summary.total_hosts,
+                    summary.succeeded,
+                    summary.failed,
+                    summary.total_changed,
+                    if summary.dry_run {
+                        "would change"
+                    } else {
+                        "changed"
+                    }
                 ));
             }
         }
@@ -418,5 +439,97 @@ impl TuiState {
 
     pub fn tick_spinner(&mut self) {
         self.spinner_tick = self.spinner_tick.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::result::RunSummary;
+
+    fn state() -> TuiState {
+        state_for(false)
+    }
+
+    fn state_for(dry_run: bool) -> TuiState {
+        TuiState::new(
+            &[("web-1".to_string(), "all".to_string(), "deploy".to_string())],
+            Vec::new(),
+            dry_run,
+        )
+    }
+
+    fn module_result(changed: bool, dry_run: bool) -> ExecutorEvent {
+        ExecutorEvent::ModuleResult {
+            host: "web-1".to_string(),
+            module: "container".to_string(),
+            resource: "lmcache".to_string(),
+            changed,
+            dry_run,
+            stdout: "Recreate container lmcache (configuration changed)".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        }
+    }
+
+    /// A container that would be recreated must not read as `ok`.
+    #[test]
+    fn a_pending_task_in_a_dry_run_reads_as_would_change() {
+        let mut s = state();
+        s.handle_event(&module_result(true, true));
+
+        assert_eq!(s.total_changed, 1);
+        assert_eq!(s.nodes[0].changed, 1);
+        let line = &s.nodes[0].log_lines[0];
+        assert!(line.contains("would change"), "got: {line}");
+        assert!(
+            s.nodes[0]
+                .log_lines
+                .iter()
+                .any(|l| l.contains("Recreate container lmcache")),
+            "the reason must reach the log: {:?}",
+            s.nodes[0].log_lines
+        );
+    }
+
+    #[test]
+    fn the_run_mode_is_known_before_any_event_arrives() {
+        assert!(state_for(true).dry_run);
+        assert!(!state_for(false).dry_run);
+    }
+
+    #[test]
+    fn an_applied_task_still_reads_as_changed() {
+        let mut s = state();
+        s.handle_event(&module_result(true, false));
+        assert!(s.nodes[0].log_lines[0].contains("changed"));
+        assert!(!s.nodes[0].log_lines[0].contains("would change"));
+    }
+
+    #[test]
+    fn a_satisfied_task_is_ok_in_either_mode() {
+        for dry_run in [true, false] {
+            let mut s = state();
+            s.handle_event(&module_result(false, dry_run));
+            assert_eq!(s.total_changed, 0);
+            assert!(s.nodes[0].log_lines[0].contains("ok"));
+        }
+    }
+
+    #[test]
+    fn the_summary_says_nothing_was_applied_in_a_dry_run() {
+        let mut s = state();
+        s.handle_event(&ExecutorEvent::RunComplete {
+            summary: RunSummary {
+                total_hosts: 1,
+                succeeded: 1,
+                failed: 0,
+                total_changed: 2,
+                dry_run: true,
+            },
+        });
+        let line = s.summary_line.unwrap();
+        assert!(line.contains("nothing applied"), "got: {line}");
+        assert!(line.contains("2 would change"), "got: {line}");
     }
 }

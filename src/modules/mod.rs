@@ -22,8 +22,30 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub enum ModuleStatus {
     Satisfied,
-    Pending { plan: String },
-    Unknown { reason: String },
+    Pending {
+        plan: String,
+        /// Set only under `--diff`, by modules able to describe the change in detail.
+        diff: Option<String>,
+    },
+    Unknown {
+        reason: String,
+    },
+}
+
+impl ModuleStatus {
+    pub fn pending(plan: impl Into<String>) -> Self {
+        ModuleStatus::Pending {
+            plan: plan.into(),
+            diff: None,
+        }
+    }
+
+    pub fn pending_with_diff(plan: impl Into<String>, diff: impl Into<String>) -> Self {
+        ModuleStatus::Pending {
+            plan: plan.into(),
+            diff: Some(diff.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

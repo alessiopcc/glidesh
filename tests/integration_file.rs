@@ -335,3 +335,64 @@ async fn test_file_fetch() {
     let content = std::fs::read_to_string(&local_path).unwrap();
     assert_eq!(content.trim(), "fetched content");
 }
+
+/// A file whose remote content has drifted must preview as pending while the host stays
+/// untouched. The executor derives "would change" from `check` precisely because a
+/// dry-run `apply` reports `changed: false`.
+#[tokio::test]
+async fn test_file_dry_run_sees_drift_and_changes_nothing() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let dest = "/root/glidesh-dry-run-drift.txt";
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"desired content").unwrap();
+
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String(tmp.path().to_string_lossy().to_string()),
+    );
+    let params = ModuleParams {
+        resource_name: dest.to_string(),
+        args,
+    };
+
+    let applied = container.module_context(&ssh, &os_info, &vars, false);
+    FileModule.apply(&applied, &params).await.unwrap();
+    assert!(matches!(
+        FileModule.check(&applied, &params).await.unwrap(),
+        ModuleStatus::Satisfied
+    ));
+
+    ssh.exec(&format!("echo 'drifted out of band' > {dest}"))
+        .await
+        .unwrap();
+
+    let preview = container.module_context(&ssh, &os_info, &vars, true);
+    match FileModule.check(&preview, &params).await.unwrap() {
+        ModuleStatus::Pending { plan, .. } => {
+            assert!(
+                plan.contains(dest),
+                "plan should name the file, got: {plan}"
+            )
+        }
+        other => panic!("drifted file must be Pending, got {other:?}"),
+    }
+
+    let result = FileModule.apply(&preview, &params).await.unwrap();
+    assert!(
+        !result.changed,
+        "a dry-run apply must not report having changed anything"
+    );
+    let after = ssh.exec(&format!("cat {dest}")).await.unwrap();
+    assert_eq!(
+        after.stdout.trim(),
+        "drifted out of band",
+        "dry-run must leave the remote file untouched"
+    );
+}

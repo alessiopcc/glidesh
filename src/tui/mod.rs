@@ -37,13 +37,14 @@ pub async fn run_tui(
     connection_info: Vec<HostConnectionInfo>,
     ssh_key: PrivateKeyWithHashAlg,
     host_key_policy: HostKeyPolicy,
+    dry_run: bool,
 ) -> io::Result<bool> {
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let state = Arc::new(Mutex::new(TuiState::new(hosts, connection_info)));
+    let state = Arc::new(Mutex::new(TuiState::new(hosts, connection_info, dry_run)));
 
     let state_clone = state.clone();
 

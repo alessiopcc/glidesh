@@ -388,7 +388,11 @@ fn render_run_list(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState)
                     .values()
                     .filter(|n| n.status == "failed")
                     .count();
-                format!("  {} nodes: {} ok, {} failed", node_count, ok, failed)
+                let mode = if summary.dry_run { " [dry run]" } else { "" };
+                format!(
+                    "  {} nodes: {} ok, {} failed{}",
+                    node_count, ok, failed, mode
+                )
             } else {
                 "  (no summary)".to_string()
             };
@@ -466,8 +470,16 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
             .map(|f| f.to_string())
             .unwrap_or_else(|| "(running)".to_string());
         format!(
-            "Plan: {}\nRun ID: {}\nStarted: {}\nFinished: {}",
-            summary.plan, summary.run_id, summary.started_at, finished
+            "Plan: {}{}\nRun ID: {}\nStarted: {}\nFinished: {}",
+            summary.plan,
+            if summary.dry_run {
+                "  (dry run \u{2014} nothing was applied)"
+            } else {
+                ""
+            },
+            summary.run_id,
+            summary.started_at,
+            finished
         )
     } else {
         format!("Run: {}\n(no summary available)", run.name)
@@ -482,7 +494,11 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
     );
     frame.render_widget(header, chunks[0]);
 
-    let table_header = Row::new(vec!["", "NODE", "STATUS", "CHANGED", "ERROR"])
+    let counted = match state.current_summary.as_ref() {
+        Some(s) if s.dry_run => "WOULD CHANGE",
+        _ => "CHANGED",
+    };
+    let table_header = Row::new(vec!["", "NODE", "STATUS", counted, "ERROR"])
         .style(
             Style::default()
                 .fg(Color::DarkGray)

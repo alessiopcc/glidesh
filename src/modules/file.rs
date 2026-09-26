@@ -158,9 +158,7 @@ impl Module for FileModule {
                     message: "fetch=true and recurse=true cannot be combined".to_string(),
                 });
             }
-            return Ok(ModuleStatus::Pending {
-                plan: format!("Fetch {} -> {}", src, dest),
-            });
+            return Ok(ModuleStatus::pending(format!("Fetch {} -> {}", src, dest)));
         }
 
         if Self::is_recurse(params) {
@@ -216,21 +214,22 @@ impl Module for FileModule {
                                 desired_mode.unwrap()
                             ));
                         }
-                        return Ok(ModuleStatus::Pending {
-                            plan: format!("Fix attrs on {}: {}", dest, changes.join(", ")),
-                        });
+                        return Ok(ModuleStatus::pending(format!(
+                            "Fix attrs on {}: {}",
+                            dest,
+                            changes.join(", ")
+                        )));
                     } else {
-                        return Ok(ModuleStatus::Pending {
-                            plan: format!("Set attrs on {} (could not read current attrs)", dest),
-                        });
+                        return Ok(ModuleStatus::pending(format!(
+                            "Set attrs on {} (could not read current attrs)",
+                            dest
+                        )));
                     }
                 }
 
                 Ok(ModuleStatus::Satisfied)
             }
-            _ => Ok(ModuleStatus::Pending {
-                plan: format!("Upload {} -> {}", src, dest),
-            }),
+            _ => Ok(ModuleStatus::pending(format!("Upload {} -> {}", src, dest))),
         }
     }
 
@@ -454,15 +453,13 @@ impl FileModule {
             if attrs_changed > 0 {
                 parts.push(format!("{} attrs", attrs_changed));
             }
-            Ok(ModuleStatus::Pending {
-                plan: format!(
-                    "Upload dir {} -> {} (changed: {} of {} files)",
-                    src,
-                    dest,
-                    parts.join(", "),
-                    local_files.len()
-                ),
-            })
+            Ok(ModuleStatus::pending(format!(
+                "Upload dir {} -> {} (changed: {} of {} files)",
+                src,
+                dest,
+                parts.join(", "),
+                local_files.len()
+            )))
         }
     }
 

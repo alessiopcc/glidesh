@@ -187,12 +187,14 @@ impl NixModule {
 
         match (desired_state, is_installed) {
             ("present", true) | ("absent", false) => Ok(ModuleStatus::Satisfied),
-            ("present", false) => Ok(ModuleStatus::Pending {
-                plan: format!("Install Nix package {}", package),
-            }),
-            ("absent", true) => Ok(ModuleStatus::Pending {
-                plan: format!("Remove Nix package {}", package),
-            }),
+            ("present", false) => Ok(ModuleStatus::pending(format!(
+                "Install Nix package {}",
+                package
+            ))),
+            ("absent", true) => Ok(ModuleStatus::pending(format!(
+                "Remove Nix package {}",
+                package
+            ))),
             _ => Ok(ModuleStatus::Unknown {
                 reason: format!("Unknown state: {}", desired_state),
             }),
@@ -253,9 +255,10 @@ impl NixModule {
         _ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
-        Ok(ModuleStatus::Pending {
-            plan: format!("Run command in Nix shell: {}", params.resource_name),
-        })
+        Ok(ModuleStatus::pending(format!(
+            "Run command in Nix shell: {}",
+            params.resource_name
+        )))
     }
 
     // Wrap in `sh -c '<escaped>'` so pipes, redirects, and quoted args in the
@@ -343,13 +346,15 @@ impl NixModule {
         if output.exit_code == 0 {
             // Symlink exists — but we can't cheaply check if the derivation changed
             // without building, so we still report Pending for safety
-            Ok(ModuleStatus::Pending {
-                plan: format!("Rebuild Nix derivation {}", params.resource_name),
-            })
+            Ok(ModuleStatus::pending(format!(
+                "Rebuild Nix derivation {}",
+                params.resource_name
+            )))
         } else {
-            Ok(ModuleStatus::Pending {
-                plan: format!("Build Nix derivation {}", params.resource_name),
-            })
+            Ok(ModuleStatus::pending(format!(
+                "Build Nix derivation {}",
+                params.resource_name
+            )))
         }
     }
 
@@ -418,12 +423,14 @@ impl NixModule {
 
         match (desired_state, exists) {
             ("present", true) | ("absent", false) => Ok(ModuleStatus::Satisfied),
-            ("present", false) => Ok(ModuleStatus::Pending {
-                plan: format!("Add Nix channel {}", channel_name),
-            }),
-            ("absent", true) => Ok(ModuleStatus::Pending {
-                plan: format!("Remove Nix channel {}", channel_name),
-            }),
+            ("present", false) => Ok(ModuleStatus::pending(format!(
+                "Add Nix channel {}",
+                channel_name
+            ))),
+            ("absent", true) => Ok(ModuleStatus::pending(format!(
+                "Remove Nix channel {}",
+                channel_name
+            ))),
             _ => Ok(ModuleStatus::Unknown {
                 reason: format!("Unknown state: {}", desired_state),
             }),
@@ -524,9 +531,10 @@ impl NixModule {
         _ctx: &ModuleContext<'_>,
         params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
-        Ok(ModuleStatus::Pending {
-            plan: format!("Update flake inputs in {}", params.resource_name),
-        })
+        Ok(ModuleStatus::pending(format!(
+            "Update flake inputs in {}",
+            params.resource_name
+        )))
     }
 
     async fn apply_flake_update(
@@ -578,9 +586,9 @@ impl NixModule {
         _ctx: &ModuleContext<'_>,
         _params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
-        Ok(ModuleStatus::Pending {
-            plan: "Garbage collect Nix store".to_string(),
-        })
+        Ok(ModuleStatus::pending(
+            "Garbage collect Nix store".to_string(),
+        ))
     }
 
     async fn apply_gc(
@@ -641,13 +649,11 @@ impl Module for NixModule {
             if !Self::install_requested(params) {
                 return Err(Self::nix_missing_error());
             }
-            return Ok(ModuleStatus::Pending {
-                plan: format!(
-                    "Install Nix, then perform {} action on {}",
-                    Self::get_action(params),
-                    params.resource_name
-                ),
-            });
+            return Ok(ModuleStatus::pending(format!(
+                "Install Nix, then perform {} action on {}",
+                Self::get_action(params),
+                params.resource_name
+            )));
         }
 
         match Self::get_action(params) {

@@ -20,6 +20,7 @@ pub struct Engine {
     pub key: PrivateKeyWithHashAlg,
     pub concurrency: usize,
     pub dry_run: bool,
+    pub diff: bool,
     pub host_key_policy: HostKeyPolicy,
     pub inventory_template_data: Arc<TemplateData>,
     pub plan_base_dir: Arc<PathBuf>,
@@ -48,6 +49,7 @@ impl Engine {
             let reg = registry.clone();
             let key = self.key.clone();
             let dry_run = self.dry_run;
+            let diff = self.diff;
             let host_key_policy = self.host_key_policy;
             let tx = sink.clone();
             let inv = inv_data.clone();
@@ -64,6 +66,7 @@ impl Engine {
                     registry: reg,
                     key,
                     dry_run,
+                    diff,
                     host_key_policy,
                     event_tx: tx,
                     inventory_template_data: inv,
@@ -93,6 +96,7 @@ impl Engine {
             succeeded: results.iter().filter(|r| r.success).count(),
             failed: results.iter().filter(|r| !r.success).count(),
             total_changed: results.iter().map(|r| r.total_changed).sum(),
+            dry_run: self.dry_run,
         };
 
         let _ = event_tx.send(ExecutorEvent::RunComplete {
@@ -121,6 +125,7 @@ pub async fn run(
     key: PrivateKeyWithHashAlg,
     concurrency: usize,
     dry_run: bool,
+    diff: bool,
     host_key_policy: HostKeyPolicy,
     secrets: Arc<Secrets>,
     event_tx: mpsc::UnboundedSender<ExecutorEvent>,
@@ -141,6 +146,7 @@ pub async fn run(
                 key: k,
                 concurrency,
                 dry_run,
+                diff,
                 host_key_policy,
                 inventory_template_data: gp.inventory_template_data,
                 plan_base_dir: gp.plan_base_dir,
@@ -197,6 +203,7 @@ pub async fn run(
         succeeded: total_succeeded,
         failed: total_failed,
         total_changed,
+        dry_run,
     };
 
     let _ = event_tx.send(ExecutorEvent::RunComplete {

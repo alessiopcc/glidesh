@@ -89,7 +89,8 @@ glidesh run [OPTIONS]
 | `--command <CMD>` | `-c` | Ad-hoc command to run | — |
 | `--mode <MODE>` | `-m` | Execution mode: `sync` or `async` | `sync` |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
-| `--dry-run` | — | Check only, no changes applied | `false` |
+| `--dry-run` | — | Report what would change without applying it | `false` |
+| `--diff` | — | Show the detail behind each pending change, where the module can describe it | `false` |
 | `--no-tui` | `-T` | Disable TUI, use plain text output | `false` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
@@ -97,6 +98,44 @@ glidesh run [OPTIONS]
 | `--ask-secret-pass` | — | Prompt for the secrets passphrase (else `GLIDESH_SECRET_PASS`) | `false` |
 | `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
 | `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key`, else `~/.ssh/id_ed25519` |
+
+### Previewing a run
+
+`--dry-run` reports what *would* change without applying anything. Each task is labelled
+`would change` or `ok`, and a task whose check found work outstanding is preceded by the
+reason it gave — `Recreate container lmcache (configuration changed)`, `Upload app.conf ->
+/etc/app.conf`. The closing summary counts what would change, not what did.
+
+```bash
+glidesh run -i inventory.kdl -p plan.kdl --dry-run
+```
+
+Add `--diff` for the detail behind each pending change, where the module can describe it.
+It works on a real run too — the detail behind a change is as useful once the change is
+made — and may cost extra round trips.
+
+In [ad-hoc mode](#ad-hoc-mode) there is no desired state to compare against, only a
+command, so `--dry-run` prints the command it would have run and connects to nothing.
+
+:::caution
+A preview is read-only with respect to *desired state*, but it is not a no-op on the
+target: computing it runs the read-only probes a plan asks for. That includes `shell`
+`check=` guards, container readiness gates, and container-runtime detection. Nothing is
+installed, written, or restarted, but those commands do execute.
+:::
+
+Three details worth knowing:
+
+- `register` captures an empty value in a dry run, because the task's own command never
+  ran. A later `loop="${var}"` over a registered variable therefore iterates zero times,
+  and a step that depends on a registered value cannot be meaningfully previewed.
+- A `shell` task with no `check=` guard has no state to compare against, so it always
+  reports `would change`. Give it a guard and it reports `ok` whenever the guard
+  succeeds.
+- A step using [`subscribe`](/advanced/subscribe/) whose target changed is reported as
+  `would change` whatever its own check says, and shows no reason line, because the reason
+  it runs is the step it subscribes to rather than its own state. A real run would run it,
+  so the preview counts it.
 
 ### SSH Key Resolution
 

@@ -76,5 +76,6 @@ plan "stack" {
 - Referenced steps must appear **before** the subscribing step in the plan. Forward references are rejected at parse time.
 - Step names must match exactly (case-sensitive).
 - A force-applied step always propagates as changed to its own subscribers, enabling reliable chaining.
+- Under `--dry-run` a force-applied step is reported as `would change` even when its own module reports `Satisfied`, and it counts toward the summary — the real run would have run it, so a preview that omitted it would report fewer changes than the run it previews.
 - When combined with `loop`, the subscribe fires on every iteration if the referenced step changed.
 - Subscribe works with all modules. It is most useful with `systemd state="restarted"` and `container` steps, but any module can be a subscriber or a dependency.

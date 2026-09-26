@@ -89,6 +89,19 @@ Return one of three statuses:
 {"status":"unknown","reason":"cannot determine nginx state"}
 ```
 
+A `pending` response may carry an optional `diff` describing the change in detail. Return
+it only when the request carried `"diff": true`, since that is the user asking for it and
+paying for whatever extra probes it costs; glidesh discards a diff it did not ask for. The
+field can be omitted entirely — plugins written before it existed keep working unchanged.
+
+The request omits `diff` when the flag is absent, exactly as it omits `nix_installed` on a
+host without Nix, so the bytes a v1 plugin receives on an ordinary run are unchanged. Read
+a missing `diff` as false.
+
+```json
+{"status":"pending","plan":"will update /etc/motd","diff":"-old line\n+new line"}
+```
+
 ### Apply Response
 
 ```json
@@ -566,7 +579,9 @@ Landlock filesystem restriction is **only available on Linux 5.13+**. On macOS a
 ## Tips
 
 - Use `dry_run` in the check/apply request to avoid side effects during `--dry-run` runs
+- `register` captures nothing from a task during a dry run, so do not expect a plugin's preview output to be readable by a later step
 - The `os_info` field tells you the target OS, package manager, and init system — use it to adapt behavior
 - Template variables from the plan are available in `vars` — the plugin receives them already interpolated, minus any value carrying a secret (pass those explicitly as arguments)
 - Keep plugins stateless between check and apply — glidesh may call them in any order
-- Return descriptive `plan` messages in `Pending` responses — they appear in dry-run output
+- Return descriptive `plan` messages in `Pending` responses — they lead the dry-run output for the task, and a run normally counts a task as "would change" when `check` returns `pending`. The exception is a step using `subscribe`: its target having changed force-applies the step, so it counts as "would change" even on a `satisfied` response
+- `apply` is still called during a `--dry-run` run, with `dry_run: true` in the request. Honor it: report what you would do and change nothing

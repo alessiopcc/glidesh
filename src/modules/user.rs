@@ -32,17 +32,15 @@ impl Module for UserModule {
                 if changes.is_empty() {
                     Ok(ModuleStatus::Satisfied)
                 } else {
-                    Ok(ModuleStatus::Pending {
-                        plan: format!("Modify user {}: {}", username, changes.join(", ")),
-                    })
+                    Ok(ModuleStatus::pending(format!(
+                        "Modify user {}: {}",
+                        username,
+                        changes.join(", ")
+                    )))
                 }
             }
-            ("present", false) => Ok(ModuleStatus::Pending {
-                plan: format!("Create user {}", username),
-            }),
-            ("absent", true) => Ok(ModuleStatus::Pending {
-                plan: format!("Delete user {}", username),
-            }),
+            ("present", false) => Ok(ModuleStatus::pending(format!("Create user {}", username))),
+            ("absent", true) => Ok(ModuleStatus::pending(format!("Delete user {}", username))),
             ("absent", false) => Ok(ModuleStatus::Satisfied),
             _ => Ok(ModuleStatus::Unknown {
                 reason: format!("Unknown state: {}", desired_state),

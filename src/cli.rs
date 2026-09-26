@@ -269,9 +269,16 @@ pub struct RunArgs {
     #[arg(long, default_value = "10", value_parser = parse_concurrency)]
     pub concurrency: usize,
 
-    /// Dry run (check only, no changes)
+    /// Report what would change without applying it. Note that read-only probes still
+    /// run on the target: `shell check=` guards, container readiness gates, and runtime
+    /// detection all execute, since that is how the preview is computed.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Show the detail behind each pending change, where the module can describe it.
+    /// Works with or without --dry-run; may cost extra round trips.
+    #[arg(long)]
+    pub diff: bool,
 
     /// Disable TUI and use plain text output
     #[arg(short = 'T', long)]
