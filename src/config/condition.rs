@@ -91,10 +91,19 @@ impl Condition {
         };
         let tokens = tokenize(source).map_err(fail)?;
         let any = Parser { tokens, pos: 0 }.parse().map_err(fail)?;
-        Ok(Self {
+        let cond = Self {
             source: source.to_string(),
             any,
-        })
+        };
+        // `@inventory.*` exists only while rendering a `file` template, so a condition could
+        // never read it — and `defined` would silently answer false rather than fail.
+        if let Some(var) = cond.variables().find(|v| v.starts_with("@inventory.")) {
+            return Err(fail(format!(
+                "${{{var}}} is only available in file templates, not in conditions or \
+                 module arguments"
+            )));
+        }
+        Ok(cond)
     }
 
     /// The expression as written in the plan. Used as the reason a step or task was skipped,
@@ -554,6 +563,30 @@ mod tests {
                 "{src}"
             );
         }
+    }
+
+    #[test]
+    fn inventory_references_are_rejected_because_they_are_template_only() {
+        for src in [
+            "${@inventory.db.address} == 10.0.0.2",
+            "defined ${@inventory.db.vars.port}",
+        ] {
+            let err = parse_err(src);
+            assert!(
+                err.contains("only available in file templates"),
+                "{src}: {err}"
+            );
+        }
+    }
+
+    /// `@group.<name>` is a structured collection, not a template-only value: a step may loop
+    /// over it, so a condition may test that it exists.
+    #[test]
+    fn a_group_collection_can_be_tested_for_presence() {
+        assert_eq!(
+            eval_in("defined ${@group.web}", &[], &["@group.web"], &[]),
+            Ok(Outcome::True)
+        );
     }
 
     /// A step guarding a `loop` over a structured variable must see that it exists.
