@@ -610,19 +610,44 @@ fn event_lines(
                 error
             )],
         ),
+        ExecutorEvent::StepSkipped { host, reason, .. } => (
+            OutStream::Out,
+            vec![format!(
+                "[{}]   skipped ({})",
+                display_id(host, display_ids),
+                reason
+            )],
+        ),
+        ExecutorEvent::TaskSkipped {
+            host,
+            module,
+            resource,
+            reason,
+        } => (
+            OutStream::Out,
+            vec![format!(
+                "[{}]   {} '{}': skipped ({})",
+                display_id(host, display_ids),
+                module,
+                resource,
+                reason
+            )],
+        ),
         ExecutorEvent::NodeComplete {
             host,
             success,
             changed,
+            skipped,
             dry_run,
         } => (
             OutStream::Out,
             vec![format!(
-                "[{}] {} ({} {})",
+                "[{}] {} ({} {}{})",
                 display_id(host, display_ids),
                 if *success { "OK" } else { "FAILED" },
                 changed,
-                if *dry_run { "would change" } else { "changed" }
+                if *dry_run { "would change" } else { "changed" },
+                executor::skipped_suffix(*skipped)
             )],
         ),
         ExecutorEvent::RunComplete { summary } => (
@@ -634,7 +659,7 @@ fn event_lines(
                     "\n--- Run Complete ---".to_string()
                 },
                 format!(
-                    "Hosts: {} total, {} ok, {} failed, {} {}",
+                    "Hosts: {} total, {} ok, {} failed, {} {}{}",
                     summary.total_hosts,
                     summary.succeeded,
                     summary.failed,
@@ -643,7 +668,8 @@ fn event_lines(
                         "would change"
                     } else {
                         "changed"
-                    }
+                    },
+                    executor::skipped_suffix(summary.total_skipped)
                 ),
             ],
         ),
@@ -1389,6 +1415,7 @@ mod tests {
                 succeeded: 2,
                 failed: 0,
                 total_changed: 3,
+                total_skipped: 0,
                 dry_run,
             },
         };
@@ -1410,6 +1437,7 @@ mod tests {
             host: "web-1".to_string(),
             success: true,
             changed: 1,
+            skipped: 0,
             dry_run,
         };
 
@@ -1422,6 +1450,68 @@ mod tests {
 
         let (_, lines) = event_lines(&event(false), &no_display_ids());
         assert!(lines[0].ends_with("OK (1 changed)"), "got: {:?}", lines[0]);
+    }
+
+    #[test]
+    fn a_skipped_task_names_itself_and_its_condition() {
+        let (stream, lines) = event_lines(
+            &ExecutorEvent::TaskSkipped {
+                host: "web-1".to_string(),
+                module: "package".to_string(),
+                resource: "nginx".to_string(),
+                reason: "when: ${@os.family} == redhat".to_string(),
+            },
+            &no_display_ids(),
+        );
+        assert_eq!(stream, OutStream::Out);
+        assert_eq!(
+            lines,
+            ["[web-1]   package 'nginx': skipped (when: ${@os.family} == redhat)"]
+        );
+    }
+
+    #[test]
+    fn a_skipped_step_gives_its_reason() {
+        let (_, lines) = event_lines(
+            &ExecutorEvent::StepSkipped {
+                host: "web-1".to_string(),
+                step: "Install".to_string(),
+                tasks: 2,
+                reason: "when: ${x}".to_string(),
+            },
+            &no_display_ids(),
+        );
+        assert_eq!(lines, ["[web-1]   skipped (when: ${x})"]);
+    }
+
+    #[test]
+    fn skips_are_counted_in_both_summaries() {
+        let (_, lines) = event_lines(
+            &ExecutorEvent::NodeComplete {
+                host: "web-1".to_string(),
+                success: true,
+                changed: 1,
+                skipped: 2,
+                dry_run: false,
+            },
+            &no_display_ids(),
+        );
+        assert!(lines[0].ends_with("OK (1 changed, 2 skipped)"), "{lines:?}");
+
+        let (_, lines) = event_lines(
+            &ExecutorEvent::RunComplete {
+                summary: executor::result::RunSummary {
+                    total_hosts: 1,
+                    succeeded: 1,
+                    failed: 0,
+                    total_changed: 1,
+                    total_skipped: 2,
+                    dry_run: true,
+                },
+            },
+            &no_display_ids(),
+        );
+        assert!(lines[1].ends_with("1 would change, 2 skipped"), "{lines:?}");
     }
 
     #[test]

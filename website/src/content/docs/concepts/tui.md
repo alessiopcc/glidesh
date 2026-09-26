@@ -96,11 +96,15 @@ Output is printed line by line with `[group:host]` prefixes:
 [web:web-1]   file '/opt/app/bin': changed
 [web:web-1] Step 2/3: Restart service
 [web:web-1]   systemd 'myapp': changed
-[web:web-1] OK (2 changed)
+[web:web-1] Step 3/3: Enable monitoring
+[web:web-1]   skipped (when: ${enable-monitoring})
+[web:web-1] OK (2 changed, 1 skipped)
 
 --- Run Complete ---
-Hosts: 2 total, 2 ok, 0 failed, 4 changed
+Hosts: 2 total, 2 ok, 0 failed, 4 changed, 2 skipped
 ```
+
+A step or task whose [`when=`](/advanced/conditionals/) does not hold is reported as `skipped`, with its condition. The skipped count appears only when something was skipped.
 
 ### Automatic detection
 

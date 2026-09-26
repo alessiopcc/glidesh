@@ -498,7 +498,7 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
         Some(s) if s.dry_run => "WOULD CHANGE",
         _ => "CHANGED",
     };
-    let table_header = Row::new(vec!["", "NODE", "STATUS", counted, "ERROR"])
+    let table_header = Row::new(vec!["", "NODE", "STATUS", counted, "SKIPPED", "ERROR"])
         .style(
             Style::default()
                 .fg(Color::DarkGray)
@@ -521,14 +521,20 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
                 .as_ref()
                 .and_then(|s| s.nodes.get(name));
 
-            let (status, changed, error) = if let Some(ns) = node_summary {
+            let (status, changed, skipped, error) = if let Some(ns) = node_summary {
                 (
                     ns.status.clone(),
                     ns.changed.to_string(),
+                    ns.skipped.to_string(),
                     ns.error.clone().unwrap_or_default(),
                 )
             } else {
-                ("?".to_string(), "?".to_string(), String::new())
+                (
+                    "?".to_string(),
+                    "?".to_string(),
+                    "?".to_string(),
+                    String::new(),
+                )
             };
 
             let icon = match status.as_str() {
@@ -545,8 +551,15 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
             let is_selected = i == state.selected_node;
 
             if is_selected {
-                Row::new(vec![icon.to_string(), name.clone(), status, changed, error])
-                    .style(Style::default().add_modifier(Modifier::REVERSED))
+                Row::new(vec![
+                    icon.to_string(),
+                    name.clone(),
+                    status,
+                    changed,
+                    skipped,
+                    error,
+                ])
+                .style(Style::default().add_modifier(Modifier::REVERSED))
             } else {
                 let status_color = match status.as_str() {
                     "ok" => Color::Green,
@@ -567,6 +580,7 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
                         Style::default().fg(status_color),
                     )),
                     Line::from(Span::styled(changed, Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(skipped, Style::default().fg(Color::DarkGray))),
                     Line::from(Span::styled(error, Style::default().fg(Color::Red))),
                 ])
             }
@@ -579,8 +593,9 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
             Constraint::Length(2),
             Constraint::Percentage(25),
             Constraint::Percentage(15),
+            Constraint::Percentage(12),
             Constraint::Percentage(10),
-            Constraint::Percentage(45),
+            Constraint::Percentage(33),
         ],
     )
     .header(table_header)
@@ -615,14 +630,17 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
 
 fn log_line_style(line: &str) -> Style {
     let trimmed = line.trim();
-    if trimmed.contains("FAILED") {
+    if trimmed.contains("[SKIPPED]") {
+        // First: a skip quotes its condition, which may mention FAILED or changed.
+        Style::default().fg(Color::DarkGray)
+    } else if trimmed.contains("FAILED") {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     } else if trimmed.contains("[STEP]") || (trimmed.starts_with("──") && trimmed.ends_with("──"))
     {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
-    } else if trimmed.contains("changed") {
+    } else if trimmed.contains("changed") || trimmed.contains("would change") {
         Style::default().fg(Color::Yellow)
     } else if trimmed.contains("[RESULT]")
         || trimmed.contains("[COMPLETE]")
@@ -817,5 +835,33 @@ mod tests {
         let state = LogsExplorerState::new(Vec::new());
         // Can't drill into empty list
         assert_eq!(state.view, LogsView::RunList);
+    }
+
+    fn fg(line: &str) -> Option<Color> {
+        log_line_style(line).fg
+    }
+
+    #[test]
+    fn a_skip_is_dimmed_whatever_its_condition_mentions() {
+        for line in [
+            "[SKIPPED] [step: Install] when: ${x}",
+            "[SKIPPED] [step: Retry] when: ${status} == FAILED",
+            "[SKIPPED] [module: shell] [resource: x] when: ${config-changed}",
+        ] {
+            assert_eq!(fg(line), Some(Color::DarkGray), "{line}");
+        }
+    }
+
+    /// A previewed change must not read as a satisfied (green) result.
+    #[test]
+    fn a_previewed_change_is_highlighted_like_a_real_one() {
+        let preview = "[RESULT] [module: file] [resource: /etc/x] would change (exit 0)";
+        let applied = "[RESULT] [module: file] [resource: /etc/x] changed (exit 0)";
+        assert_eq!(fg(preview), Some(Color::Yellow));
+        assert_eq!(fg(applied), Some(Color::Yellow));
+        assert_eq!(
+            fg("[RESULT] [module: file] [resource: /etc/x] ok (exit 0)"),
+            Some(Color::Green)
+        );
     }
 }

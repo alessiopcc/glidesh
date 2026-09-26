@@ -26,7 +26,7 @@ plan "web-server" {
 }
 ```
 
-If "Deploy nginx config" uploads a new file, "Restart nginx" runs `systemctl restart nginx`. If the config is unchanged, the restart is skipped entirely.
+If "Deploy nginx config" uploads a new file, "Restart nginx" runs `systemctl restart nginx`. If the config is unchanged, the restart does not run.
 
 ## Multiple Subscriptions
 
@@ -78,4 +78,5 @@ plan "stack" {
 - A force-applied step always propagates as changed to its own subscribers, enabling reliable chaining.
 - Under `--dry-run` a force-applied step is reported as `would change` even when its own module reports `Satisfied`, and it counts toward the summary — the real run would have run it, so a preview that omitted it would report fewer changes than the run it previews.
 - When combined with `loop`, the subscribe fires on every iteration if the referenced step changed.
+- A step [skipped by `when`](/advanced/conditionals/) made no change, so it never fires its subscribers. A subscribing step's own `when` is still checked first: if it does not hold, the step is skipped even though what it subscribes to changed.
 - Subscribe works with all modules. It is most useful with `systemd state="restarted"` and `container` steps, but any module can be a subscriber or a dependency.

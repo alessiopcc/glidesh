@@ -20,7 +20,7 @@ Each run creates a directory named `<timestamp>_<plan-name>`:
 │   └── db-1.log
 ```
 
-- **summary.json** — run metadata: plan name, run ID, timestamps, per-node status and change count
+- **summary.json** — run metadata: plan name, run ID, timestamps, per-node status, change count and, when anything was [skipped](/advanced/conditionals/), skipped count
 - **\<node\>.log** — timestamped log lines for each host
 
 ## Interactive Logs Explorer
@@ -47,7 +47,7 @@ The title bar shows the selection count when runs are selected. Pressing `d` wit
 
 ### Run Detail
 
-Shows the run header (plan, run ID, timestamps) and a table of nodes with status, changed count, and error messages.
+Shows the run header (plan, run ID, timestamps) and a table of nodes with status, changed count, skipped count, and error messages.
 
 | Key | Action |
 |-----|--------|
@@ -62,9 +62,11 @@ Displays the full log file with syntax highlighting:
 
 - **Red bold** — failed steps
 - **Cyan bold** — step headers
-- **Yellow** — changed resources
+- **Yellow** — changed resources, and resources a dry run would change
 - **Green** — successful results
-- **Gray** — check operations
+- **Gray** — check operations and skipped steps or tasks
+
+A step or task skipped by [`when=`](/advanced/conditionals/) is logged as `[SKIPPED]` with the condition that caused it. The node's closing `[COMPLETE]` line adds `skipped=N` when anything was skipped.
 
 Each command result records its captured `stdout` and `stderr` (indented and prefixed with `stdout |` / `stderr |`) along with the exit code, so a failure's output is preserved in the log instead of being discarded. Each stream is capped at 8 KiB per result; longer output is truncated with a `… [truncated]` marker. Orchestration failures that never reach a module — an unknown module name, an unresolved `${…}` reference, or an undefined loop variable — are logged as failed steps rather than vanishing silently.
 

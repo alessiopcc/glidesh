@@ -96,6 +96,7 @@ impl Engine {
             succeeded: results.iter().filter(|r| r.success).count(),
             failed: results.iter().filter(|r| !r.success).count(),
             total_changed: results.iter().map(|r| r.total_changed).sum(),
+            total_skipped: results.iter().map(|r| r.total_skipped).sum(),
             dry_run: self.dry_run,
         };
 
@@ -179,6 +180,7 @@ pub async fn run(
     let mut total_succeeded = 0;
     let mut total_failed = 0;
     let mut total_changed = 0;
+    let mut total_skipped = 0;
 
     for handle in group_handles {
         match handle.await {
@@ -187,6 +189,7 @@ pub async fn run(
                 total_succeeded += summary.succeeded;
                 total_failed += summary.failed;
                 total_changed += summary.total_changed;
+                total_skipped += summary.total_skipped;
             }
             Ok(Err(e)) => {
                 tracing::error!("Group execution failed: {}", e);
@@ -203,6 +206,7 @@ pub async fn run(
         succeeded: total_succeeded,
         failed: total_failed,
         total_changed,
+        total_skipped,
         dry_run,
     };
 

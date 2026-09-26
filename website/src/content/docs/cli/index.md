@@ -124,11 +124,15 @@ target: computing it runs the read-only probes a plan asks for. That includes `s
 installed, written, or restarted, but those commands do execute.
 :::
 
-Three details worth knowing:
+Four details worth knowing:
 
 - `register` captures an empty value in a dry run, because the task's own command never
   ran. A later `loop="${var}"` over a registered variable therefore iterates zero times,
   and a step that depends on a registered value cannot be meaningfully previewed.
+- A [`when=`](/advanced/conditionals/) that reads a registered value cannot be answered for
+  the same reason, so the task is reported as `skipped (undetermined in preview: …)` rather
+  than decided against an empty string. Every other condition is evaluated exactly as the
+  real run would evaluate it.
 - A `shell` task with no `check=` guard has no state to compare against, so it always
   reports `would change`. Give it a guard and it reports `ok` whenever the guard
   succeeds.

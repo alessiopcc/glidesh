@@ -7,7 +7,7 @@ glidesh has two loop mechanisms: **step loops** that repeat an entire step, and 
 
 ## Register
 
-Use `register="var_name"` on any step to capture the module's output into a variable for later use:
+Use `register="var_name"` on any task to capture the module's output into a variable for later use:
 
 ```kdl
 step "Get disk list" {
@@ -19,7 +19,14 @@ step "Show disks" {
 }
 ```
 
-The output is trimmed of leading/trailing whitespace before being stored.
+What the variable holds depends on what happened to the task:
+
+- **It ran** — its output, trimmed of leading and trailing whitespace.
+- **Its check found nothing to do** — an empty string.
+- **It was [skipped by `when`](/advanced/conditionals/#what-a-skip-does)** — nothing: the
+  variable is left **undefined**, and any value it held before is removed. A later reference
+  fails the task rather than expanding to an empty string; test for it with
+  `when="defined ${var}"`.
 
 :::caution[`register` is empty under `--dry-run`]
 A preview never runs the task's own command — that is the change it is declining to make —
@@ -27,6 +34,10 @@ so there is no output to capture and the variable is set to an empty string. A s
 consumes a registered value therefore cannot be meaningfully previewed: a `loop="${var}"`
 over one iterates zero times, and a `${var}` interpolated into a command shows up blank.
 Run for real to see those steps.
+
+A [`when=`](/advanced/conditionals/#under---dry-run) that reads a registered value is the
+exception: rather than evaluate it against the empty string, the preview skips the task and
+reports it as undetermined.
 
 This is narrower than "a preview runs nothing": computing a preview does execute the
 read-only probes a plan asks for, such as a `shell` `check=` guard. Those inform the
@@ -94,6 +105,33 @@ plan "provision-vms" {
 Each `${@item.<field>}` resolves to the value of that field for the current row. Reference any field defined on the collection's `-` nodes (`${@item.name}`, `${@item.port}`, …). This is the per-step counterpart to [template loops](#template-loops), which expand the same structured data **inside a file**.
 
 > A loop source that is a plain newline-separated string binds `${@item}`; one that names a structured collection binds `${@item.<field>}`. If the named variable is neither, the step fails with `Loop variable '<name>' is not defined`.
+
+### Filtering and guarding loops
+
+[`when=`](/advanced/conditionals/) works with loops at two levels.
+
+On a **task**, it is checked on every iteration, after `${@item}` is bound — use it to leave
+items out:
+
+```kdl
+step "Format each disk" loop="${disks}" {
+    disk "/dev/${@item}" fs="ext4" when="${@item} != sda"
+}
+```
+
+On the **step**, it is checked once, before the loop is resolved — use it to skip the whole
+loop, including when its variable may not exist. Without the guard, a missing `extra-disks`
+fails the step with `Loop variable 'extra-disks' is not defined`:
+
+```kdl
+step "Format extra disks" loop="${extra-disks}" when="defined ${extra-disks}" {
+    disk "/dev/${@item}" fs="ext4"
+}
+```
+
+This works for a [structured variable](#looping-over-structured-variables) as well: `defined ${vms}` holds when the `vms` collection exists.
+
+A step's condition cannot refer to `${@item}`, since no item exists yet when it is checked.
 
 ## Template Loops
 

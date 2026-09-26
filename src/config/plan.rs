@@ -1,3 +1,4 @@
+use crate::config::condition::Condition;
 use crate::config::types::{
     ExecutionMode, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step, TaskDef,
 };
@@ -383,6 +384,21 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         })
         .unwrap_or_default();
 
+    reject_unknown_step_attrs(node, &name)?;
+
+    let when = parse_when(node)?;
+    if let Some(cond) = &when {
+        if let Some(var) = cond.variables().find(|v| is_item_var(v)) {
+            return Err(GlideshError::ConfigParse {
+                message: format!(
+                    "step '{name}': when= cannot use ${{{var}}}: a step's condition is \
+                     checked once, before its loop runs. Put when= on the task instead to \
+                     test each item"
+                ),
+            });
+        }
+    }
+
     let mut tasks = Vec::new();
 
     if let Some(children) = node.children() {
@@ -399,7 +415,49 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         loop_source,
         subscribe,
         run_as,
+        when,
     })
+}
+
+const STEP_ATTRS: &[&str] = &["loop", "subscribe", "when", "run-as", "run-as-method"];
+
+/// A misspelled step attribute used to be ignored, which for `when=` means a guard that
+/// silently never applies — the step runs unconditionally.
+fn reject_unknown_step_attrs(node: &kdl::KdlNode, step: &str) -> Result<(), GlideshError> {
+    for entry in node.entries() {
+        if let Some(key) = entry.name().map(|n| n.value()) {
+            if !STEP_ATTRS.contains(&key) {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "step '{step}': unknown attribute '{key}' (expected one of: {})",
+                        STEP_ATTRS.join(", ")
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_when(node: &kdl::KdlNode) -> Result<Option<Condition>, GlideshError> {
+    let Some(entry) = node
+        .entries()
+        .iter()
+        .find(|e| e.name().map(|n| n.value()) == Some("when"))
+    else {
+        return Ok(None);
+    };
+    let source = entry
+        .value()
+        .as_string()
+        .ok_or_else(|| GlideshError::ConfigParse {
+            message: "when= must be a string, e.g. when=\"${@os.family} == debian\"".into(),
+        })?;
+    Condition::parse(source).map(Some)
+}
+
+fn is_item_var(name: &str) -> bool {
+    name == "@item" || name.starts_with("@item.")
 }
 
 fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
@@ -436,8 +494,8 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
                 if let Some(ref name) = register {
                     super::validate_user_var_name(name)?;
                 }
-            } else if key == "run-as" || key == "run-as-method" {
-                // Captured separately as the task's escalation, not a module arg.
+            } else if key == "run-as" || key == "run-as-method" || key == "when" {
+                // Captured separately, not a module arg.
             } else {
                 let value = kdl_value_to_param(entry.value());
                 args.insert(key, value);
@@ -448,6 +506,17 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
     if let Some(children) = node.children() {
         for child in children.nodes() {
             let key = child.name().to_string();
+
+            // A child node would otherwise become a module argument, leaving the task
+            // unguarded — so it must fail rather than run.
+            if key == "when" {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "{module} '{resource}': write the condition as an attribute, \
+                         when=\"...\", not as a child node"
+                    ),
+                });
+            }
 
             if child.children().is_some()
                 && child
@@ -497,6 +566,7 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
     }
 
     let run_as = super::parse_run_as_attrs(node)?;
+    let when = parse_when(node)?;
 
     Ok(TaskDef {
         module,
@@ -504,6 +574,7 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
         args,
         register,
         run_as,
+        when,
     })
 }
 
@@ -1359,6 +1430,107 @@ plan "test" {
         let input = "plan \"p\" {\n    vars {\n        os \"custom\"\n    }\n    step \"s\" { shell \"echo\" }\n}";
         let plan = parse_plan(input).unwrap();
         assert_eq!(plan.vars.get("os").map(String::as_str), Some("custom"));
+    }
+
+    fn one_step(body: &str) -> Step {
+        let plan = parse_plan(&format!("plan \"p\" {{\n{body}\n}}")).unwrap();
+        plan.steps().into_iter().next().unwrap().clone()
+    }
+
+    fn plan_err(body: &str) -> String {
+        parse_plan(&format!("plan \"p\" {{\n{body}\n}}"))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn when_is_parsed_on_steps_and_tasks() {
+        let step = one_step(
+            r#"step "s" when="${@os.family} == debian" {
+                shell "echo" when="defined ${x}"
+            }"#,
+        );
+        assert_eq!(
+            step.when.as_ref().map(|c| c.source()),
+            Some("${@os.family} == debian")
+        );
+        assert_eq!(
+            step.tasks[0].when.as_ref().map(|c| c.source()),
+            Some("defined ${x}")
+        );
+    }
+
+    #[test]
+    fn when_is_not_passed_to_the_module() {
+        let step = one_step(r#"step "s" { shell "echo" when="${x}" }"#);
+        assert!(!step.tasks[0].args.contains_key("when"));
+    }
+
+    #[test]
+    fn a_step_without_when_has_no_condition() {
+        let step = one_step(r#"step "s" { shell "echo" }"#);
+        assert!(step.when.is_none() && step.tasks[0].when.is_none());
+    }
+
+    #[test]
+    fn a_malformed_when_fails_to_parse() {
+        let err = plan_err(r#"step "s" when="${a} = b" { shell "echo" }"#);
+        assert!(err.contains("invalid when="), "{err}");
+        let err = plan_err(r#"step "s" { shell "echo" when="${a} >" }"#);
+        assert!(err.contains("invalid when="), "{err}");
+    }
+
+    #[test]
+    fn when_must_be_a_string() {
+        let err = plan_err(r#"step "s" when=#true { shell "echo" }"#);
+        assert!(err.contains("must be a string"), "{err}");
+    }
+
+    /// A step's condition runs before its loop, when `@item` does not exist yet.
+    #[test]
+    fn a_step_condition_cannot_read_the_loop_item() {
+        for cond in ["${@item} == a", "${@item.name} == a"] {
+            let err = plan_err(&format!(
+                r#"step "s" loop="${{xs}}" when="{cond}" {{ shell "echo" }}"#
+            ));
+            assert!(err.contains("Put when= on the task"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_task_condition_may_read_the_loop_item() {
+        let step = one_step(r#"step "s" loop="${xs}" { shell "echo" when="${@item} != a" }"#);
+        assert!(step.tasks[0].when.is_some());
+    }
+
+    /// A misspelled `when` must not leave a step running unguarded.
+    #[test]
+    fn an_unknown_step_attribute_is_rejected() {
+        let err = plan_err(r#"step "s" wehn="${x}" { shell "echo" }"#);
+        assert!(err.contains("unknown attribute 'wehn'"), "{err}");
+    }
+
+    #[test]
+    fn every_documented_step_attribute_is_accepted() {
+        one_step(
+            r#"step "a" { shell "echo" }
+            step "s" loop="${xs}" subscribe="a" when="${x}" run-as="root" run-as-method="sudo" {
+                shell "echo"
+            }"#,
+        );
+    }
+
+    #[test]
+    fn when_as_a_child_node_is_rejected() {
+        let err = plan_err(
+            r#"step "s" {
+                file "/etc/x" {
+                    src "x"
+                    when "${x}"
+                }
+            }"#,
+        );
+        assert!(err.contains("as an attribute"), "{err}");
     }
 
     #[test]

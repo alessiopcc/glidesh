@@ -115,7 +115,9 @@ step "Fetch backup" {
 ## Built-in OS Facts
 
 glidesh detects each host's operating system when it connects, and exposes what it found
-under `@os`. Detection happens on every run anyway, so these cost nothing extra.
+under `@os`. Detection happens on every run anyway, so these cost nothing extra. Branch on
+them with [`when=`](/advanced/conditionals/) — for example
+`when="${@os.family} == debian"`.
 
 | Variable | Description | Values |
 |---|---|---|
@@ -211,7 +213,7 @@ plan "setup" {
 }
 ```
 
-Structured variables can be consumed two ways: in `${for}` loops inside template files (see [Template Loops](/advanced/loops-register/#template-loops)), and as the source of a step `loop=`, where each row binds `${@item.<field>}` (see [Looping over structured variables](/advanced/loops-register/#looping-over-structured-variables)).
+Structured variables can be consumed two ways: in `${for}` loops inside template files (see [Template Loops](/advanced/loops-register/#template-loops)), and as the source of a step `loop=`, where each row binds `${@item.<field>}` (see [Looping over structured variables](/advanced/loops-register/#looping-over-structured-variables)). A [`when=`](/advanced/conditionals/) can test whether one exists with `defined ${name}`, but has no single value to compare.
 
 ## Secret Variables
 

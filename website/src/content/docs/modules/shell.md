@@ -22,7 +22,7 @@ shell "curl -sf http://localhost:8080/health" {
 |-----------|------|-------------|
 | *(positional)* | string | The command to execute (alternative to `cmd`) |
 | `cmd` | string or list | Single command string, or list of commands joined with `&&` (alternative to positional) |
-| `check` | string | Gate command — if it exits 0 the step is skipped (already satisfied) |
+| `check` | string | Gate command — if it exits 0 the task is already satisfied and the command does not run |
 | `retries` | integer | Number of retry attempts on failure |
 | `delay` | integer | Seconds between retries |
 | `timeout` | integer | Abort the command after this many seconds and treat the attempt as failed (feeds `retries`). Default: no limit |
@@ -60,18 +60,20 @@ shell "incus exec -T web -- cloud-init status --wait" {
 }
 ```
 
-## Conditional execution with `check`
+## Idempotency with `check`
 
-By default the shell module always runs. The optional `check` parameter runs a gate command first to decide whether the step is needed:
+By default the shell module always runs. The optional `check` parameter runs a gate command first to decide whether the command is needed:
 
-- **Exit 0** — the step is already **satisfied** and is **skipped**
-- **Non-zero exit** — the step is **pending** and will **run**
+- **Exit 0** — the task is already **satisfied**: the command does not run and the task reports `ok`
+- **Non-zero exit** — the task is **pending** and the command **runs**
 
 ```kdl
 step "Install package" {
     shell "apt-get install -y nginx" check="dpkg -l nginx | grep -q ^ii"
 }
 ```
+
+`check` asks the host whether the work is already done. To decide whether a task applies to a host at all — by OS, inventory variable, or feature flag, without running anything — use [`when=`](/advanced/conditionals/); see [`when` or `check`?](/advanced/conditionals/#when-or-check).
 
 ## Using `cmd` instead of positional
 

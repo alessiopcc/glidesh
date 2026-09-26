@@ -126,6 +126,7 @@ impl RunLogger {
                     NodeSummary {
                         status: "connecting".to_string(),
                         changed: 0,
+                        skipped: 0,
                         steps_completed: 0,
                         failed_step: None,
                         error: None,
@@ -216,17 +217,55 @@ impl RunLogger {
                     summary.error = Some(error.clone());
                 }
             }
+            ExecutorEvent::StepSkipped {
+                host,
+                step,
+                tasks,
+                reason,
+            } => {
+                self.log_line(host, &format!("[SKIPPED] [step: {}] {}", step, reason));
+                if let Some(summary) = self.node_summaries.get_mut(host) {
+                    summary.skipped += tasks;
+                }
+            }
+            ExecutorEvent::TaskSkipped {
+                host,
+                module,
+                resource,
+                reason,
+            } => {
+                self.log_line(
+                    host,
+                    &format!(
+                        "[SKIPPED] [module: {}] [resource: {}] {}",
+                        module, resource, reason
+                    ),
+                );
+                if let Some(summary) = self.node_summaries.get_mut(host) {
+                    summary.skipped += 1;
+                }
+            }
             ExecutorEvent::NodeComplete {
                 host,
                 success,
                 changed,
+                skipped,
                 dry_run,
             } => {
                 let status = if *success { "ok" } else { "failed" };
                 let counted = if *dry_run { "would_change" } else { "changed" };
+                // Only when non-zero, so a plan without `when=` logs exactly as before.
+                let skipped = if *skipped > 0 {
+                    format!(" skipped={skipped}")
+                } else {
+                    String::new()
+                };
                 self.log_line(
                     host,
-                    &format!("[COMPLETE] status={} {}={}", status, counted, changed),
+                    &format!(
+                        "[COMPLETE] status={} {}={}{}",
+                        status, counted, changed, skipped
+                    ),
                 );
                 if let Some(summary) = self.node_summaries.get_mut(host) {
                     summary.status = status.to_string();
@@ -282,6 +321,7 @@ mod tests {
                 succeeded: 1,
                 failed: 0,
                 total_changed: 1,
+                total_skipped: 0,
                 dry_run,
             },
         }
@@ -358,6 +398,7 @@ mod tests {
                 host: "web-1".to_string(),
                 success: true,
                 changed: 1,
+                skipped: 0,
                 dry_run,
             });
 
@@ -365,5 +406,80 @@ mod tests {
             assert!(log.contains(expected), "expected {expected} in: {log}");
             assert!(!log.contains(absent), "unexpected {absent} in: {log}");
         }
+    }
+
+    #[test]
+    fn skips_are_logged_and_counted_per_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&ExecutorEvent::StepSkipped {
+            host: "web-1".to_string(),
+            step: "Install".to_string(),
+            tasks: 2,
+            reason: "when: ${x}".to_string(),
+        });
+        logger.handle_event(&ExecutorEvent::TaskSkipped {
+            host: "web-1".to_string(),
+            module: "shell".to_string(),
+            resource: "uptime".to_string(),
+            reason: "when: ${y}".to_string(),
+        });
+        logger.handle_event(&ExecutorEvent::NodeComplete {
+            host: "web-1".to_string(),
+            success: true,
+            changed: 0,
+            skipped: 3,
+            dry_run: false,
+        });
+        logger.handle_event(&summary(false));
+        logger.write_summary().unwrap();
+
+        let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
+        assert!(
+            log.contains("[SKIPPED] [step: Install] when: ${x}"),
+            "{log}"
+        );
+        assert!(
+            log.contains("[SKIPPED] [module: shell] [resource: uptime] when: ${y}"),
+            "{log}"
+        );
+        assert!(log.contains("changed=0 skipped=3"), "{log}");
+        let saved = storage::read_summary(logger.run_dir()).unwrap();
+        assert_eq!(saved.nodes["web-1"].skipped, 3);
+    }
+
+    /// Log parsers see no new key unless the plan actually skipped something.
+    #[test]
+    fn a_run_without_skips_logs_no_skipped_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&ExecutorEvent::NodeComplete {
+            host: "web-1".to_string(),
+            success: true,
+            changed: 1,
+            skipped: 0,
+            dry_run: false,
+        });
+        let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
+        assert!(!log.contains("skipped"), "{log}");
+    }
+
+    #[test]
+    fn a_summary_without_skips_has_no_skipped_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&module_result(false));
+        logger.handle_event(&summary(false));
+        logger.write_summary().unwrap();
+
+        let raw = std::fs::read_to_string(logger.run_dir().join("summary.json")).unwrap();
+        assert!(!raw.contains("skipped"), "{raw}");
+    }
+
+    #[test]
+    fn a_summary_written_before_when_existed_still_loads() {
+        let old = r#"{"status":"ok","changed":2,"steps_completed":0}"#;
+        let node: storage::NodeSummary = serde_json::from_str(old).unwrap();
+        assert_eq!(node.skipped, 0);
     }
 }

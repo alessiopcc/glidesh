@@ -46,6 +46,10 @@ step "Write the same token everywhere" {
 - **Local by default.** Without `on=`, the command runs via `sh -c` on the
   controller (or `cmd /C` on Windows). It has access to the controller's
   environment, not the target's.
+- **`when` is decided per host.** A host whose [`when=`](/advanced/conditionals/)
+  does not hold skips the task and receives no result — its `register`
+  variable stays undefined. The hosts that do run it still share one
+  execution.
 - **Per-host variables resolve for the first host only.** The command is
   interpolated by whichever host reaches the task first, and that one result is
   what everyone receives. A `${@host.*}` or `${@os.*}` reference in a `host`

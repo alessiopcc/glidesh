@@ -64,11 +64,15 @@ fn render_header(frame: &mut Frame, area: Rect, state: &TuiState) {
         .filter(|n| n.status == NodeStatus::Failed)
         .count();
 
-    let counted = if state.dry_run {
-        "would change"
-    } else {
-        "changed"
-    };
+    let counted = format!(
+        "{}{}",
+        if state.dry_run {
+            "would change"
+        } else {
+            "changed"
+        },
+        crate::executor::skipped_suffix(state.total_skipped)
+    );
 
     let label = if state.run_complete {
         if failed_count > 0 {
@@ -281,11 +285,15 @@ fn line_style(line: &str) -> Style {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
+    } else if is_skip_line(trimmed) {
+        // Ahead of the FAILED match: a skip reason quotes its condition, which may itself
+        // mention FAILED.
+        Style::default().fg(Color::DarkGray)
     } else if trimmed.contains("FAILED") {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     } else if trimmed.starts_with("CHECK ") {
         Style::default().fg(Color::DarkGray)
-    } else if trimmed.contains(": changed") {
+    } else if trimmed.contains(": changed") || trimmed.contains(": would change") {
         Style::default().fg(Color::Yellow)
     } else if trimmed.contains(": ok") || trimmed.starts_with("Connected") {
         Style::default().fg(Color::Green)
@@ -296,6 +304,12 @@ fn line_style(line: &str) -> Style {
     } else {
         Style::default().fg(Color::White)
     }
+}
+
+/// A skip line, in a node's own log (`SKIPPED ...`) or in the combined log, where it is
+/// prefixed with `[host] `.
+fn is_skip_line(trimmed: &str) -> bool {
+    trimmed.starts_with("SKIPPED ") || trimmed.contains("]   SKIPPED ")
 }
 
 fn render_log_panel(frame: &mut Frame, area: Rect, state: &mut TuiState) {
@@ -465,5 +479,39 @@ fn elapsed_str(d: Duration) -> String {
         format!("{}s", secs)
     } else {
         format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fg(line: &str) -> Option<Color> {
+        line_style(line).fg
+    }
+
+    #[test]
+    fn skip_lines_are_dimmed_in_both_logs() {
+        assert_eq!(fg("  SKIPPED step: when: ${x}"), Some(Color::DarkGray));
+        assert_eq!(
+            fg("[web-1]   SKIPPED shell 'uptime': when: ${x}"),
+            Some(Color::DarkGray)
+        );
+    }
+
+    /// A skip reason quotes its condition, which can mention FAILED; it is still a skip.
+    #[test]
+    fn a_skip_quoting_failed_is_not_a_failure() {
+        assert_eq!(
+            fg("  SKIPPED step: when: ${status} == FAILED"),
+            Some(Color::DarkGray)
+        );
+        assert_eq!(fg("  FAILED shell 'x': boom"), Some(Color::Red));
+    }
+
+    #[test]
+    fn a_preview_change_is_highlighted_like_a_real_one() {
+        assert_eq!(fg("  file '/etc/x': changed"), Some(Color::Yellow));
+        assert_eq!(fg("  file '/etc/x': would change"), Some(Color::Yellow));
     }
 }

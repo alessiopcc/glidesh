@@ -1,6 +1,7 @@
 use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
+use glidesh::config::condition::{Condition, Outcome, Scope};
 use glidesh::config::template::{TemplateData, interpolate_args};
 use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
 use glidesh::error::GlideshError;
@@ -11,7 +12,7 @@ use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -196,22 +197,124 @@ fn captured_output(dry_run: bool, output: &str) -> String {
     }
 }
 
+/// What one host's run has accumulated so far.
+#[derive(Default)]
+struct Progress {
+    changed: usize,
+    skipped: usize,
+    /// Variables a preview registered from a task that would have run. They are defined —
+    /// registering always defines — but hold "" where the real run would capture output, so
+    /// a `when=` that reads their value cannot be answered.
+    unknown: HashSet<String>,
+}
+
+impl Progress {
+    fn register(
+        &mut self,
+        vars: &mut HashMap<String, String>,
+        name: &str,
+        value: String,
+        real: bool,
+    ) {
+        vars.insert(name.to_string(), value);
+        if real {
+            self.unknown.remove(name);
+        } else {
+            self.unknown.insert(name.to_string());
+        }
+    }
+
+    /// Record what a skipped task's `register` leaves behind.
+    ///
+    /// A skip the real run would also make registers nothing: the variable is left undefined
+    /// rather than empty, so a later reference fails loudly instead of expanding to "" inside
+    /// a command. A skip a preview could not decide might not happen on the real run, which
+    /// could define the variable — so neither its value nor its presence is known, and a later
+    /// `defined` must not answer as if it were.
+    fn skip_register(&mut self, vars: &mut HashMap<String, String>, name: &str, decided: bool) {
+        vars.remove(name);
+        if decided {
+            self.unknown.remove(name);
+        } else {
+            self.unknown.insert(name.to_string());
+        }
+    }
+}
+
+/// Whether a `when=` lets a step or task run.
+#[derive(Debug, PartialEq)]
+enum Gate {
+    Run,
+    /// `decided` is false when a preview could not evaluate the condition — the real run may
+    /// not skip at all.
+    Skip {
+        reason: String,
+        decided: bool,
+    },
+}
+
+/// Decide a `when=`.
+///
+/// A preview cannot know a value registered earlier in the same run. A condition that needs
+/// one is skipped with a reason saying so, rather than decided against the placeholder ""
+/// the preview registered — which could report a skip the real run would not make.
+fn gate(when: Option<&Condition>, scope: &Scope) -> Result<Gate, String> {
+    let Some(cond) = when else {
+        return Ok(Gate::Run);
+    };
+    Ok(match cond.eval(scope)? {
+        Outcome::True => Gate::Run,
+        Outcome::False => Gate::Skip {
+            reason: format!("when: {}", cond.source()),
+            decided: true,
+        },
+        Outcome::Undetermined(var) => Gate::Skip {
+            reason: format!(
+                "undetermined in preview: when: {} depends on ${{{var}}}, which is not known \
+                 until the real run",
+                cond.source()
+            ),
+            decided: false,
+        },
+    })
+}
+
+/// A task's resource as written in the plan, with the same `cmd` fallback as
+/// [`NodeRunner::build_params`] but no interpolation — a skipped task is reported without
+/// resolving variables its condition may have found undefined.
+fn raw_resource(task: &TaskDef) -> String {
+    if !task.resource.is_empty() {
+        return task.resource.clone();
+    }
+    match task.args.get("cmd") {
+        Some(ParamValue::List(cmds)) => cmds.join(" && "),
+        Some(ParamValue::String(s)) => s.clone(),
+        _ => String::new(),
+    }
+}
+
 impl NodeRunner {
     pub async fn run(self) -> NodeResult {
         match self.run_inner().await {
             Ok(result) => result,
-            Err(_) => {
-                let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-                    host: self.host.name.clone(),
-                    success: false,
-                    changed: 0,
-                    dry_run: self.dry_run,
-                });
-                NodeResult {
-                    success: false,
-                    total_changed: 0,
-                }
-            }
+            Err(_) => self.finish(false, &Progress::default()),
+        }
+    }
+
+    /// Report the host as finished. Every exit path goes through here so the counts in the
+    /// event and in the result cannot disagree.
+    fn finish(&self, success: bool, progress: &Progress) -> NodeResult {
+        let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
+            host: self.host.name.clone(),
+            success,
+            changed: progress.changed,
+            skipped: progress.skipped,
+            dry_run: self.dry_run,
+        });
+        NodeResult {
+            success,
+            total_changed: progress.changed,
+            total_skipped: progress.skipped,
         }
     }
 
@@ -290,22 +393,13 @@ impl NodeRunner {
                 resource: String::new(),
                 error: e.to_string(),
             });
-            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-                host: self.host.name.clone(),
-                success: false,
-                changed: 0,
-                dry_run: self.dry_run,
-            });
             let _ = session.close().await;
-            return Ok(NodeResult {
-                success: false,
-                total_changed: 0,
-            });
+            return Ok(self.finish(false, &Progress::default()));
         }
 
         let steps = self.plan.steps();
         let total_steps = steps.len();
-        let mut total_changed = 0;
+        let mut progress = Progress::default();
         let mut step_changed: HashMap<String, bool> = HashMap::new();
 
         for (step_idx, step) in steps.iter().enumerate() {
@@ -321,6 +415,36 @@ impl NodeRunner {
                 .iter()
                 .any(|s| step_changed.get(s).copied().unwrap_or(false));
 
+            // Before the loop is resolved, so a step can guard a loop over a variable that
+            // may not exist.
+            let scope = Scope {
+                vars: &vars,
+                collections: &template_data.collections,
+                unknown: &progress.unknown,
+            };
+            match gate(step.when.as_ref(), &scope) {
+                Ok(Gate::Run) => {}
+                Ok(Gate::Skip { reason, decided }) => {
+                    let _ = self.event_tx.send(ExecutorEvent::StepSkipped {
+                        host: self.host.name.clone(),
+                        step: step.name.clone(),
+                        tasks: step.tasks.len(),
+                        reason,
+                    });
+                    progress.skipped += step.tasks.len();
+                    for name in step.tasks.iter().filter_map(|t| t.register.as_deref()) {
+                        progress.skip_register(&mut vars, name, decided);
+                    }
+                    step_changed.insert(step.name.clone(), false);
+                    continue;
+                }
+                Err(error) => {
+                    self.emit_step_error(&step.name, &error);
+                    let _ = session.close().await;
+                    return Ok(self.finish(false, &progress));
+                }
+            }
+
             match &step.loop_source {
                 None => {
                     match self
@@ -332,7 +456,7 @@ impl NodeRunner {
                             &template_data,
                             &session,
                             &os_info,
-                            &mut total_changed,
+                            &mut progress,
                             force_apply,
                         )
                         .await
@@ -341,17 +465,8 @@ impl NodeRunner {
                             step_changed.insert(step.name.clone(), changed);
                         }
                         Err(_) => {
-                            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-                                host: self.host.name.clone(),
-                                success: false,
-                                changed: total_changed,
-                                dry_run: self.dry_run,
-                            });
                             let _ = session.close().await;
-                            return Ok(NodeResult {
-                                success: false,
-                                total_changed,
-                            });
+                            return Ok(self.finish(false, &progress));
                         }
                     }
                 }
@@ -360,17 +475,8 @@ impl NodeRunner {
                         Ok(items) => items,
                         Err(error) => {
                             self.emit_step_error(&step.name, &error);
-                            let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-                                host: self.host.name.clone(),
-                                success: false,
-                                changed: total_changed,
-                                dry_run: self.dry_run,
-                            });
                             let _ = session.close().await;
-                            return Ok(NodeResult {
-                                success: false,
-                                total_changed,
-                            });
+                            return Ok(self.finish(false, &progress));
                         }
                     };
 
@@ -386,7 +492,7 @@ impl NodeRunner {
                                 &template_data,
                                 &session,
                                 &os_info,
-                                &mut total_changed,
+                                &mut progress,
                                 force_apply,
                             )
                             .await;
@@ -398,17 +504,8 @@ impl NodeRunner {
                                 any_iteration_changed |= changed;
                             }
                             Err(_) => {
-                                let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-                                    host: self.host.name.clone(),
-                                    success: false,
-                                    changed: total_changed,
-                                    dry_run: self.dry_run,
-                                });
                                 let _ = session.close().await;
-                                return Ok(NodeResult {
-                                    success: false,
-                                    total_changed,
-                                });
+                                return Ok(self.finish(false, &progress));
                             }
                         }
                     }
@@ -418,18 +515,7 @@ impl NodeRunner {
         }
 
         let _ = session.close().await;
-
-        let _ = self.event_tx.send(ExecutorEvent::NodeComplete {
-            host: self.host.name.clone(),
-            success: true,
-            changed: total_changed,
-            dry_run: self.dry_run,
-        });
-
-        Ok(NodeResult {
-            success: true,
-            total_changed,
-        })
+        Ok(self.finish(true, &progress))
     }
 
     /// Report a failure that happens while preparing a task (unknown module,
@@ -524,23 +610,43 @@ impl NodeRunner {
         template_data: &TemplateData,
         session: &SshSession,
         os_info: &OsInfo,
-        total_changed: &mut usize,
+        progress: &mut Progress,
         force_apply: bool,
     ) -> Result<bool, (String, String)> {
         let mut any_changed = false;
 
         for (task_idx, task) in step.tasks.iter().enumerate() {
+            // Ahead of the `host` branch, so a host that skips a `host` task never joins its
+            // run-once cell; the hosts that do still share the single execution.
+            let scope = Scope {
+                vars,
+                collections: &template_data.collections,
+                unknown: &progress.unknown,
+            };
+            match gate(task.when.as_ref(), &scope) {
+                Ok(Gate::Run) => {}
+                Ok(Gate::Skip { reason, decided }) => {
+                    let _ = self.event_tx.send(ExecutorEvent::TaskSkipped {
+                        host: self.host.name.clone(),
+                        module: task.module.clone(),
+                        resource: raw_resource(task),
+                        reason,
+                    });
+                    progress.skipped += 1;
+                    if let Some(name) = &task.register {
+                        progress.skip_register(vars, name, decided);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    self.emit_task_error(&task.module, &raw_resource(task), &error);
+                    return Err((step.name.clone(), error));
+                }
+            }
+
             if task.module == host_module::MODULE_NAME {
                 let changed = self
-                    .run_host_task(
-                        step,
-                        step_idx,
-                        task_idx,
-                        loop_iter,
-                        task,
-                        vars,
-                        total_changed,
-                    )
+                    .run_host_task(step, step_idx, task_idx, loop_iter, task, vars, progress)
                     .await?;
                 any_changed |= changed;
                 continue;
@@ -619,13 +725,15 @@ impl NodeRunner {
                             force_apply,
                         );
                         if changed {
-                            *total_changed += 1;
+                            progress.changed += 1;
                             any_changed = true;
                         }
                         if let Some(ref var_name) = task.register {
-                            vars.insert(
-                                var_name.clone(),
+                            progress.register(
+                                vars,
+                                var_name,
                                 captured_output(self.dry_run, &result.output),
+                                !self.dry_run,
                             );
                         }
                         let stdout = task_output(
@@ -660,8 +768,10 @@ impl NodeRunner {
             } else {
                 match status {
                     ModuleStatus::Satisfied => {
+                        // The real run registers "" here too, so the value is known even
+                        // in a preview.
                         if let Some(ref var_name) = task.register {
-                            vars.insert(var_name.clone(), String::new());
+                            progress.register(vars, var_name, String::new(), true);
                         }
                         let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                             host: self.host.name.clone(),
@@ -698,7 +808,7 @@ impl NodeRunner {
         loop_iter: usize,
         task: &TaskDef,
         vars: &mut HashMap<String, String>,
-        total_changed: &mut usize,
+        progress: &mut Progress,
     ) -> Result<bool, (String, String)> {
         let params = self.build_params(step, task, vars)?;
         let resource_name = params.resource_name.clone();
@@ -733,13 +843,18 @@ impl NodeRunner {
         match result {
             Ok(out) => {
                 if let Some(ref var_name) = task.register {
-                    vars.insert(var_name.clone(), captured_output(self.dry_run, &out.stdout));
+                    progress.register(
+                        vars,
+                        var_name,
+                        captured_output(self.dry_run, &out.stdout),
+                        !self.dry_run,
+                    );
                 }
                 // A `host` task is a command, not a desired state: it has nothing to
                 // compare against, so it always counts — and in a dry run it is always
                 // something that *would* run.
                 let changed = true;
-                *total_changed += 1;
+                progress.changed += 1;
                 let _ = self.event_tx.send(ExecutorEvent::ModuleResult {
                     host: self.host.name.clone(),
                     module: task.module.clone(),
@@ -934,6 +1049,149 @@ mod tests {
         assert_eq!(vars.get("@host.port").map(String::as_str), Some("2222"));
         assert!(!vars.contains_key("host.name"));
         assert!(!vars.contains_key("host.port"));
+    }
+
+    fn cond(src: &str) -> Condition {
+        Condition::parse(src).unwrap()
+    }
+
+    fn strings(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn gate_with(
+        when: Option<&Condition>,
+        vars: &HashMap<String, String>,
+        unknown: &[&str],
+    ) -> Result<Gate, String> {
+        let unknown = unknown.iter().map(|s| s.to_string()).collect();
+        gate(
+            when,
+            &Scope {
+                vars,
+                collections: &HashMap::new(),
+                unknown: &unknown,
+            },
+        )
+    }
+
+    fn skip_reason(gate: Result<Gate, String>) -> (String, bool) {
+        match gate {
+            Ok(Gate::Skip { reason, decided }) => (reason, decided),
+            other => panic!("expected a skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_condition_always_runs() {
+        assert_eq!(gate_with(None, &HashMap::new(), &[]), Ok(Gate::Run));
+    }
+
+    #[test]
+    fn a_false_condition_skips_and_quotes_itself() {
+        let vars = strings(&[("@os.family", "debian")]);
+        let c = cond("${@os.family} == redhat");
+        assert_eq!(
+            gate_with(Some(&c), &vars, &[]),
+            Ok(Gate::Skip {
+                reason: "when: ${@os.family} == redhat".into(),
+                decided: true,
+            })
+        );
+        let c = cond("${@os.family} == debian");
+        assert_eq!(gate_with(Some(&c), &vars, &[]), Ok(Gate::Run));
+    }
+
+    /// The reason is the condition as written: interpolating it would print the value of
+    /// every variable it reads, secrets included.
+    #[test]
+    fn a_skip_reason_never_contains_a_value() {
+        let vars = strings(&[("db-password", "hunter2")]);
+        let c = cond("${db-password} == ''");
+        let (reason, _) = skip_reason(gate_with(Some(&c), &vars, &[]));
+        assert!(!reason.contains("hunter2"), "{reason}");
+        assert!(reason.contains("${db-password}"), "{reason}");
+    }
+
+    #[test]
+    fn a_condition_on_a_value_the_preview_cannot_know_says_so() {
+        let vars = strings(&[("out", "")]);
+        let c = cond("${out} == yes");
+        let (reason, decided) = skip_reason(gate_with(Some(&c), &vars, &["out"]));
+        assert!(!decided);
+        assert!(reason.starts_with("undetermined in preview"), "{reason}");
+        assert!(reason.contains("${out}"), "{reason}");
+    }
+
+    #[test]
+    fn an_undefined_variable_fails_the_gate() {
+        let err = gate_with(Some(&cond("${nope} == x")), &HashMap::new(), &[]);
+        assert!(err.unwrap_err().contains("nope"));
+    }
+
+    #[test]
+    fn a_preview_marks_what_it_registers_as_unknown() {
+        let mut vars = HashMap::new();
+        let mut progress = Progress::default();
+        progress.register(&mut vars, "out", String::new(), false);
+        assert_eq!(vars.get("out").map(String::as_str), Some(""));
+        assert!(progress.unknown.contains("out"));
+
+        // A later real value — a satisfied task registers "" on the real run too — makes it
+        // known again.
+        progress.register(&mut vars, "out", String::new(), true);
+        assert!(!progress.unknown.contains("out"));
+    }
+
+    /// Undefined, not empty: `rm -rf /data/${out}` must fail rather than expand to
+    /// `rm -rf /data/`.
+    #[test]
+    fn a_skipped_register_leaves_the_variable_undefined() {
+        let mut vars = strings(&[("out", "from an earlier iteration")]);
+        let mut progress = Progress::default();
+        progress.unknown.insert("out".into());
+        progress.skip_register(&mut vars, "out", true);
+        assert!(!vars.contains_key("out"));
+        assert!(!progress.unknown.contains("out"));
+    }
+
+    /// The real run might not skip, and would then define the variable — so a later
+    /// `defined ${out}` in the preview must be undetermined, not a confident `false`.
+    #[test]
+    fn an_undecided_skip_leaves_even_the_presence_unknown() {
+        let mut vars = strings(&[("out", "")]);
+        let mut progress = Progress::default();
+        progress.skip_register(&mut vars, "out", false);
+        assert!(!vars.contains_key("out"));
+        assert!(progress.unknown.contains("out"));
+
+        let unknown: Vec<&str> = progress.unknown.iter().map(String::as_str).collect();
+        let c = cond("defined ${out}");
+        let (_, decided) = skip_reason(gate_with(Some(&c), &vars, &unknown));
+        assert!(!decided);
+    }
+
+    fn task(resource: &str, cmd: Option<ParamValue>) -> TaskDef {
+        TaskDef {
+            module: "shell".into(),
+            resource: resource.into(),
+            args: cmd.into_iter().map(|c| ("cmd".to_string(), c)).collect(),
+            register: None,
+            run_as: Default::default(),
+            when: None,
+        }
+    }
+
+    #[test]
+    fn a_skipped_task_is_named_as_written() {
+        assert_eq!(raw_resource(&task("${@item}", None)), "${@item}");
+        let cmds = ParamValue::List(vec!["a".into(), "b".into()]);
+        assert_eq!(raw_resource(&task("", Some(cmds))), "a && b");
+        let cmd = ParamValue::String("uptime".into());
+        assert_eq!(raw_resource(&task("", Some(cmd))), "uptime");
     }
 
     fn os_info(family: OsFamily, container_runtime: Option<ContainerRuntime>) -> OsInfo {
