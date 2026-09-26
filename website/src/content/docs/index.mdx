@@ -53,8 +53,6 @@ Describe the desired state in a plan:
 
 ```kdl
 plan "setup" {
-    target "web"
-
     step "Install nginx" {
         package "nginx" state="present"
     }
@@ -68,8 +66,8 @@ plan "setup" {
 }
 ```
 
-Run it:
+Run it against the `web` group:
 
 ```bash
-glidesh run -i inventory.kdl -p plan.kdl
+glidesh run -i inventory.kdl -p plan.kdl -t web
 ```

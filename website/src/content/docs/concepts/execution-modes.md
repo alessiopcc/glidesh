@@ -11,7 +11,6 @@ All hosts execute the same step together. A barrier between steps ensures every 
 
 ```kdl
 plan "rolling-deploy" {
-    target "web"
     mode "sync"
 
     step "Stop service" {
@@ -36,7 +35,6 @@ Each host runs the entire plan independently at its own pace. There are no barri
 
 ```kdl
 plan "update-packages" {
-    target "all"
     mode "async"
 
     step "Update system" {
