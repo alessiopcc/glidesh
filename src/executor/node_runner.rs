@@ -62,6 +62,29 @@ fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
     ]
 }
 
+/// Built-in OS facts, exposed under the reserved `@os.*` namespace. They come from the
+/// detection every run already performs on connect, so they cost no extra round trip.
+fn os_builtin_vars(os: &OsInfo) -> [(String, String); 7] {
+    // Always defined, so a host with no runtime expands to "" rather than failing the
+    // task on an undefined variable.
+    let runtime = os.container_runtime.as_ref().map_or("", |rt| rt.as_str());
+    [
+        ("@os.id".to_string(), os.id.clone()),
+        ("@os.version".to_string(), os.version.clone()),
+        ("@os.family".to_string(), os.family.as_str().to_string()),
+        (
+            "@os.pkg-manager".to_string(),
+            os.pkg_manager.as_str().to_string(),
+        ),
+        ("@os.init".to_string(), os.init_system.as_str().to_string()),
+        ("@os.container-runtime".to_string(), runtime.to_string()),
+        (
+            "@os.nix-installed".to_string(),
+            os.nix_installed.to_string(),
+        ),
+    ]
+}
+
 /// Bind a loop item's variables into `vars` under the reserved `@item` namespace,
 /// returning the keys that were inserted so the caller can remove them after the iteration.
 /// A flat item binds `@item`; a structured row binds `@item.<field>` for each field.
@@ -241,6 +264,7 @@ impl NodeRunner {
         // Last, so nothing can shadow these — and user var names may not start with `@`
         // anyway, so the reserved namespace cannot be reached from a config file at all.
         vars.extend(host_builtin_vars(&self.host));
+        vars.extend(os_builtin_vars(&os_info));
 
         // Build template data: inventory @-refs + plan structured vars.
         // Preserve inventory-provided collections so plan structured vars
@@ -744,6 +768,7 @@ impl NodeRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glidesh::modules::detect::{ContainerRuntime, InitSystem, OsFamily, PkgManager};
 
     fn collection(rows: Vec<Vec<(&str, &str)>>) -> Vec<HashMap<String, String>> {
         rows.into_iter()
@@ -909,6 +934,56 @@ mod tests {
         assert_eq!(vars.get("@host.port").map(String::as_str), Some("2222"));
         assert!(!vars.contains_key("host.name"));
         assert!(!vars.contains_key("host.port"));
+    }
+
+    fn os_info(family: OsFamily, container_runtime: Option<ContainerRuntime>) -> OsInfo {
+        OsInfo {
+            id: "ubuntu".to_string(),
+            version: "22.04".to_string(),
+            family,
+            pkg_manager: PkgManager::Apt,
+            init_system: InitSystem::Systemd,
+            container_runtime,
+            nix_installed: false,
+        }
+    }
+
+    #[test]
+    fn os_builtins_expose_detected_facts() {
+        let os = os_info(OsFamily::Debian, Some(ContainerRuntime::Podman));
+        let vars: HashMap<String, String> = os_builtin_vars(&os).into_iter().collect();
+        let get = |k: &str| vars.get(k).map(String::as_str);
+        assert_eq!(get("@os.id"), Some("ubuntu"));
+        assert_eq!(get("@os.version"), Some("22.04"));
+        assert_eq!(get("@os.family"), Some("debian"));
+        assert_eq!(get("@os.pkg-manager"), Some("apt"));
+        assert_eq!(get("@os.init"), Some("systemd"));
+        assert_eq!(get("@os.container-runtime"), Some("podman"));
+        assert_eq!(get("@os.nix-installed"), Some("false"));
+    }
+
+    /// Referencing an undefined variable fails the task, so a host with no container
+    /// runtime must still define the var — as empty — rather than leave it out.
+    #[test]
+    fn a_missing_container_runtime_is_empty_not_undefined() {
+        let os = os_info(OsFamily::Debian, None);
+        let vars: HashMap<String, String> = os_builtin_vars(&os).into_iter().collect();
+        assert_eq!(
+            vars.get("@os.container-runtime").map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn os_builtins_resolve_in_a_template() {
+        let os = os_info(OsFamily::Unknown("plan9".to_string()), None);
+        let vars: HashMap<String, String> = os_builtin_vars(&os).into_iter().collect();
+        let out = glidesh::config::template::interpolate(
+            "${@os.family}/${@os.pkg-manager}/[${@os.container-runtime}]",
+            &vars,
+        )
+        .unwrap();
+        assert_eq!(out, "plan9/apt/[]");
     }
 
     #[test]

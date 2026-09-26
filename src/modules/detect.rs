@@ -20,16 +20,36 @@ pub struct OsInfo {
     pub nix_installed: bool,
 }
 
+// The explicit renames, here and on `InitSystem`, keep the plugin wire on the same vocabulary
+// as the `@os.*` vars: `rename_all` alone emits `red_hat`, `nix_o_s` and `open_rc`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OsFamily {
     Debian,
+    #[serde(rename = "redhat")]
     RedHat,
     Arch,
     Alpine,
     Suse,
+    #[serde(rename = "nixos")]
     NixOS,
     Unknown(String),
+}
+
+impl OsFamily {
+    /// The family as a plan sees it in `${@os.family}`. An unrecognised OS reports its raw
+    /// `/etc/os-release` `ID`, so a plan can still branch on it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            OsFamily::Debian => "debian",
+            OsFamily::RedHat => "redhat",
+            OsFamily::Arch => "arch",
+            OsFamily::Alpine => "alpine",
+            OsFamily::Suse => "suse",
+            OsFamily::NixOS => "nixos",
+            OsFamily::Unknown(id) => id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -48,8 +68,19 @@ pub enum PkgManager {
 #[serde(rename_all = "snake_case")]
 pub enum InitSystem {
     Systemd,
+    #[serde(rename = "openrc")]
     OpenRc,
     Unknown,
+}
+
+impl InitSystem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InitSystem::Systemd => "systemd",
+            InitSystem::OpenRc => "openrc",
+            InitSystem::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -59,7 +90,28 @@ pub enum ContainerRuntime {
     Docker,
 }
 
+impl ContainerRuntime {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContainerRuntime::Podman => "podman",
+            ContainerRuntime::Docker => "docker",
+        }
+    }
+}
+
 impl PkgManager {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PkgManager::Apt => "apt",
+            PkgManager::Dnf => "dnf",
+            PkgManager::Yum => "yum",
+            PkgManager::Pacman => "pacman",
+            PkgManager::Apk => "apk",
+            PkgManager::Zypper => "zypper",
+            PkgManager::Nix => "nix",
+        }
+    }
+
     pub fn update_index_cmd(&self) -> &'static str {
         match self {
             PkgManager::Apt => "apt-get update -qq",
@@ -253,4 +305,68 @@ async fn detect_container_runtime(
         return Ok(Some(ContainerRuntime::Docker));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wire<T: serde::Serialize>(value: &T) -> String {
+        serde_json::to_value(value)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// A plugin reads these values off the wire and a plan reads them from `${@os.*}`; if
+    /// the two ever disagree, a plugin and a plan branching on the same host see different
+    /// answers.
+    #[test]
+    fn plugins_and_plans_share_one_vocabulary() {
+        for family in [
+            OsFamily::Debian,
+            OsFamily::RedHat,
+            OsFamily::Arch,
+            OsFamily::Alpine,
+            OsFamily::Suse,
+            OsFamily::NixOS,
+        ] {
+            assert_eq!(wire(&family), family.as_str());
+        }
+        for pm in [
+            PkgManager::Apt,
+            PkgManager::Dnf,
+            PkgManager::Yum,
+            PkgManager::Pacman,
+            PkgManager::Apk,
+            PkgManager::Zypper,
+            PkgManager::Nix,
+        ] {
+            assert_eq!(wire(&pm), pm.as_str());
+        }
+        for init in [InitSystem::Systemd, InitSystem::OpenRc, InitSystem::Unknown] {
+            assert_eq!(wire(&init), init.as_str());
+        }
+        for rt in [ContainerRuntime::Podman, ContainerRuntime::Docker] {
+            assert_eq!(wire(&rt), rt.as_str());
+        }
+    }
+
+    #[test]
+    fn multi_word_names_are_typeable() {
+        assert_eq!(OsFamily::RedHat.as_str(), "redhat");
+        assert_eq!(OsFamily::NixOS.as_str(), "nixos");
+        assert_eq!(InitSystem::OpenRc.as_str(), "openrc");
+    }
+
+    #[test]
+    fn an_unrecognised_family_reports_its_raw_id() {
+        let family = OsFamily::Unknown("plan9".to_string());
+        assert_eq!(family.as_str(), "plan9");
+        assert_eq!(
+            serde_json::to_value(&family).unwrap(),
+            serde_json::json!({"unknown": "plan9"})
+        );
+    }
 }
