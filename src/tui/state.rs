@@ -80,6 +80,7 @@ pub struct TuiState {
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
     pub total_changed: usize,
+    pub total_skipped: usize,
     /// Known from the start, not learned from the events: the header renders a count from
     /// the first frame, before any task has reported, and a preview's count must never read
     /// as applied work.
@@ -139,6 +140,7 @@ impl TuiState {
             started_at: now,
             finished_at: None,
             total_changed: 0,
+            total_skipped: 0,
             dry_run,
             combined_log: Vec::new(),
             combined_scroll: usize::MAX,
@@ -243,10 +245,32 @@ impl TuiState {
             ExecutorEvent::StepFailed { host, step, error } => {
                 self.push_node_log(host, format!("  FAILED step '{}': {}", step, error));
             }
+            ExecutorEvent::StepSkipped {
+                host,
+                tasks,
+                reason,
+                ..
+            } => {
+                self.push_node_log(host, format!("  SKIPPED step: {}", reason));
+                self.total_skipped += tasks;
+            }
+            ExecutorEvent::TaskSkipped {
+                host,
+                module,
+                resource,
+                reason,
+            } => {
+                self.push_node_log(
+                    host,
+                    format!("  SKIPPED {} '{}': {}", module, resource, reason),
+                );
+                self.total_skipped += 1;
+            }
             ExecutorEvent::NodeComplete {
                 host,
                 success,
                 changed: _,
+                skipped: _,
                 dry_run: _,
             } => {
                 if let Some(&idx) = self.node_index.get(host) {
@@ -267,7 +291,7 @@ impl TuiState {
                 self.run_complete = true;
                 self.finished_at = Some(Instant::now());
                 self.summary_line = Some(format!(
-                    "{}: {} hosts, {} ok, {} failed, {} {}",
+                    "{}: {} hosts, {} ok, {} failed, {} {}{}",
                     if summary.dry_run {
                         "Dry run complete (nothing applied)"
                     } else {
@@ -281,7 +305,8 @@ impl TuiState {
                         "would change"
                     } else {
                         "changed"
-                    }
+                    },
+                    crate::executor::skipped_suffix(summary.total_skipped)
                 ));
             }
         }
@@ -525,11 +550,56 @@ mod tests {
                 succeeded: 1,
                 failed: 0,
                 total_changed: 2,
+                total_skipped: 0,
                 dry_run: true,
             },
         });
         let line = s.summary_line.unwrap();
         assert!(line.contains("nothing applied"), "got: {line}");
         assert!(line.contains("2 would change"), "got: {line}");
+    }
+
+    /// A skipped step counts each of its tasks, so the unit matches `changed`.
+    #[test]
+    fn skips_are_counted_per_task() {
+        let mut s = state();
+        s.handle_event(&ExecutorEvent::StepSkipped {
+            host: "web-1".to_string(),
+            step: "Install".to_string(),
+            tasks: 3,
+            reason: "when: ${x}".to_string(),
+        });
+        s.handle_event(&ExecutorEvent::TaskSkipped {
+            host: "web-1".to_string(),
+            module: "shell".to_string(),
+            resource: "uptime".to_string(),
+            reason: "when: ${y}".to_string(),
+        });
+        assert_eq!(s.total_skipped, 4);
+        assert_eq!(s.total_changed, 0);
+        assert_eq!(s.nodes[0].log_lines[0], "  SKIPPED step: when: ${x}");
+        assert_eq!(
+            s.nodes[0].log_lines[1],
+            "  SKIPPED shell 'uptime': when: ${y}"
+        );
+    }
+
+    #[test]
+    fn the_summary_mentions_skips_only_when_there_are_some() {
+        for (skipped, expect) in [(0, "1 changed"), (2, "1 changed, 2 skipped")] {
+            let mut s = state();
+            s.handle_event(&ExecutorEvent::RunComplete {
+                summary: RunSummary {
+                    total_hosts: 1,
+                    succeeded: 1,
+                    failed: 0,
+                    total_changed: 1,
+                    total_skipped: skipped,
+                    dry_run: false,
+                },
+            });
+            let line = s.summary_line.unwrap();
+            assert!(line.ends_with(expect), "got: {line}");
+        }
     }
 }

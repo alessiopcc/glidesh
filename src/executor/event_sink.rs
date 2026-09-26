@@ -82,7 +82,37 @@ impl EventSink {
                 host,
                 error: scrub(error),
             },
-            other => other,
+            // Both are uninterpolated plan text, but a secret may have been pasted into the
+            // plan itself.
+            ExecutorEvent::StepSkipped {
+                host,
+                step,
+                tasks,
+                reason,
+            } => ExecutorEvent::StepSkipped {
+                host,
+                step,
+                tasks,
+                reason: scrub(reason),
+            },
+            ExecutorEvent::TaskSkipped {
+                host,
+                module,
+                resource,
+                reason,
+            } => ExecutorEvent::TaskSkipped {
+                host,
+                module,
+                resource: scrub(resource),
+                reason: scrub(reason),
+            },
+            // Listed rather than caught by a wildcard, so a new event cannot reach the TUI or
+            // the run logs without someone deciding whether it needs scrubbing.
+            other @ (ExecutorEvent::NodeConnecting { .. }
+            | ExecutorEvent::NodeConnected { .. }
+            | ExecutorEvent::StepStarted { .. }
+            | ExecutorEvent::NodeComplete { .. }
+            | ExecutorEvent::RunComplete { .. }) => other,
         }
     }
 }
@@ -128,6 +158,42 @@ mod tests {
         match rx.try_recv().unwrap() {
             ExecutorEvent::ModuleResult { stdout, .. } => {
                 assert_eq!(stdout, "the password is *** ok");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redacts_a_skip_reason_and_resource() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = EventSink::new(tx, registry_with("hunter2"));
+        sink.send(ExecutorEvent::TaskSkipped {
+            host: "h".into(),
+            module: "shell".into(),
+            resource: "echo hunter2".into(),
+            reason: "when: ${x} == hunter2".into(),
+        })
+        .unwrap();
+        match rx.try_recv().unwrap() {
+            ExecutorEvent::TaskSkipped {
+                resource, reason, ..
+            } => {
+                assert_eq!(resource, "echo ***");
+                assert_eq!(reason, "when: ${x} == ***");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        sink.send(ExecutorEvent::StepSkipped {
+            host: "h".into(),
+            step: "s".into(),
+            tasks: 1,
+            reason: "when: ${x} == hunter2".into(),
+        })
+        .unwrap();
+        match rx.try_recv().unwrap() {
+            ExecutorEvent::StepSkipped { reason, .. } => {
+                assert_eq!(reason, "when: ${x} == ***");
             }
             other => panic!("unexpected event: {other:?}"),
         }

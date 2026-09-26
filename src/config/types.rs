@@ -1,3 +1,4 @@
+use crate::config::condition::Condition;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -345,6 +346,9 @@ pub struct Step {
     pub subscribe: Vec<String>,
     /// Step-level escalation override (applies to all tasks in the step).
     pub run_as: RunAsSpec,
+    /// Evaluated once, before the step's `loop` is resolved — so it can guard a loop over a
+    /// variable that might not exist, and cannot see `@item`.
+    pub when: Option<Condition>,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +359,8 @@ pub struct TaskDef {
     pub register: Option<String>,
     /// Module-level escalation override (most specific).
     pub run_as: RunAsSpec,
+    /// Evaluated per task and per loop iteration, after `@item` is bound.
+    pub when: Option<Condition>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

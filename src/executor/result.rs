@@ -4,6 +4,7 @@ use serde::Serialize;
 pub struct NodeResult {
     pub success: bool,
     pub total_changed: usize,
+    pub total_skipped: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -12,6 +13,8 @@ pub struct RunSummary {
     pub succeeded: usize,
     pub failed: usize,
     pub total_changed: usize,
+    /// Tasks not run because a `when=` was false — a skipped step counts each of its tasks.
+    pub total_skipped: usize,
     /// Nothing was applied: `total_changed` counts what *would* change.
     pub dry_run: bool,
 }
@@ -24,6 +27,16 @@ pub fn changed_label(changed: bool, dry_run: bool) -> &'static str {
         (true, true) => "would change",
         (true, false) => "changed",
         (false, _) => "ok",
+    }
+}
+
+/// The skipped count as a summary suffix — empty when nothing was skipped, so a plan
+/// without `when=` reads exactly as it always has. Shared by the plain output and the TUI.
+pub fn skipped_suffix(skipped: usize) -> String {
+    if skipped == 0 {
+        String::new()
+    } else {
+        format!(", {skipped} skipped")
     }
 }
 
@@ -74,11 +87,29 @@ pub enum ExecutorEvent {
         step: String,
         error: String,
     },
+    /// A step's `when=` did not hold, so none of its tasks ran.
+    StepSkipped {
+        host: String,
+        step: String,
+        /// Tasks in the step, so a renderer can count them without the plan.
+        tasks: usize,
+        reason: String,
+    },
+    /// A task's `when=` did not hold.
+    TaskSkipped {
+        host: String,
+        module: String,
+        /// As written in the plan: interpolating it could fail on the very variable whose
+        /// absence caused the skip.
+        resource: String,
+        reason: String,
+    },
     NodeComplete {
         host: String,
         success: bool,
         /// In a dry run this counts what *would* change — see `dry_run`.
         changed: usize,
+        skipped: usize,
         dry_run: bool,
     },
     RunComplete {
@@ -88,7 +119,13 @@ pub enum ExecutorEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::changed_label;
+    use super::{changed_label, skipped_suffix};
+
+    #[test]
+    fn nothing_skipped_reads_as_before() {
+        assert_eq!(skipped_suffix(0), "");
+        assert_eq!(skipped_suffix(2), ", 2 skipped");
+    }
 
     #[test]
     fn a_preview_never_claims_it_changed_something() {

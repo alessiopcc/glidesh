@@ -21,6 +21,9 @@ pub struct RunSummaryFile {
 pub struct NodeSummary {
     pub status: String,
     pub changed: usize,
+    /// Absent from run logs written before `when=` existed.
+    #[serde(default)]
+    pub skipped: usize,
     pub steps_completed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<String>,
