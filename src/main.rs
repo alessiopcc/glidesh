@@ -1278,6 +1278,16 @@ async fn connect_host(
     }
 }
 
+/// Redacts the whole stream before splitting it, so a secret that itself contains a newline is
+/// still found.
+fn redacted_lines(output: &str, registry: &glidesh::secrets::SecretRegistry) -> Vec<String> {
+    registry
+        .redact(output)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 /// Run each host's command concurrently and stream `[host]`-prefixed output. A host whose
 /// command could not be built is reported and counted as failed without connecting.
 async fn run_command_on_hosts(
@@ -1295,6 +1305,7 @@ async fn run_command_on_hosts(
         let tx = tx.clone();
         let key = key.clone();
         let sem = semaphore.clone();
+        let registry = registry.clone();
 
         handles.push(tokio::spawn(async move {
             let name = host.name.clone();
@@ -1315,11 +1326,11 @@ async fn run_command_on_hosts(
             };
             let failed = match session.exec(&command).await {
                 Ok(output) => {
-                    for line in output.stdout.lines() {
-                        let _ = tx.send((name.clone(), line.to_string(), false));
+                    for line in redacted_lines(&output.stdout, &registry) {
+                        let _ = tx.send((name.clone(), line, false));
                     }
-                    for line in output.stderr.lines() {
-                        let _ = tx.send((name.clone(), line.to_string(), true));
+                    for line in redacted_lines(&output.stderr, &registry) {
+                        let _ = tx.send((name.clone(), line, true));
                     }
                     if output.exit_code != 0 {
                         let _ = tx.send((
@@ -1343,8 +1354,8 @@ async fn run_command_on_hosts(
     }
     drop(tx);
 
-    // Every line passes through here, so this is the one place a secret echoed back by a
-    // host — or quoted in an error — is scrubbed.
+    // Command output was redacted whole before it was split; this catches a secret quoted in
+    // an error message.
     while let Some((host, line, is_stderr)) = rx.recv().await {
         let line = registry.redact(&line);
         if is_stderr {
@@ -1780,6 +1791,19 @@ mod tests {
             secrets.registry().redact("echoed: hunter2-token"),
             "echoed: ***"
         );
+    }
+
+    #[test]
+    fn a_multi_line_secret_is_redacted_before_output_is_split() {
+        let (secrets, token) = unlocked_secrets("first-half\nsecond-half");
+        let host = console_host(&[("pair", token.as_str())]);
+        console_command("echo ${pair}", &host, &secrets, true).unwrap();
+
+        let lines = redacted_lines(
+            "before\nfirst-half\nsecond-half\nafter\n",
+            &secrets.registry(),
+        );
+        assert_eq!(lines, ["before", "***", "after"]);
     }
 
     #[test]
