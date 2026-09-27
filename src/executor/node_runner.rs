@@ -146,6 +146,14 @@ fn resolve_changed(
     would_act || force_apply
 }
 
+/// `changed-when=#false` declares a task never changes anything. It is read here as well as
+/// in the module because a preview's count comes from `check`, which knows only that the
+/// task is pending — so without this the preview would say "would change" for a task the
+/// real run reports as `ok`. It also keeps such a task from triggering subscribers.
+fn never_changes(task: &TaskDef) -> bool {
+    matches!(task.args.get("changed-when"), Some(ParamValue::Bool(false)))
+}
+
 /// What a task reports, given what `check` found and what the run asked to see.
 ///
 /// A preview leads with `check`'s description of the pending work, so the reason
@@ -723,7 +731,7 @@ impl NodeRunner {
                             pending_plan.is_some(),
                             result.changed,
                             force_apply,
-                        );
+                        ) && !never_changes(task);
                         if changed {
                             progress.changed += 1;
                             any_changed = true;
@@ -936,6 +944,31 @@ mod tests {
         assert!(resolve_changed(false, true, true, false));
         assert!(!resolve_changed(false, true, false, false));
         assert!(resolve_changed(false, false, false, true));
+    }
+
+    fn shell_task(changed_when: Option<ParamValue>) -> TaskDef {
+        TaskDef {
+            module: "shell".into(),
+            resource: "lsblk".into(),
+            args: changed_when
+                .into_iter()
+                .map(|v| ("changed-when".to_string(), v))
+                .collect(),
+            register: None,
+            run_as: Default::default(),
+            when: None,
+        }
+    }
+
+    /// Only `#false` is decided here; the command form is the module's to answer.
+    #[test]
+    fn only_changed_when_false_is_read_by_the_executor() {
+        assert!(never_changes(&shell_task(Some(ParamValue::Bool(false)))));
+        assert!(!never_changes(&shell_task(Some(ParamValue::Bool(true)))));
+        assert!(!never_changes(&shell_task(Some(ParamValue::String(
+            "true".into()
+        )))));
+        assert!(!never_changes(&shell_task(None)));
     }
 
     #[test]
