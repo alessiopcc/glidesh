@@ -352,6 +352,9 @@ async fn an_untemplated_upload_warns_about_a_defined_variable() {
         shipped.stdout
     );
 
+    // Its own file: templating the one above would fail on `${HOME}`, which glidesh does not
+    // define.
+    std::fs::write(tmp.path(), b"CUDA=${cuda-devices}\n").unwrap();
     let ctx = container.module_context(&ssh, &os_info, &vars, false);
     let templated = FileModule.apply(&ctx, &params(true)).await.unwrap();
     assert!(templated.stderr.is_empty(), "{}", templated.stderr);
