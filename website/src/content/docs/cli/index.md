@@ -31,6 +31,11 @@ glidesh console [OPTIONS]
 | `--concurrency <N>` | — | Max concurrent hosts when running a command (minimum 1) | `10` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys | `false` |
+| `--vars` | — | Substitute `${var}` references in `--command` from host variables and secrets (see [Variables and secrets](/cli/console/#variables-and-secrets---vars)) | `false` |
+| `--secrets <PATH>` | — | Path to the secrets file (used with `--vars`) | `secrets.kdl` next to the inventory |
+| `--ask-secret-pass` | — | Prompt for the secrets passphrase | `false` |
+| `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
+| `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key` |
 
 ### Mode selection
 

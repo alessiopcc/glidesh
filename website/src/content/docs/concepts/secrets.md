@@ -87,6 +87,17 @@ file containing any structured node rather than risk rewriting it — so mint th
 `glidesh secret encrypt` and paste them into the rows. `secret list` shows them as `structured`,
 and `secret rm` removes a whole block.
 
+## Using secrets in one-off commands
+
+`glidesh console -c` can use them too, with `--vars`:
+
+```bash
+glidesh console -i inventory.kdl -t db --vars -c 'PGPASSWORD=${db-password} psql -c "select 1"'
+```
+
+The same unlocking and redaction apply. See
+[Variables and secrets](/cli/console/#variables-and-secrets---vars) for the details.
+
 ## Sharing a vault with a team
 
 The `passphrase` provider gives everyone the same secret, which has to be distributed out of band
@@ -186,8 +197,8 @@ run fails with a clear message rather than proceeding.
 ## Redaction
 
 Every decrypted value is tracked and scrubbed (replaced with `***`) from all emitted output —
-module results, errors, the TUI, and the per-run logs in `~/.glidesh/runs/` — even if a command
-echoes the secret in its own output. Explicit reveals (`secret get`) are the only path that prints
+module results, errors, the TUI, the per-run logs in `~/.glidesh/runs/`, and `console -c --vars`
+output — even if a command echoes the secret in its own output. Explicit reveals (`secret get`) are the only path that prints
 a plaintext value.
 
 Values shorter than four characters are the one exception. Masking a one- or two-character value

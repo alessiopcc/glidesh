@@ -187,6 +187,44 @@ The console keeps one live SSH session per host and shares it across tunnels and
 
 The console respects jump host configuration in the inventory. If a host is behind a bastion, both shells and tunnels through that host transparently use the bastion — no extra setup needed. See [Jump Hosts](/advanced/jump-hosts/) for inventory syntax.
 
+## One-off commands
+
+`-t` with `-c` runs a command without opening the TUI — on one host, or concurrently on
+every host a group resolves to, with `[hostname]`-prefixed output:
+
+```bash
+glidesh console -i inventory.kdl -t web -c "systemctl is-active nginx"
+```
+
+### Variables and secrets (`--vars`)
+
+By default the command is sent exactly as typed, so the host's shell expands its own
+variables: `-c 'echo ${HOME}'` prints the remote home directory.
+
+Add `--vars` to substitute `${name}` references from each host's inventory variables, the
+[secrets file](/concepts/secrets/), and `${@host.*}` before the command is sent:
+
+```bash
+glidesh console -i inventory.kdl -t web --vars \
+  -c 'curl -fsS -H "Authorization: Bearer ${api-token}" http://localhost:8080/health'
+```
+
+- Each host gets its own substitution, from its own merged variables.
+- Secrets are decrypted just as for `glidesh run`, with the same flags and environment
+  variables: `--secrets`, `--ask-secret-pass`, `--secret-pass-file`, `--secret-identity`,
+  `GLIDESH_SECRET_PASS`. A `secret:v1:…` token written inline in the command is decrypted
+  too.
+- **Output is redacted.** A decrypted value echoed back by the host appears as `***`, in
+  normal output and in error messages alike.
+- An undefined name fails that host with an error instead of sending a half-substituted
+  command.
+- With `--vars`, every `${…}` is a glidesh reference — quoting does not change that — so a
+  shell variable written `${HOME}` fails as undefined. Write it `$HOME` instead, or leave
+  `--vars` off.
+- `${@os.*}` is not available: `console` does not detect the operating system.
+
+Without `--vars`, the secrets file is not read and nothing is prompted for.
+
 ## Flags
 
 ```
@@ -196,9 +234,17 @@ glidesh console [OPTIONS]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--inventory <PATH>` | `-i` | Path to the inventory file | `./inventory.kdl` |
+| `--target <NAME>` | `-t` | Group, host, or `group:host` to open a shell on or run `-c` against | — |
+| `--command <CMD>` | `-c` | Run a command instead of opening a shell or the TUI | — |
+| `--vars` | — | Substitute `${var}` references in `-c` from host variables and secrets | `false` |
 | `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
+| `--concurrency <N>` | — | Max hosts running `-c` at once | `10` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to `known_hosts` | `false` |
+| `--secrets <PATH>` | — | Path to the secrets file (used with `--vars`) | `secrets.kdl` next to the inventory |
+| `--ask-secret-pass` | — | Prompt for the secrets passphrase | `false` |
+| `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
+| `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key` |
 
 SSH key resolution follows the same order as the other commands — see [SSH Key Resolution](/cli/#ssh-key-resolution).
 

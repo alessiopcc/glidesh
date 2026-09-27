@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -225,6 +225,15 @@ pub struct ConsoleArgs {
     /// Accept and save new host keys to known_hosts
     #[arg(long)]
     pub accept_new_host_key: bool,
+
+    /// Substitute ${var} references in --command from each host's variables and the secrets
+    /// file before running it. Off by default, so a shell's own ${VAR} reaches the host
+    /// untouched.
+    #[arg(long, requires = "command")]
+    pub vars: bool,
+
+    #[command(flatten)]
+    pub secrets: SecretSourceArgs,
 }
 
 #[derive(Parser, Debug)]
@@ -304,6 +313,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub ask_pass: bool,
 
+    #[command(flatten)]
+    pub secrets: SecretSourceArgs,
+}
+
+/// Where the secrets file is and how to unlock it. Shared by `run` and `console`.
+#[derive(Args, Debug, Default)]
+pub struct SecretSourceArgs {
     /// Path to the secrets file (defaults to secrets.kdl next to the inventory)
     #[arg(long)]
     pub secrets: Option<PathBuf>,

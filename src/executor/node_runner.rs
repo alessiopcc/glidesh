@@ -54,7 +54,7 @@ fn resolve_loop_items(
 
 /// Built-in per-host variables, exposed under the reserved `@host.*` namespace. Only these
 /// `@`-prefixed names are injected — the legacy bare `host.*` forms were removed.
-fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
+pub(crate) fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
     [
         ("@host.name".to_string(), host.name.clone()),
         ("@host.address".to_string(), host.address.clone()),
