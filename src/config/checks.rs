@@ -87,14 +87,23 @@ pub fn literal_reference_warnings(
     warnings
 }
 
-/// Local `file` sources that do not exist, one message each.
+/// `file` sources that are not given, or given but not found locally, one message each.
 ///
-/// Resolved against `plan_dir` — the top-level plan's directory — exactly as the `file`
-/// module resolves them at run time, included steps too.
+/// Every `file` mode needs a string `src`, so a task without one would fail at run time.
+/// Local sources are resolved against `plan_dir` — the top-level plan's directory — exactly
+/// as the `file` module resolves them, included steps too.
 pub fn missing_file_sources(plan: &Plan, plan_dir: &Path) -> Vec<String> {
     let mut missing = Vec::new();
     for step in plan.steps() {
         for task in &step.tasks {
+            if task.module == "file" && task.args.get("src").and_then(ParamValue::as_str).is_none()
+            {
+                missing.push(format!(
+                    "step '{}': file '{}': src is required, as a string",
+                    step.name, task.resource
+                ));
+                continue;
+            }
             let Some((src, resolved)) = local_source(task, plan_dir) else {
                 continue;
             };
@@ -134,6 +143,29 @@ mod tests {
             "{}",
             missing[0]
         );
+    }
+
+    #[test]
+    fn a_file_task_without_a_string_src_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = plan(
+            r#"step "s" {
+                file "/etc/a.conf" mode="0644"
+                file "/etc/b.conf" src=42
+                file "backups/db.sql" fetch=#true
+            }"#,
+        );
+        let missing = missing_file_sources(&p, dir.path());
+        assert_eq!(missing.len(), 3, "{missing:?}");
+        for (dest, msg) in ["/etc/a.conf", "/etc/b.conf", "backups/db.sql"]
+            .iter()
+            .zip(&missing)
+        {
+            assert!(
+                msg.contains(dest) && msg.contains("src is required"),
+                "{msg}"
+            );
+        }
     }
 
     #[test]

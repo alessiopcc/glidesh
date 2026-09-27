@@ -250,8 +250,8 @@ without contacting a host:
 - **Step names** are unique across includes, and every `subscribe` names an earlier step.
 - **Modules exist.** A misspelled module name fails here. External modules are looked up next
   to the inventory when `-i` is given, otherwise in `./modules/` and `~/.glidesh/modules/`.
-- **Local `file` sources exist.** A `src` is resolved from the plan's directory, as a run
-  resolves it. Not checked: a `fetch` source, which is a path on the host, and a `src`
+- **Every `file` task has a `src`, and local sources exist.** A `src` is resolved from the
+  plan's directory, as a run resolves it. Not checked: a `fetch` source, which is a path on the host, and a `src`
   containing `${…}`, which only a run can resolve.
 
 Every problem is listed, not only the first.
