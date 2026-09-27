@@ -1,3 +1,4 @@
+use crate::executor::barrier::Seat;
 use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
@@ -15,6 +16,7 @@ use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// One iteration of a step `loop`. A flat item binds `${@item}`; a structured
 /// item (a row from a `vars` collection) binds `${@item.<field>}` for each field.
@@ -121,6 +123,20 @@ pub struct NodeRunner {
     pub coordinator: Arc<HostCoordinator>,
     pub all_targets: Arc<Vec<ResolvedHost>>,
     pub secrets: Arc<Secrets>,
+    /// Set in `mode "sync"`; `None` runs the plan free, as `async` does.
+    pub sync: Option<SyncSlot>,
+}
+
+/// A host's part in a sync run.
+///
+/// `--concurrency` bounds how many hosts connect or run a step at once, not how many are in
+/// the run: a host holds a permit only while connecting and while running a step, and none
+/// while it waits at the barrier. Holding one for the whole run, as async does, would
+/// deadlock as soon as there are more hosts than permits — the hosts at the barrier would
+/// wait for hosts that can never start.
+pub struct SyncSlot {
+    pub seat: Seat,
+    pub permits: Arc<Semaphore>,
 }
 
 /// Whether a task counts toward the run's changed total.
@@ -326,7 +342,17 @@ impl NodeRunner {
         }
     }
 
+    /// In a sync run, a permit for one phase of work; in async the engine already holds one
+    /// for the whole run.
+    async fn sync_permit(&self) -> Option<OwnedSemaphorePermit> {
+        match &self.sync {
+            Some(sync) => sync.permits.clone().acquire_owned().await.ok(),
+            None => None,
+        }
+    }
+
     async fn run_inner(&self) -> Result<NodeResult, GlideshError> {
+        let connect_permit = self.sync_permit().await;
         let _ = self.event_tx.send(ExecutorEvent::NodeConnecting {
             host: self.host.name.clone(),
         });
@@ -409,8 +435,16 @@ impl NodeRunner {
         let total_steps = steps.len();
         let mut progress = Progress::default();
         let mut step_changed: HashMap<String, bool> = HashMap::new();
+        drop(connect_permit);
 
         for (step_idx, step) in steps.iter().enumerate() {
+            // At the top of the loop so a skipped step, which `continue`s, still arrives.
+            // Waiting holds no permit — see `SyncSlot`.
+            if let Some(sync) = &self.sync {
+                sync.seat.arrive().await;
+            }
+            let _step_permit = self.sync_permit().await;
+
             let _ = self.event_tx.send(ExecutorEvent::StepStarted {
                 host: self.host.name.clone(),
                 step: step.name.clone(),

@@ -92,7 +92,7 @@ glidesh run [OPTIONS]
 | `--port <PORT>` | `-P` | SSH port | `22` |
 | `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
 | `--command <CMD>` | `-c` | Ad-hoc command to run | — |
-| `--mode <MODE>` | `-m` | Execution mode: `sync` or `async` | `sync` |
+| `--mode <MODE>` | `-m` | [Execution mode](/concepts/execution-modes/): `sync` or `async`, overriding the plan's `mode` | the plan's `mode`, else `sync` |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
 | `--dry-run` | — | Report what would change without applying it | `false` |
 | `--diff` | — | Show the detail behind each pending change, where the module can describe it | `false` |

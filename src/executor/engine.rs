@@ -1,9 +1,10 @@
+use crate::executor::barrier::StepBarrier;
 use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::HostCoordinator;
-use crate::executor::node_runner::NodeRunner;
+use crate::executor::node_runner::{NodeRunner, SyncSlot};
 use crate::executor::result::{ExecutorEvent, NodeResult, RunSummary};
 use glidesh::config::template::TemplateData;
-use glidesh::config::types::{Plan, ResolvedHost};
+use glidesh::config::types::{ExecutionMode, Plan, ResolvedHost};
 use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
 use glidesh::secrets::Secrets;
@@ -42,8 +43,14 @@ impl Engine {
         let all_targets: Arc<Vec<ResolvedHost>> = Arc::new(self.targets.clone());
         let coordinator: Arc<HostCoordinator> = Arc::new(HostCoordinator::new());
         let sink = EventSink::new(event_tx.clone(), self.secrets.registry());
+        let barrier =
+            (plan.mode == ExecutionMode::Sync).then(|| StepBarrier::new(self.targets.len()));
 
         for host in self.targets {
+            let sync = barrier.as_ref().map(|b| SyncSlot {
+                seat: b.seat(),
+                permits: semaphore.clone(),
+            });
             let sem = semaphore.clone();
             let fp = plan.clone();
             let reg = registry.clone();
@@ -59,7 +66,11 @@ impl Engine {
             let secrets = self.secrets.clone();
 
             let handle = tokio::spawn(async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
+                // A sync host takes permits per phase instead — see `SyncSlot`.
+                let _permit = match sync {
+                    Some(_) => None,
+                    None => Some(sem.acquire().await.expect("semaphore closed")),
+                };
                 let runner = NodeRunner {
                     host,
                     plan: fp,
@@ -74,6 +85,7 @@ impl Engine {
                     coordinator: coord,
                     all_targets: targets,
                     secrets,
+                    sync,
                 };
                 runner.run().await
             });

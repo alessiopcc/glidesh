@@ -106,6 +106,15 @@ fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, Glidesh
     Ok(None)
 }
 
+/// `--mode`, when given, overrides the plan's own `mode` in either direction.
+fn apply_mode_override(plan: &mut glidesh::config::types::Plan, mode: Option<&str>) {
+    match mode {
+        Some("async") => plan.mode = ExecutionMode::Async,
+        Some("sync") => plan.mode = ExecutionMode::Sync,
+        _ => {}
+    }
+}
+
 /// The secrets file a command loads, opened for decryption.
 struct LoadedSecrets {
     secrets: Arc<glidesh::secrets::Secrets>,
@@ -300,9 +309,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         config::resolve_includes(&mut plan, plan_base_dir)?;
         merge_secret_structured(&mut plan, &secret_structured);
 
-        if args.mode == "async" {
-            plan.mode = ExecutionMode::Async;
-        }
+        apply_mode_override(&mut plan, args.mode.as_deref());
 
         let targets = if let Some(ref host) = args.host {
             let user = args.user.as_deref().unwrap_or("root").to_string();
@@ -435,9 +442,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             config::resolve_includes(&mut plan, include_base)?;
             merge_secret_structured(&mut plan, &secret_structured);
 
-            if args.mode == "async" {
-                plan.mode = ExecutionMode::Async;
-            }
+            apply_mode_override(&mut plan, args.mode.as_deref());
 
             let pn = plan.name.clone();
             let gn = group_name.clone();
@@ -1856,6 +1861,33 @@ mod tests {
             source_secret_pass(&args.secrets).unwrap().as_deref(),
             Some("from-file")
         );
+    }
+
+    #[test]
+    fn the_mode_flag_overrides_the_plan_in_both_directions() {
+        let plan =
+            |mode: &str| config::parse_plan(&format!("plan \"p\" {{ mode \"{mode}\" }}")).unwrap();
+
+        let mut p = plan("async");
+        apply_mode_override(&mut p, Some("sync"));
+        assert_eq!(p.mode, ExecutionMode::Sync);
+
+        let mut p = plan("sync");
+        apply_mode_override(&mut p, Some("async"));
+        assert_eq!(p.mode, ExecutionMode::Async);
+
+        let mut p = plan("async");
+        apply_mode_override(&mut p, None);
+        assert_eq!(
+            p.mode,
+            ExecutionMode::Async,
+            "no flag keeps the plan's mode"
+        );
+    }
+
+    #[test]
+    fn an_unknown_mode_is_rejected() {
+        assert!(cli::RunArgs::try_parse_from(["run", "-m", "asinc"]).is_err());
     }
 
     /// `console` takes the same secrets flags as `run`, and `--vars` only with a command.

@@ -270,9 +270,10 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub command: Option<String>,
 
-    /// Execution mode: sync or async
-    #[arg(short, long, default_value = "sync")]
-    pub mode: String,
+    /// Execution mode, overriding the plan's `mode`: sync (hosts move through the steps
+    /// together) or async (each host runs at its own pace). Default: the plan's, else sync
+    #[arg(short, long, value_parser = ["sync", "async"])]
+    pub mode: Option<String>,
 
     /// Max concurrent hosts (minimum 1)
     #[arg(long, default_value = "10", value_parser = parse_concurrency)]
