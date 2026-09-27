@@ -808,59 +808,112 @@ fn provider_detail(cfg: &secrets_config::SecretsConfig) -> String {
     }
 }
 
+/// What `validate` found in a plan. `problems` fail validation; `warnings` do not.
+#[derive(Default)]
+struct PlanCheck {
+    steps: usize,
+    problems: Vec<String>,
+    warnings: Vec<String>,
+}
+
 /// Load a plan the way `run` does and check everything that can be known without contacting
-/// a host. Returns the step count, or every problem found.
+/// a host.
 ///
 /// Includes and `vars-file` are resolved from the plan's directory, which is also where step
 /// names and `subscribe` references are checked. External modules are discovered next to the
 /// inventory when one is given, else in the current directory — again as `run` does.
+/// `known_vars` are the names a run could define outside the plan itself, for the
+/// literal-reference warning.
 fn validate_plan_file(
     plan_path: &std::path::Path,
     inv_dir: Option<&std::path::Path>,
-) -> Result<usize, Vec<String>> {
-    let one = |e: GlideshError| vec![e.to_string()];
-    let content = std::fs::read_to_string(plan_path).map_err(|e| vec![e.to_string()])?;
-    let mut plan = config::parse_plan(&content).map_err(one)?;
+    known_vars: &std::collections::HashSet<String>,
+) -> PlanCheck {
+    let fatal = |e: String| PlanCheck {
+        problems: vec![e],
+        ..PlanCheck::default()
+    };
+    let content = match std::fs::read_to_string(plan_path) {
+        Ok(c) => c,
+        Err(e) => return fatal(e.to_string()),
+    };
+    let mut plan = match config::parse_plan(&content) {
+        Ok(p) => p,
+        Err(e) => return fatal(e.to_string()),
+    };
     let plan_dir = plan_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    config::resolve_includes(&mut plan, plan_dir).map_err(one)?;
+    if let Err(e) = config::resolve_includes(&mut plan, plan_dir) {
+        return fatal(e.to_string());
+    }
 
-    let mut problems = Vec::new();
+    let mut check = PlanCheck {
+        steps: plan.steps().len(),
+        ..PlanCheck::default()
+    };
     let registry =
         ModuleRegistry::with_external(Some(inv_dir.unwrap_or_else(|| std::path::Path::new("."))));
     if let Err(e) = registry.validate_plan(&plan) {
-        problems.push(e.to_string());
+        check.problems.push(e.to_string());
     }
-    problems.extend(config::checks::missing_file_sources(&plan, plan_dir));
+    check
+        .problems
+        .extend(config::checks::missing_file_sources(&plan, plan_dir));
+    check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, |name| {
+        plan.vars.contains_key(name) || known_vars.contains(name) || is_builtin_var(name)
+    });
+    check
+}
 
-    if problems.is_empty() {
-        Ok(plan.steps().len())
-    } else {
-        Err(problems)
-    }
+/// A name in a namespace glidesh injects at run time, whatever the host.
+fn is_builtin_var(name: &str) -> bool {
+    ["@host.", "@os.", "@inventory.", "@item."]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || name == "@item"
 }
 
 fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     let mut valid = true;
 
+    // Names a run could define outside the plan: any host's inventory variables and the
+    // secrets file's names. Read leniently — a broken file is reported by its own check.
+    let mut known_vars = std::collections::HashSet::new();
+    if let Some(inventory) = args
+        .inventory
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|c| config::parse_inventory(&c).ok())
+    {
+        for host in inventory.resolve_targets(None) {
+            known_vars.extend(host.vars.into_keys());
+        }
+    }
+    let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
+    if let Some(secrets) = secrets_config::discover_secrets_path(None, inv_dir)
+        .and_then(|p| secret_store::read(&p).ok())
+        .and_then(|c| secrets_config::parse_secrets_file(&c).ok())
+    {
+        known_vars.extend(secrets.vars.into_keys());
+    }
+
     if let Some(ref fp_path) = args.plan {
         print!("Validating plan '{}'... ", fp_path.display());
-        let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
-        match validate_plan_file(fp_path, inv_dir) {
-            Ok(steps) => println!("OK ({} steps)", steps),
-            Err(problems) => {
-                valid = false;
-                match problems.as_slice() {
-                    [one] => println!("FAILED: {}", one),
-                    many => {
-                        println!("FAILED:");
-                        for problem in many {
-                            println!("  - {}", problem);
-                        }
-                    }
+        let check = validate_plan_file(fp_path, inv_dir, &known_vars);
+        match check.problems.as_slice() {
+            [] => println!("OK ({} steps)", check.steps),
+            [one] => println!("FAILED: {}", one),
+            many => {
+                println!("FAILED:");
+                for problem in many {
+                    println!("  - {}", problem);
                 }
             }
+        }
+        valid &= check.problems.is_empty();
+        for warning in &check.warnings {
+            println!("  warning: {}", warning);
         }
     }
 

@@ -181,6 +181,39 @@ fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, Glid
     Ok(result)
 }
 
+/// The `${name}` references in `content` whose name `is_defined` accepts, sorted and without
+/// duplicates.
+///
+/// Used to warn when a file uploaded without `template #true` would ship a reference
+/// literally. Only names glidesh defines count: a shell script's `${HOME}` is not a glidesh
+/// variable and must not be flagged. Works on bytes, since a plain upload may be binary.
+pub fn defined_references(content: &[u8], is_defined: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut rest = content;
+    while let Some(start) = rest.windows(2).position(|w| w == b"${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.iter().position(|&b| b == b'}') else {
+            break;
+        };
+        // `${for …}` already fails the whitespace test; `${endfor}` is the other directive.
+        let name = std::str::from_utf8(&after[..end]).ok().filter(|n| {
+            !n.is_empty() && *n != "endfor" && !n.contains(|c: char| c.is_whitespace() || c == '$')
+        });
+        match name {
+            Some(name) => {
+                if is_defined(name) {
+                    found.insert(name.to_string());
+                }
+                rest = &after[end + 1..];
+            }
+            // Not a reference; rescan from just past this `${` so one nested inside it is
+            // still seen.
+            None => rest = after,
+        }
+    }
+    found.into_iter().collect()
+}
+
 /// Interpolate `${var-name}` patterns in a string using the provided variables.
 pub fn interpolate(template: &str, vars: &HashMap<String, String>) -> Result<String, GlideshError> {
     let mut result = String::with_capacity(template.len());
@@ -252,6 +285,44 @@ pub fn interpolate_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refs(content: &str, defined: &[&str]) -> Vec<String> {
+        defined_references(content.as_bytes(), |n| defined.contains(&n))
+    }
+
+    #[test]
+    fn only_names_glidesh_defines_are_reported() {
+        let env = "CUDA_VISIBLE_DEVICES=${cuda-devices}\nHOME_DIR=${HOME}\n";
+        assert_eq!(refs(env, &["cuda-devices"]), ["cuda-devices"]);
+    }
+
+    #[test]
+    fn references_are_sorted_and_deduplicated() {
+        let content = "${b} ${a} ${b} ${@host.name}";
+        assert_eq!(
+            refs(content, &["a", "b", "@host.name"]),
+            ["@host.name", "a", "b"]
+        );
+    }
+
+    #[test]
+    fn template_directives_and_malformed_references_are_ignored() {
+        let content = "${for h in hosts}${h.name}${endfor} ${ spaced } ${} ${unclosed";
+        assert!(refs(content, &["hosts", "for", "endfor", "spaced"]).is_empty());
+    }
+
+    #[test]
+    fn a_reference_inside_a_malformed_one_is_still_found() {
+        assert_eq!(refs("${ ${cuda}}", &["cuda"]), ["cuda"]);
+    }
+
+    #[test]
+    fn binary_content_is_scanned_without_failing() {
+        let mut content = vec![0xff, 0xfe, 0x00];
+        content.extend_from_slice(b"${port}");
+        content.push(0xff);
+        assert_eq!(defined_references(&content, |n| n == "port"), ["port"]);
+    }
 
     #[test]
     fn test_simple_interpolation() {

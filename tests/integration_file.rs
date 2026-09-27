@@ -298,6 +298,65 @@ async fn test_file_template() {
     assert_eq!(output.stdout, "hello world!");
 }
 
+/// The field case: an upload without `template #true` shipped `${cuda-devices}` literally
+/// and nothing said so. It still ships as-is, but the result now carries a warning — on a
+/// preview too, which is where it is cheapest to catch.
+#[tokio::test]
+async fn an_untemplated_upload_warns_about_a_defined_variable() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let mut vars = HashMap::new();
+    vars.insert("cuda-devices".to_string(), "0,1".to_string());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"CUDA=${cuda-devices}\nHOME_DIR=${HOME}\n").unwrap();
+    let params = |template: bool| {
+        let mut args = HashMap::new();
+        args.insert(
+            "src".to_string(),
+            ParamValue::String(tmp.path().to_string_lossy().to_string()),
+        );
+        args.insert("template".to_string(), ParamValue::Bool(template));
+        ModuleParams {
+            resource_name: "/root/glidesh-test-literal.env".to_string(),
+            args,
+        }
+    };
+
+    for dry_run in [true, false] {
+        let ctx = container.module_context(&ssh, &os_info, &vars, dry_run);
+        let result = FileModule.apply(&ctx, &params(false)).await.unwrap();
+        assert!(
+            result.stderr.contains("contains ${cuda-devices}")
+                && result.stderr.contains("template #true"),
+            "dry_run={dry_run}: {}",
+            result.stderr
+        );
+        assert!(
+            !result.stderr.contains("${HOME}"),
+            "a shell variable is not glidesh's: {}",
+            result.stderr
+        );
+    }
+
+    let shipped = ssh
+        .exec("cat /root/glidesh-test-literal.env")
+        .await
+        .unwrap();
+    assert!(
+        shipped.stdout.contains("CUDA=${cuda-devices}"),
+        "the warning must not change what is uploaded: {}",
+        shipped.stdout
+    );
+
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    let templated = FileModule.apply(&ctx, &params(true)).await.unwrap();
+    assert!(templated.stderr.is_empty(), "{}", templated.stderr);
+}
+
 #[tokio::test]
 async fn test_file_fetch() {
     skip_unless_integration!();

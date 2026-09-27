@@ -251,6 +251,11 @@ without contacting a host:
 
 Every problem is listed, not only the first.
 
+It also **warns**, without failing, when a `file` upload without `template #true` contains
+`${name}` for a variable a run would define — a plan variable, any host's inventory variable
+when `-i` is given, a secrets-file name, or a built-in such as `${@host.name}`. See
+[Forgetting `template`](/modules/file/#forgetting-template).
+
 `validate` never connects, so it cannot tell whether a plan's settings suit a particular host —
 whether a package exists in its repositories, a service is installed, or a container would be
 recreated. Use [`--dry-run`](#previewing-a-run) for that: it checks each task against the host

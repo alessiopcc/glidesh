@@ -40,6 +40,25 @@ Template mode supports:
 
 See [Template Loops](/advanced/loops-register/#template-loops) for detailed examples.
 
+### Forgetting `template`
+
+Without `template #true`, a file is uploaded byte for byte and every `${…}` in it ships
+literally. That is right for a shell script's `${HOME}`, but rarely for a glidesh variable —
+`CUDA_VISIBLE_DEVICES=${cuda-devices}` reaching the host unexpanded is almost certainly a
+missing `template #true`.
+
+So when an untemplated upload contains `${name}` and `name` is a variable glidesh defines for
+that host, the task carries a warning — on `--dry-run` too:
+
+```
+warning: files/vllm.env contains ${cuda-devices} but is uploaded as-is, because `template` is not set; add `template #true` to substitute
+```
+
+Only names glidesh defines count, so shell and environment variables do not trigger it. The
+file is still uploaded unchanged: it is a warning, not an error, because the content may be
+intentional. [`glidesh validate`](/cli/#glidesh-validate) reports the same thing before any
+run, for directory uploads too.
+
 ## Recursive Directory Copy
 
 Upload an entire directory tree to the remote host:

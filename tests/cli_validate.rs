@@ -91,6 +91,62 @@ fn a_missing_include_fails() {
     assert!(!ok, "{out}");
 }
 
+/// The field case: a `.env` uploaded without `template #true` shipped `${cuda-devices}`
+/// literally. A warning, not a failure — the plan is valid, just probably wrong.
+#[test]
+fn a_defined_variable_in_an_untemplated_file_warns_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "vllm.env",
+        "CUDA_VISIBLE_DEVICES=${cuda-devices}\nHOME_DIR=${HOME}\n",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" {
+            vars { cuda-devices "0,1" }
+            step "Env" { file "/etc/vllm/vllm.env" src="vllm.env" }
+        }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(ok, "a warning must not fail validation:\n{out}");
+    assert!(
+        out.contains("warning: step 'Env': vllm.env contains ${cuda-devices}"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("${HOME}"),
+        "a shell variable is not glidesh's:\n{out}"
+    );
+}
+
+/// An inventory variable counts too, when `-i` is given.
+#[test]
+fn an_inventory_variable_counts_as_defined() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app.conf", "db=${db-host}\n");
+    write(
+        dir.path(),
+        "inventory.kdl",
+        "host \"web\" \"10.0.0.1\" {\n    vars {\n        db-host \"10.0.0.2\"\n    }\n}\n",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" { file "/etc/app.conf" src="app.conf" } }"#,
+    );
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["validate", "-p", "plan.kdl", "-i", "inventory.kdl"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("contains ${db-host}"), "{text}");
+}
+
 #[test]
 fn a_missing_file_source_fails_and_every_problem_is_listed() {
     let dir = tempfile::tempdir().unwrap();
