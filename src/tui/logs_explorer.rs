@@ -381,18 +381,8 @@ fn render_run_list(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState)
         .map(|(vi, run)| {
             let i = offset + vi;
             let snippet = if let Some(ref summary) = run.summary {
-                let node_count = summary.nodes.len();
-                let ok = summary.nodes.values().filter(|n| n.status == "ok").count();
-                let failed = summary
-                    .nodes
-                    .values()
-                    .filter(|n| n.status == "failed")
-                    .count();
                 let mode = if summary.dry_run { " [dry run]" } else { "" };
-                format!(
-                    "  {} nodes: {} ok, {} failed{}",
-                    node_count, ok, failed, mode
-                )
+                format!("  {}{}", summary.node_counts(), mode)
             } else {
                 "  (no summary)".to_string()
             };
@@ -537,14 +527,17 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
                 )
             };
 
+            // The same marks as the live TUI uses for these statuses.
             let icon = match status.as_str() {
                 "ok" => "\u{2713}",
                 "failed" => "\u{2717}",
+                "aborted" => "\u{2013}",
                 _ => "\u{00b7}",
             };
             let icon_color = match status.as_str() {
                 "ok" => Color::Green,
                 "failed" => Color::Red,
+                "aborted" => Color::Magenta,
                 _ => Color::DarkGray,
             };
 
@@ -564,6 +557,7 @@ fn render_run_detail(frame: &mut Frame, area: Rect, state: &mut LogsExplorerStat
                 let status_color = match status.as_str() {
                     "ok" => Color::Green,
                     "failed" => Color::Red,
+                    "aborted" => Color::Magenta,
                     _ => Color::default(),
                 };
                 Row::new(vec![

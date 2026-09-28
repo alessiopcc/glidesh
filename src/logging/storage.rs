@@ -32,6 +32,26 @@ pub struct NodeSummary {
     pub error: Option<String>,
 }
 
+impl RunSummaryFile {
+    /// `"N nodes: X ok, Y failed"`, plus the hosts a stopped rollout never reached. Shared by
+    /// `glidesh logs` and the logs explorer's run list.
+    pub fn node_counts(&self) -> String {
+        let count = |status: &str| self.nodes.values().filter(|n| n.status == status).count();
+        let aborted = count("aborted");
+        format!(
+            "{} nodes: {} ok, {} failed{}",
+            self.nodes.len(),
+            count("ok"),
+            count("failed"),
+            if aborted > 0 {
+                format!(", {aborted} aborted")
+            } else {
+                String::new()
+            }
+        )
+    }
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
@@ -97,5 +117,41 @@ mod tests {
         let summary: RunSummaryFile = serde_json::from_str(json).unwrap();
         assert_eq!(summary.run_id, "abc123");
         assert!(!summary.dry_run);
+    }
+
+    fn with_statuses(statuses: &[&str]) -> RunSummaryFile {
+        let nodes = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                (
+                    format!("h{i}"),
+                    serde_json::from_str(&format!(
+                        r#"{{"status":"{s}","changed":0,"steps_completed":0}}"#
+                    ))
+                    .unwrap(),
+                )
+            })
+            .collect();
+        RunSummaryFile {
+            run_id: "r".into(),
+            plan: "p".into(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            dry_run: false,
+            nodes,
+        }
+    }
+
+    #[test]
+    fn node_counts_mention_aborted_hosts_only_when_there_are_some() {
+        assert_eq!(
+            with_statuses(&["ok", "ok", "failed"]).node_counts(),
+            "3 nodes: 2 ok, 1 failed"
+        );
+        assert_eq!(
+            with_statuses(&["ok", "failed", "aborted", "aborted"]).node_counts(),
+            "4 nodes: 1 ok, 1 failed, 2 aborted"
+        );
     }
 }

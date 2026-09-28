@@ -821,17 +821,7 @@ fn cmd_logs(args: cli::LogsArgs) -> Result<(), GlideshError> {
             .unwrap_or_default();
 
         if let Ok(summary) = logging::storage::read_summary(run_dir) {
-            let node_count = summary.nodes.len();
-            let ok = summary.nodes.values().filter(|n| n.status == "ok").count();
-            let failed = summary
-                .nodes
-                .values()
-                .filter(|n| n.status == "failed")
-                .count();
-            println!(
-                "  {}  ({} nodes: {} ok, {} failed)",
-                name, node_count, ok, failed
-            );
+            println!("  {}  ({})", name, summary.node_counts());
         } else {
             println!("  {}  (no summary)", name);
         }
