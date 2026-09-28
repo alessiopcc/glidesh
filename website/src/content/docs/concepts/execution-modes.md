@@ -125,6 +125,10 @@ Within a batch, the mode still applies: in sync mode the batch's hosts move thro
 together; in async mode each runs at its own pace. A [`host`](/modules/host/) task runs once
 for the whole rollout, in the first batch that reaches it; later batches reuse its result.
 
+A [`--dry-run`](/cli/#previewing-a-run) of a rolling plan runs in batches too, and stops the
+same way. Nothing is changed in a preview, so only a failure in computing it — a check that
+errors, or an undefined variable — can count against `max-fail`.
+
 Try a plan on a single host before rolling it out, without editing it, by overriding both
 settings on the command line:
 

@@ -247,7 +247,8 @@ glidesh validate -p plan.kdl -i inventory.kdl
 A plan is loaded exactly as `run` loads it, then checked for everything that can be known
 without contacting a host:
 
-- **Syntax**, including [`when=`](/advanced/conditionals/) conditions and unknown step attributes.
+- **Syntax**, including [`when=`](/advanced/conditionals/) conditions, unknown step attributes,
+  and the `mode`, [`serial` and `max-fail`](/concepts/execution-modes/#rolling-deploys) values.
 - **Includes and `vars-file`** are resolved, so a missing or broken included plan is reported.
 - **Step names** are unique across includes, and every `subscribe` names an earlier step.
 - **Modules exist.** A misspelled module name fails here. External modules are looked up next

@@ -38,7 +38,9 @@ step "Write the same token everywhere" {
 
 - **Runs exactly once.** The first target host to reach the task triggers
   execution; every other host blocks briefly and then reads the cached
-  result. This is true even if the plan `mode` is `async`.
+  result. This is true even if the plan `mode` is `async`, and across the
+  batches of a [rolling run](/concepts/execution-modes/#rolling-deploys):
+  later batches reuse the first one's result.
 - **Register is broadcast.** If `register="var"` is set, every host's local
   `vars` map receives the same trimmed stdout.
 - **Failure fails every host.** If the single execution returns a non-zero
