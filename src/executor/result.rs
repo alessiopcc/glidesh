@@ -15,8 +15,7 @@ pub struct RunSummary {
     pub total_changed: usize,
     /// Tasks not run because a `when=` was false — a skipped step counts each of its tasks.
     pub total_skipped: usize,
-    /// Hosts never started because `max-fail` stopped a rolling run. Included in
-    /// `total_hosts`.
+    /// Hosts a stopped rolling run never started. Included in `total_hosts`.
     pub aborted: usize,
     /// Nothing was applied: `total_changed` counts what *would* change.
     pub dry_run: bool,
@@ -123,7 +122,8 @@ pub enum ExecutorEvent {
         total: usize,
         hosts: Vec<String>,
     },
-    /// `max-fail` stopped a rolling run; these hosts were never started.
+    /// A rolling run stopped — see [`crate::executor::rollout::stop_reason`] for when — and
+    /// these hosts were never started.
     HostsAborted {
         hosts: Vec<String>,
         reason: String,

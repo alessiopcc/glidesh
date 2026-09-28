@@ -54,7 +54,7 @@ pub enum NodeStatus {
     Running,
     Done,
     Failed,
-    /// Never started: a rolling run was stopped by `max-fail` before its batch.
+    /// Never started: a rolling run was stopped before its batch.
     Aborted,
 }
 

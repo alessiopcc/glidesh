@@ -26,7 +26,7 @@ A host's status is one of:
 | `RUNNING` | Working through the plan |
 | `OK` | Finished without a failure |
 | `FAILED` | Stopped on a failure |
-| `ABORTED` | Never started: a rolling run was stopped by `max-fail` before its batch |
+| `ABORTED` | Never started: a [rolling run](/concepts/execution-modes/#rolling-deploys) was stopped before its batch |
 
 ```bash
 glidesh run -i inventory.kdl -p deploy.kdl
