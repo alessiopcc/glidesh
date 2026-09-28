@@ -152,9 +152,12 @@ file that is already in place. Instead of a diff, a one-line note says why none 
 - **Binary content** — anything that is not UTF-8 text, or contains a NUL byte.
 - **Files over 256 KiB**, on either side. The size is checked before downloading.
 - **Content holding a [secret](/concepts/secrets/#redaction)**: `diff hidden (content contains a secret)`.
-  Redaction would not be enough here — the old side can hold a rotated value that is no
-  longer registered, and a diff's `+`/`-` prefixes split a multi-line secret so it no longer
-  matches.
+  Redaction would not be enough here — the old side can hold the value a rotated secret
+  replaced, and a diff's `+`/`-` prefixes split a multi-line secret so it no longer matches.
+- **A file other users cannot read**, on the host or under the plan's `mode` (`600`, `640`):
+  `diff hidden (not readable by other users)`. Matching secrets cannot catch a value the plan
+  no longer uses — it is not registered, yet the host's copy still holds it — so a file kept
+  private is treated as sensitive whatever it contains.
 
 A change to `owner`, `group`, or `mode` alone has no diff: the pending line already names
 each attribute, as `Fix attrs on /etc/app.conf: mode: 644 -> 600`. Fetch mode has none either.

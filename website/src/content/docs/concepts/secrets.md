@@ -211,7 +211,9 @@ Under [`--diff`](/cli/#previewing-a-run), a [`file`](/modules/file/#--diff) whos
 a secret shows no diff at all, only `diff hidden (content contains a secret)`. Redacting it would
 not be enough: the old side can hold a value rotated out of the vault, which is no longer
 registered, and the `+`/`-` prefixes split a multi-line secret such as a key so it no longer
-matches. [`container`](/modules/container/#--diff) names changed parameters, never their values.
+matches. A secret the plan no longer uses is not registered at all, so a `file` that other users
+cannot read — on the host or under the plan's `mode` — shows no diff either.
+[`container`](/modules/container/#--diff) names changed parameters, never their values.
 
 ## What external plugins see
 

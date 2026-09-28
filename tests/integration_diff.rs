@@ -157,6 +157,43 @@ async fn file_diff_is_hidden_when_the_content_holds_a_secret() {
     );
 }
 
+/// A secret the plan no longer uses is not registered, but the host's copy still holds it,
+/// so a file kept from other users is hidden whatever it holds.
+#[tokio::test]
+async fn file_diff_is_hidden_for_a_file_other_users_cannot_read() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("db.conf"), "password=now-in-plain-text\n").unwrap();
+    put(&ssh, "/root/diff-private.conf", "password=retired-s3cret\n").await;
+    ssh.exec("chmod 600 /root/diff-private.conf").await.unwrap();
+
+    let vars = HashMap::new();
+    let mut ctx = container.module_context(&ssh, &os_info, &vars, true);
+    ctx.plan_base_dir = dir.path();
+    ctx.diff = true;
+
+    let on_host = params("/root/diff-private.conf", &[("src", s("db.conf"))]);
+    let diff = pending_diff(FileModule.check(&ctx, &on_host).await.unwrap()).unwrap();
+    assert_eq!(
+        diff,
+        "/root/diff-private.conf: diff hidden (not readable by other users)"
+    );
+
+    let by_plan = params(
+        "/root/diff-new-private.conf",
+        &[("src", s("db.conf")), ("mode", s("0640"))],
+    );
+    let diff = pending_diff(FileModule.check(&ctx, &by_plan).await.unwrap()).unwrap();
+    assert_eq!(
+        diff,
+        "/root/diff-new-private.conf: diff hidden (not readable by other users)"
+    );
+}
+
 async fn install_fake_docker(ssh: &SshSession) {
     let out = ssh
         .exec(&format!(
@@ -212,9 +249,9 @@ async fn container_diff_names_the_parameters_that_drifted() {
         .await
         .unwrap();
     let diff = pending_diff(ContainerModule.check(&ctx, &wanted).await.unwrap()).unwrap();
-    assert!(
-        diff.starts_with("created without per-parameter hashes"),
-        "{diff}"
+    assert_eq!(
+        diff,
+        "created without per-parameter hashes (by an older glidesh or by hand); recreating it records them"
     );
 }
 

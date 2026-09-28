@@ -236,7 +236,8 @@ impl Module for FileModule {
                     return Ok(ModuleStatus::pending(plan));
                 }
                 let diff =
-                    Self::diff_against_remote(ctx, dest, remote_hash.is_some(), &content).await?;
+                    Self::diff_against_remote(ctx, params, dest, remote_hash.is_some(), &content)
+                        .await?;
                 Ok(ModuleStatus::pending_with_diff(plan, diff))
             }
         }
@@ -480,6 +481,7 @@ impl FileModule {
                         diffs.push(
                             Self::diff_against_remote(
                                 ctx,
+                                params,
                                 &remote_path,
                                 remote_hash.is_some(),
                                 &content,
@@ -526,10 +528,17 @@ impl FileModule {
     /// Only called once the hashes differ, so the download is spent on a real change.
     async fn diff_against_remote(
         ctx: &ModuleContext<'_>,
+        params: &ModuleParams,
         dest: &str,
         exists: bool,
         content: &[u8],
     ) -> Result<String, GlideshError> {
+        let private = params
+            .args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .and_then(file_diff::others_can_read)
+            == Some(false);
         let remote = if exists {
             file_diff::fetch_remote(ctx, dest).await?
         } else {
@@ -539,6 +548,7 @@ impl FileModule {
             dest,
             &remote,
             content,
+            private,
             ctx.secrets.as_deref(),
         ))
     }
