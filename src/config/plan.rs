@@ -574,7 +574,12 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
                 ),
             });
         }
-        if !matches!(value, ParamValue::Bool(_) | ParamValue::String(_)) {
+        let valid = match value {
+            ParamValue::Bool(_) => true,
+            ParamValue::String(cmd) => !cmd.trim().is_empty(),
+            _ => false,
+        };
+        if !valid {
             return Err(GlideshError::ConfigParse {
                 message: format!(
                     "shell '{resource}': changed-when must be #false, #true, or a command"
@@ -1563,8 +1568,15 @@ plan "test" {
 
     #[test]
     fn changed_when_must_be_a_bool_or_a_command() {
-        let err = plan_err(r#"step "s" { shell "true" changed-when=1 }"#);
-        assert!(err.contains("must be #false, #true, or a command"), "{err}");
+        for bad in ["1", r#""""#, r#""   ""#] {
+            let err = plan_err(&format!(
+                r#"step "s" {{ shell "true" changed-when={bad} }}"#
+            ));
+            assert!(
+                err.contains("must be #false, #true, or a command"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]
