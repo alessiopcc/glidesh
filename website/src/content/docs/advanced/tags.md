@@ -60,7 +60,7 @@ hold:
 - It is reported as `skipped`, with the reason — `skipped (--skip-tags slow)` or
   `skipped (not in --tags config)` — and counts toward the run's skipped total.
 - It does not trigger its [subscribers](/advanced/subscribe/). A subscriber that is itself
-  selected still runs, but is not forced to reapply.
+  selected still runs, but is not triggered.
 - Its `register` variables stay **undefined**. A later step that uses one fails, unless its
   `when=` checks `defined ${var}` first. Tag the step that registers the variable `always`,
   or give both steps the same tag.

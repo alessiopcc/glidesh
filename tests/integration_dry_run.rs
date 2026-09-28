@@ -47,10 +47,10 @@ fn run(dir: &Path, extra: &[&str]) -> String {
     String::from_utf8(out).unwrap()
 }
 
-/// A preview must report the same total as the run it previews. A handler forced by
-/// `subscribe` is the case that catches a preview counting only what `check` found
-/// pending: its own check is satisfied, so it counts solely because the step it subscribes
-/// to changed — exactly as it would on a real run.
+/// A preview must report the same total as the run it previews. A handler triggered by
+/// `subscribe` is the case that catches a preview missing work: its own `check=` is
+/// satisfied, so it counts solely because the step it subscribes to changed — exactly as it
+/// would on a real run.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_preview_reports_the_same_total_as_the_real_run() {
     skip_unless_integration!();
@@ -75,7 +75,7 @@ async fn a_preview_reports_the_same_total_as_the_real_run() {
     let preview = run(dir.path(), &["--dry-run"]);
     assert!(
         preview.contains("2 would change"),
-        "a preview must count the forced handler alongside the file:\n{preview}"
+        "a preview must count the triggered handler alongside the file:\n{preview}"
     );
     assert!(
         !exists("/root/dry-run-app.conf").await,

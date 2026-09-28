@@ -215,6 +215,7 @@ impl TestContainer {
             plan_base_dir: std::path::Path::new("."),
             run_as: None,
             secrets: None,
+            trigger: Default::default(),
         }
     }
 
@@ -238,6 +239,7 @@ impl TestContainer {
             plan_base_dir: std::path::Path::new("."),
             run_as: Some(run_as),
             secrets: None,
+            trigger: Default::default(),
         }
     }
 }

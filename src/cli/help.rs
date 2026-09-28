@@ -103,7 +103,8 @@ PLAN SYNTAX
     tags=\"web,deploy\"           select the step with --tags / --skip-tags (see TAGS)
     loop=\"${var}\"               repeat for each line of var (or each row of a list
                                 variable); the value is ${@item} (or ${@item.<field>})
-    subscribe=\"<step>, <step>\"  run even if already in place when a named earlier step changed
+    subscribe=\"<step>, <step>\"  when a named earlier step changed something, redo this step's
+                                work (see SUBSCRIBE)
     run-as=\"root\" run-as-method=\"sudo|doas|su\"   escalate every task in the step
   Task: <module> \"<resource>\" [param=value ...] [{ param value ... }]
     Parameters go as attributes (state=\"absent\") or child nodes (state \"absent\").
@@ -135,6 +136,16 @@ TAGS
   A step left out is reported as skipped, does not trigger its subscribers, and leaves its
   register= variables undefined: tag a step that registers what others need `always`.
   A tag no step carries is an error, so a typo cannot silently run nothing.
+
+SUBSCRIBE
+  A step with subscribe= is triggered when a step it names changed something. Triggered:
+    systemd state=restarted   restarts; untriggered it only keeps the unit running (a
+                              handler). Without subscribe= it restarts on every run.
+    systemd state=started     restarts, so a changed config is loaded
+    container running         recreated; run-once runs again despite check=
+    shell                     runs despite check= (check=\"true\" = run only when triggered)
+    other modules             nothing to redo: reported ok
+  A triggered step that did something counts as changed and triggers its own subscribers.
 
 MODULES (each checks the host first and changes only what differs)
   shell \"<command>\"           cmd=<string|list>  check=\"<cmd>\" (exit 0 = already done, skip)

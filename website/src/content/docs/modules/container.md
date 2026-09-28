@@ -203,6 +203,7 @@ Every parameter that reaches the runtime is folded into a hash stored on the con
 - **Hash differs** → stop, remove, and recreate with the new spec.
 - **Hash matches, container stopped or paused** → `start` / `unpause` it, keeping the existing container.
 - **Hash matches, container running** → nothing to do (then the readiness gate, if any, is evaluated).
+- **In a step [triggered by `subscribe`](/advanced/subscribe/#what-a-triggered-task-does)** → recreated whatever the hash says, so it picks up data or configuration an earlier step changed. A triggered `run-once` job runs again even when its `check` passes.
 
 The hash is computed from the generated `run` arguments rather than a hand-maintained list, so any parameter you set affects drift detection.
 

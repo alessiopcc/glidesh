@@ -1,5 +1,5 @@
 use crate::error::GlideshError;
-use crate::modules::context::ModuleContext;
+use crate::modules::context::{ModuleContext, Trigger};
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -82,6 +82,31 @@ impl SystemdModule {
             });
         }
         Ok(())
+    }
+
+    /// The `systemctl` verb that brings a unit to `desired`, if any.
+    ///
+    /// `restarted` restarts on every run in a step that subscribes to nothing. In a step that
+    /// subscribes, it is a handler: it restarts only when triggered, and otherwise just keeps
+    /// the unit running. A triggered `started` restarts too, so a changed config is loaded.
+    fn state_action(
+        desired: &str,
+        active: bool,
+        unit_file_changed: bool,
+        trigger: Trigger,
+    ) -> Option<&'static str> {
+        let restart = match desired {
+            "stopped" => return active.then_some("stop"),
+            "restarted" => trigger != Trigger::Idle,
+            _ => (active && unit_file_changed) || trigger == Trigger::Fired,
+        };
+        if restart {
+            Some("restart")
+        } else if !active {
+            Some("start")
+        } else {
+            None
+        }
     }
 
     fn validate_desired_state(state: &str) -> Result<(), GlideshError> {
@@ -313,12 +338,12 @@ impl Module for SystemdModule {
             .await?;
         let active = is_active.stdout.trim() == "active";
 
-        match desired_state {
-            "started" if !active => needs_change.push("start".to_string()),
-            "started" if active && unit_file_changed => needs_change.push("restart".to_string()),
-            "stopped" if active => needs_change.push("stop".to_string()),
-            "restarted" => needs_change.push("restart".to_string()),
-            _ => {}
+        match Self::state_action(desired_state, active, unit_file_changed, ctx.trigger) {
+            Some("restart") if ctx.trigger == Trigger::Fired => {
+                needs_change.push("restart (triggered)".to_string())
+            }
+            Some(action) => needs_change.push(action.to_string()),
+            None => {}
         }
 
         if let Some(want_enabled) = desired_enabled {
@@ -397,20 +422,8 @@ impl Module for SystemdModule {
             .await?;
         let active = is_active.stdout.trim() == "active";
 
-        match desired_state {
-            "started" if file_changed => {
-                commands.push(format!("systemctl restart {}", unit));
-            }
-            "started" if !active => {
-                commands.push(format!("systemctl start {}", unit));
-            }
-            "stopped" if active => {
-                commands.push(format!("systemctl stop {}", unit));
-            }
-            "restarted" => {
-                commands.push(format!("systemctl restart {}", unit));
-            }
-            _ => {}
+        if let Some(action) = Self::state_action(desired_state, active, file_changed, ctx.trigger) {
+            commands.push(format!("systemctl {} {}", action, unit));
         }
 
         if commands.is_empty() {
@@ -449,6 +462,56 @@ mod tests {
     use super::*;
     use crate::config::types::ParamValue;
     use std::collections::HashMap;
+
+    fn action(desired: &str, active: bool, file_changed: bool, trigger: Trigger) -> Option<&str> {
+        SystemdModule::state_action(desired, active, file_changed, trigger)
+    }
+
+    #[test]
+    fn restarted_restarts_every_run_outside_a_subscribing_step() {
+        assert_eq!(
+            action("restarted", true, false, Trigger::None),
+            Some("restart")
+        );
+    }
+
+    /// A handler: the restart waits for the step it subscribes to to change.
+    #[test]
+    fn restarted_in_a_subscribing_step_restarts_only_when_triggered() {
+        assert_eq!(action("restarted", true, false, Trigger::Idle), None);
+        assert_eq!(
+            action("restarted", false, false, Trigger::Idle),
+            Some("start")
+        );
+        assert_eq!(
+            action("restarted", true, false, Trigger::Fired),
+            Some("restart")
+        );
+    }
+
+    #[test]
+    fn started_restarts_when_triggered_or_its_unit_file_changed() {
+        assert_eq!(action("started", true, false, Trigger::None), None);
+        assert_eq!(action("started", true, false, Trigger::Idle), None);
+        assert_eq!(
+            action("started", true, false, Trigger::Fired),
+            Some("restart")
+        );
+        assert_eq!(
+            action("started", true, true, Trigger::None),
+            Some("restart")
+        );
+        assert_eq!(
+            action("started", false, false, Trigger::None),
+            Some("start")
+        );
+    }
+
+    #[test]
+    fn stopped_ignores_the_trigger() {
+        assert_eq!(action("stopped", true, false, Trigger::Fired), Some("stop"));
+        assert_eq!(action("stopped", false, false, Trigger::Fired), None);
+    }
 
     #[test]
     fn test_unit_name_no_suffix() {

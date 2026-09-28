@@ -470,6 +470,7 @@ mod tests {
             "TAGS",
             "tags=",
             "--skip-tags",
+            "SUBSCRIBE",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

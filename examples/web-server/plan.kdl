@@ -27,6 +27,10 @@ plan "web-server" {
         }
     }
 
+    step "Restart nginx" subscribe="Deploy nginx config" tags="config" {
+        systemd "nginx" state="restarted"
+    }
+
     step "Health check" tags="config,service,check" {
         shell "curl -sf http://localhost/" {
             retries 5

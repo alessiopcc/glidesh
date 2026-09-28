@@ -1,6 +1,6 @@
 use crate::config::types::ParamValue;
 use crate::error::GlideshError;
-use crate::modules::context::ModuleContext;
+use crate::modules::context::{ModuleContext, Trigger};
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use crate::ssh::connection::CommandOutput;
 use async_trait::async_trait;
@@ -217,6 +217,15 @@ impl Module for ShellModule {
         let command = Self::resolve_command(params)?;
 
         let gate = params.args.get("check").and_then(|v| v.as_str());
+
+        // `check=` says whether the work is already done; a triggered subscriber is asked to
+        // do it again, so the gate is not consulted.
+        if ctx.trigger == Trigger::Fired {
+            return Ok(ModuleStatus::pending(format!(
+                "Run: {} (triggered)",
+                command
+            )));
+        }
 
         match gate {
             Some(check_cmd) => {

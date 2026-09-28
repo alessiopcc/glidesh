@@ -173,10 +173,9 @@ Four details worth knowing:
 - A `shell` task with no `check=` guard has no state to compare against, so it always
   reports `would change`. Give it a guard and it reports `ok` whenever the guard
   succeeds.
-- A step using [`subscribe`](/advanced/subscribe/) whose target changed is reported as
-  `would change` whatever its own check says, and shows no reason line, because the reason
-  it runs is the step it subscribes to rather than its own state. A real run would run it,
-  so the preview counts it.
+- A step using [`subscribe`](/advanced/subscribe/) whose target changed is reported as it
+  would run: a restart, recreate or command it would redo is `would change`, with a reason
+  ending in `(triggered)`; a task with nothing to redo is `ok`.
 
 ### SSH Key Resolution
 

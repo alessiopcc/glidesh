@@ -1,5 +1,5 @@
 use crate::error::GlideshError;
-use crate::modules::context::ModuleContext;
+use crate::modules::context::{ModuleContext, Trigger};
 use crate::modules::external::protocol::{
     CheckResponse, ModuleRequest, PluginMessage, ShutdownRequest, SshRequest, SshResponse,
 };
@@ -137,6 +137,7 @@ impl ExternalModule {
             vars: visible.as_ref(),
             dry_run: ctx.dry_run,
             diff: ctx.diff,
+            triggered: ctx.trigger == Trigger::Fired,
         };
 
         send_line(writer, &request, &self.info.name).await?;
@@ -523,6 +524,7 @@ mod tests {
             vars: &std::collections::HashMap::new(),
             dry_run: false,
             diff: true,
+            triggered: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"method\":\"check\""));
@@ -553,9 +555,17 @@ mod tests {
             vars: &std::collections::HashMap::new(),
             dry_run: false,
             diff: false,
+            triggered: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("diff"), "got: {json}");
+        assert!(!json.contains("triggered"), "got: {json}");
+        let json = serde_json::to_string(&ModuleRequest {
+            triggered: true,
+            ..req
+        })
+        .unwrap();
+        assert!(json.contains(r#""triggered":true"#), "got: {json}");
     }
 
     /// A registry populated the way a real run populates it: by decrypting a token.

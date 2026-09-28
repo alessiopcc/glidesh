@@ -179,7 +179,7 @@ A step or task whose condition does not hold is reported as `skipped`. See [Cond
 
 ## Subscribe
 
-Steps can react to changes made by earlier steps using the `subscribe` attribute. When the referenced step applies changes, the subscribing step forces a re-apply:
+Steps can react to changes made by earlier steps using the `subscribe` attribute. When a referenced step changes something, the subscribing step redoes its work — here, a restart that otherwise does not happen:
 
 ```kdl
 plan "web-server" {

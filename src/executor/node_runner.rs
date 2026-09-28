@@ -7,7 +7,7 @@ use glidesh::config::tags::TagFilter;
 use glidesh::config::template::{TemplateData, interpolate_args};
 use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
 use glidesh::error::GlideshError;
-use glidesh::modules::context::ModuleContext;
+use glidesh::modules::context::{ModuleContext, Trigger};
 use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
@@ -145,23 +145,14 @@ pub struct SyncSlot {
 ///
 /// In a dry run the answer comes from `check` (did it report work outstanding?), because
 /// `apply` deliberately reports `changed: false` when it is told not to touch the host.
-///
-/// `force_apply` counts either way. A handler whose step is subscribed to a changed step
-/// runs even when its own module is satisfied — that is what a handler is for — so a real
-/// run counts it, and a preview of that same state has to count it too or it reports fewer
-/// changes than the run it is previewing.
-fn resolve_changed(
-    dry_run: bool,
-    was_pending: bool,
-    applied_changed: bool,
-    force_apply: bool,
-) -> bool {
-    let would_act = if dry_run {
+/// A triggered subscriber is no exception: its module's `check` reports the restart or
+/// rerun it would do as pending, so a preview and the run it previews count it alike.
+fn resolve_changed(dry_run: bool, was_pending: bool, applied_changed: bool) -> bool {
+    if dry_run {
         was_pending
     } else {
         applied_changed
-    };
-    would_act || force_apply
+    }
 }
 
 /// `changed-when=#false` declares a task never changes anything. It is read here as well as
@@ -454,10 +445,17 @@ impl NodeRunner {
                 total_steps,
             });
 
-            let force_apply = step
+            let trigger = if step.subscribe.is_empty() {
+                Trigger::None
+            } else if step
                 .subscribe
                 .iter()
-                .any(|s| step_changed.get(s).copied().unwrap_or(false));
+                .any(|s| step_changed.get(s).copied().unwrap_or(false))
+            {
+                Trigger::Fired
+            } else {
+                Trigger::Idle
+            };
 
             // Before the loop is resolved, so a step can guard a loop over a variable that
             // may not exist.
@@ -509,7 +507,7 @@ impl NodeRunner {
                             &session,
                             &os_info,
                             &mut progress,
-                            force_apply,
+                            trigger,
                         )
                         .await
                     {
@@ -545,7 +543,7 @@ impl NodeRunner {
                                 &session,
                                 &os_info,
                                 &mut progress,
-                                force_apply,
+                                trigger,
                             )
                             .await;
                         for key in &injected {
@@ -663,7 +661,7 @@ impl NodeRunner {
         session: &SshSession,
         os_info: &OsInfo,
         progress: &mut Progress,
-        force_apply: bool,
+        trigger: Trigger,
     ) -> Result<bool, (String, String)> {
         let mut any_changed = false;
 
@@ -735,6 +733,7 @@ impl NodeRunner {
                 plan_base_dir: step.base_dir(&self.plan_base_dir),
                 run_as,
                 secrets: Some(self.secrets.registry()),
+                trigger,
             };
 
             let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
@@ -757,7 +756,7 @@ impl NodeRunner {
             };
 
             let should_apply = match &status {
-                ModuleStatus::Satisfied => force_apply,
+                ModuleStatus::Satisfied => false,
                 ModuleStatus::Pending { .. } => true,
                 ModuleStatus::Unknown { .. } => false,
             };
@@ -770,12 +769,9 @@ impl NodeRunner {
             if should_apply {
                 match module.apply(&ctx, &params).await {
                     Ok(result) => {
-                        let changed = resolve_changed(
-                            self.dry_run,
-                            pending_plan.is_some(),
-                            result.changed,
-                            force_apply,
-                        ) && !never_changes(task);
+                        let changed =
+                            resolve_changed(self.dry_run, pending_plan.is_some(), result.changed)
+                                && !never_changes(task);
                         if changed {
                             progress.changed += 1;
                             any_changed = true;
@@ -968,26 +964,14 @@ mod tests {
     #[test]
     fn dry_run_counts_pending_not_the_apply_result() {
         let applied_changed = false;
-        assert!(resolve_changed(true, true, applied_changed, false));
-        assert!(!resolve_changed(true, false, applied_changed, false));
-    }
-
-    /// A preview must reach the same total as the run it previews, so a forced handler
-    /// counts in both. Only the unforced satisfied task is uncounted.
-    #[test]
-    fn a_forced_handler_counts_in_a_preview_as_it_does_for_real() {
-        let forced = |dry_run| resolve_changed(dry_run, false, false, true);
-        assert!(forced(true));
-        assert!(forced(false));
-
-        assert!(!resolve_changed(true, false, false, false));
+        assert!(resolve_changed(true, true, applied_changed));
+        assert!(!resolve_changed(true, false, applied_changed));
     }
 
     #[test]
-    fn real_run_still_counts_apply_result_and_force() {
-        assert!(resolve_changed(false, true, true, false));
-        assert!(!resolve_changed(false, true, false, false));
-        assert!(resolve_changed(false, false, false, true));
+    fn real_run_counts_the_apply_result() {
+        assert!(resolve_changed(false, true, true));
+        assert!(!resolve_changed(false, true, false));
     }
 
     fn shell_task(changed_when: Option<ParamValue>) -> TaskDef {
