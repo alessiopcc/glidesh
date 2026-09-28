@@ -212,6 +212,22 @@ Removal is verified: if the existing container cannot be removed, the task fails
 
 Readiness parameters (`wait`, `wait-timeout`, `wait-interval`, `ready-cmd`) are glidesh-side and deliberately excluded from the hash — changing a probe must not recreate a healthy container.
 
+## `--diff`
+
+With [`--diff`](/cli/#previewing-a-run), a container about to be recreated because its
+configuration changed says which parameters differ:
+
+```
+Recreate container api (configuration changed)
+changed: image, ports; added: environment; removed: volumes
+```
+
+Names only, never values: an `environment` entry may be a secret. To tell, glidesh records a
+short hash per parameter in a second label, `sh.glide.field-hashes`, next to
+`sh.glide.param-hash`. A container created before that label existed reports
+`created without per-parameter hashes` instead; the next recreate records them. Adding the
+label changed nothing in `sh.glide.param-hash`, so upgrading glidesh recreates no container.
+
 ## Custom Networks
 
 When `network` is set to a name other than `host`, `bridge`, `none`, `default`, or a `container:`/`ns:` reference, the module automatically creates the network if it doesn't already exist. This lets containers on the same custom network communicate by container name.

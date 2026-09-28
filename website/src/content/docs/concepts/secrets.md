@@ -207,6 +207,12 @@ so glidesh warns instead of masking: once when `secret set` stores such a value,
 run decrypts it. Short secrets are still withheld from external plugins. If a secret is short
 enough to trip this, it is short enough to guess — rotate it rather than relying on redaction.
 
+Under [`--diff`](/cli/#previewing-a-run), a [`file`](/modules/file/#--diff) whose content holds
+a secret shows no diff at all, only `diff hidden (content contains a secret)`. Redacting it would
+not be enough: the old side can hold a value rotated out of the vault, which is no longer
+registered, and the `+`/`-` prefixes split a multi-line secret such as a key so it no longer
+matches. [`container`](/modules/container/#--diff) names changed parameters, never their values.
+
 ## What external plugins see
 
 An [external module](/advanced/writing-plugins/) is a third-party executable, so it sits outside
