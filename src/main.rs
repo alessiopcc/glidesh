@@ -969,47 +969,52 @@ fn is_builtin_var(name: &str) -> bool {
         || name == "@item"
 }
 
+/// Print a plan's result on the line `validate` opened for it; true when it passed.
+fn report_plan(check: &PlanCheck) -> bool {
+    match check.problems.as_slice() {
+        [] => println!("OK ({} steps)", check.steps),
+        [one] => println!("FAILED: {}", one),
+        many => {
+            println!("FAILED:");
+            for problem in many {
+                println!("  - {}", problem);
+            }
+        }
+    }
+    for warning in &check.warnings {
+        println!("  warning: {}", warning);
+    }
+    check.problems.is_empty()
+}
+
 fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     let mut valid = true;
 
-    // Names a run could define outside the plan: any host's inventory variables and the
-    // secrets file's names. Read leniently — a broken file is reported by its own check.
-    let mut known_vars = std::collections::HashSet::new();
-    if let Some(inventory) = args
+    // Read leniently here — a broken file is reported by its own check below.
+    let inventory = args
         .inventory
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|c| config::parse_inventory(&c).ok())
-    {
-        for host in inventory.resolve_targets(None) {
-            known_vars.extend(host.vars.into_keys());
-        }
-    }
+        .and_then(|c| config::parse_inventory(&c).ok());
     let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
+
+    // Names a run could define outside the plan: the secrets file's, plus inventory
+    // variables — any host's for `-p`, the plan's own hosts' for an inventory `plan=`.
+    let mut secret_vars = std::collections::HashSet::new();
     if let Some(secrets) = secrets_config::discover_secrets_path(None, inv_dir)
         .and_then(|p| secret_store::read(&p).ok())
         .and_then(|c| secrets_config::parse_secrets_file(&c).ok())
     {
-        known_vars.extend(secrets.vars.into_keys());
+        secret_vars.extend(secrets.vars.into_keys());
     }
 
     if let Some(ref fp_path) = args.plan {
+        let mut known_vars = secret_vars.clone();
+        for host in inventory.iter().flat_map(|inv| inv.resolve_targets(None)) {
+            known_vars.extend(host.vars.into_keys());
+        }
         print!("Validating plan '{}'... ", fp_path.display());
-        let check = validate_plan_file(fp_path, inv_dir, &known_vars);
-        match check.problems.as_slice() {
-            [] => println!("OK ({} steps)", check.steps),
-            [one] => println!("FAILED: {}", one),
-            many => {
-                println!("FAILED:");
-                for problem in many {
-                    println!("  - {}", problem);
-                }
-            }
-        }
-        valid &= check.problems.is_empty();
-        for warning in &check.warnings {
-            println!("  warning: {}", warning);
-        }
+        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars));
     }
 
     if let Some(ref inv_path) = args.inventory {
@@ -1033,10 +1038,35 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
         }
     }
 
+    // Without `-p`, `run -i` runs the plans the inventory names, so those are what to check.
+    if let (None, Some(inventory)) = (&args.plan, &inventory) {
+        let base = inv_dir.unwrap_or_else(|| std::path::Path::new("."));
+        let mut plans: Vec<(PathBuf, Vec<config::types::ResolvedHost>)> = Vec::new();
+        for (_, plan_path, hosts) in inventory.resolve_group_plans() {
+            let path = base.join(plan_path);
+            match plans.iter_mut().find(|(p, _)| *p == path) {
+                Some((_, known)) => known.extend(hosts),
+                None => plans.push((path, hosts)),
+            }
+        }
+        for (path, hosts) in plans {
+            let mut known_vars = secret_vars.clone();
+            for host in &hosts {
+                known_vars.extend(host.vars.keys().cloned());
+            }
+            print!(
+                "Validating plan '{}' ({} host{})... ",
+                path.display(),
+                hosts.len(),
+                if hosts.len() == 1 { "" } else { "s" }
+            );
+            valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars));
+        }
+    }
+
     // A secrets file beside the inventory is part of the configuration a run will load, so
     // check it here rather than letting a malformed provider block surface mid-deploy. Only
     // the file is parsed — validating never needs the passphrase.
-    let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
     if let Some(path) = secrets_config::discover_secrets_path(None, inv_dir) {
         print!("Validating secrets '{}'... ", path.display());
         match secret_store::read(&path).and_then(|c| secrets_config::parse_secrets_file(&c)) {

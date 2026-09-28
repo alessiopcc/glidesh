@@ -394,8 +394,9 @@ pub struct LogsArgs {
 
 #[derive(Parser, Debug)]
 #[command(
-    after_help = "Checks only the files given: --plan, --inventory, or both. A secrets file is \
-                  checked too: $GLIDESH_SECRETS, else secrets.kdl next to the inventory, else in \
+    after_help = "Checks only the files given: --plan, --inventory, or both. With --inventory \
+                  and no --plan, the plans it names with plan= are checked as `run -i` would \
+                  load them. A secrets file is checked too: $GLIDESH_SECRETS, else secrets.kdl next to the inventory, else in \
                   the current directory. Reports every problem found, not only the first, and \
                   exits non-zero if any. To check a plan against real hosts without changing \
                   them, use `glidesh run --dry-run`.\n\n\
@@ -407,7 +408,7 @@ pub struct ValidateArgs {
     pub plan: Option<PathBuf>,
 
     /// Inventory to check, with the secrets file beside it. With --plan, its variables
-    /// count as defined
+    /// count as defined; without --plan, the plans it names with plan= are checked too
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
 }
