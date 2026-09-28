@@ -61,6 +61,7 @@ plan "gpu-inference" {
         }
     }
 
-    // Every run, not only after a change: a gate is not work, so it reports nothing.
+    // Checked on every run, not only after a change. Waiting is not work, so the gate
+    // never counts as a change or triggers a subscriber.
     step "Wait until the model is served" until="curl -sf http://localhost:${api-port}/v1/models | grep -q '${model}'" until-timeout=600 until-interval=10
 }
