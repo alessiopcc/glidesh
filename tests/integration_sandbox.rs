@@ -32,7 +32,7 @@ fn test_sandbox_blocks_read_outside_tmpdir() {
 
     let mut cmd = Command::new("cat");
     cmd.arg(&sentinel);
-    apply_probe_sandbox(&mut cmd);
+    apply_probe_sandbox(&mut cmd, None);
 
     let output = cmd
         .stdout(Stdio::piped())
@@ -64,7 +64,7 @@ fn test_sandbox_allows_read_inside_tmpdir() {
 
     let mut cmd = Command::new("cat");
     cmd.arg(&tmp_file);
-    apply_probe_sandbox(&mut cmd);
+    apply_probe_sandbox(&mut cmd, None);
 
     let output = cmd
         .stdout(Stdio::piped())
@@ -105,7 +105,7 @@ fn test_sandbox_blocks_ssh_key_access() {
 
     let mut cmd = Command::new("cat");
     cmd.arg(&ssh_key);
-    apply_probe_sandbox(&mut cmd);
+    apply_probe_sandbox(&mut cmd, None);
 
     let output = cmd
         .stdout(Stdio::piped())
@@ -133,7 +133,7 @@ fn test_sandbox_env_scrubbed() {
     unsafe { std::env::set_var("AWS_SECRET_ACCESS_KEY", "supersecret") };
 
     let mut cmd = Command::new("env");
-    apply_probe_sandbox(&mut cmd);
+    apply_probe_sandbox(&mut cmd, None);
 
     let output = cmd
         .stdout(Stdio::piped())
@@ -160,7 +160,7 @@ fn test_sandbox_workdir_is_tmpdir() {
     skip_unless_integration!();
 
     let mut cmd = Command::new("pwd");
-    apply_probe_sandbox(&mut cmd);
+    apply_probe_sandbox(&mut cmd, None);
 
     let output = cmd
         .stdout(Stdio::piped())
@@ -176,4 +176,43 @@ fn test_sandbox_workdir_is_tmpdir() {
         .trim_end_matches('/')
         .to_string();
     assert_eq!(cwd, expected, "working dir should be temp dir, got: {cwd}");
+}
+
+/// A plugin lives next to the inventory or in `~/.glidesh/modules/`, outside every directory
+/// the sandbox allows. It must still run, while the files beside it stay unreadable.
+#[test]
+fn test_sandbox_runs_a_module_outside_the_allowed_dirs() {
+    skip_unless_integration!();
+
+    if !landlock_supported() {
+        eprintln!("Skipping: landlock not supported on this kernel");
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sandbox_module");
+    std::fs::create_dir_all(&dir).unwrap();
+    let neighbour = dir.join("inventory-secret");
+    std::fs::write(&neighbour, "secret").unwrap();
+    let module = dir.join("glidesh-module-sandbox-test");
+    std::fs::write(
+        &module,
+        format!("#!/bin/sh\necho ran\ncat {}\n", neighbour.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&module, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cmd = Command::new(&module);
+    apply_probe_sandbox(&mut cmd, Some(&module));
+    let output = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("failed to spawn sandboxed module");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("ran"), "module did not run: {stderr}");
+    assert!(!stdout.contains("secret"), "module read its neighbour");
+    assert!(stderr.contains("Permission denied"), "got: {stderr}");
 }
