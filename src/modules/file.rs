@@ -235,6 +235,12 @@ impl Module for FileModule {
                 if !ctx.diff {
                     return Ok(ModuleStatus::pending(plan));
                 }
+                if Self::diff_opted_out(params)? {
+                    return Ok(ModuleStatus::pending_with_diff(
+                        plan,
+                        file_diff::opted_out(dest),
+                    ));
+                }
                 let diff =
                     Self::diff_against_remote(ctx, params, dest, remote_hash.is_some(), &content)
                         .await?;
@@ -432,6 +438,8 @@ impl FileModule {
         let mut content_changed = 0usize;
         let mut attrs_changed = 0usize;
         let mut diffs = Vec::new();
+        let opted_out = Self::diff_opted_out(params)?;
+        let show_diffs = ctx.diff && !opted_out;
 
         for rel_path in &local_files {
             let local_path = resolved_src.join(rel_path);
@@ -477,7 +485,7 @@ impl FileModule {
                 }
                 remote_hash => {
                     content_changed += 1;
-                    if ctx.diff {
+                    if show_diffs {
                         diffs.push(
                             Self::diff_against_remote(
                                 ctx,
@@ -510,12 +518,32 @@ impl FileModule {
                 parts.join(", "),
                 local_files.len()
             );
-            if diffs.is_empty() {
+            if ctx.diff && opted_out && content_changed > 0 {
+                Ok(ModuleStatus::pending_with_diff(
+                    plan,
+                    file_diff::opted_out(dest),
+                ))
+            } else if diffs.is_empty() {
                 Ok(ModuleStatus::pending(plan))
             } else {
                 let diff = file_diff::truncate_lines(&diffs.join("\n"), file_diff::MAX_DIFF_LINES);
                 Ok(ModuleStatus::pending_with_diff(plan, diff))
             }
+        }
+    }
+
+    /// `diff=#false` keeps a task out of `--diff`, for content glidesh cannot tell is
+    /// sensitive — such as a world-readable file still holding a secret the plan dropped.
+    fn diff_opted_out(params: &ModuleParams) -> Result<bool, GlideshError> {
+        match params.args.get("diff") {
+            None => Ok(false),
+            Some(value) => value
+                .as_bool()
+                .map(|show| !show)
+                .ok_or_else(|| GlideshError::Module {
+                    module: "file".to_string(),
+                    message: "'diff' must be #true or #false".to_string(),
+                }),
         }
     }
 
@@ -809,5 +837,21 @@ mod tests {
             args,
         };
         assert!(FileModule::is_recurse(&params));
+    }
+
+    #[test]
+    fn diff_false_opts_a_task_out_and_anything_else_is_rejected() {
+        use crate::config::types::ParamValue;
+        let with = |value: Option<ParamValue>| ModuleParams {
+            resource_name: "/etc/app".to_string(),
+            args: value.into_iter().map(|v| ("diff".to_string(), v)).collect(),
+        };
+        assert!(!FileModule::diff_opted_out(&with(None)).unwrap());
+        assert!(!FileModule::diff_opted_out(&with(Some(ParamValue::Bool(true)))).unwrap());
+        assert!(FileModule::diff_opted_out(&with(Some(ParamValue::Bool(false)))).unwrap());
+        let err = FileModule::diff_opted_out(&with(Some(ParamValue::String("no".into()))))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'diff' must be #true or #false"), "{err}");
     }
 }

@@ -194,6 +194,52 @@ async fn file_diff_is_hidden_for_a_file_other_users_cannot_read() {
     );
 }
 
+/// The gap the rules above leave: a world-readable file still holding a secret the plan no
+/// longer uses. `diff=#false` is the explicit way out.
+#[tokio::test]
+async fn diff_false_keeps_a_task_out_of_the_diff() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.conf"), "token=none\n").unwrap();
+    let tree = dir.path().join("site");
+    std::fs::create_dir(&tree).unwrap();
+    std::fs::write(tree.join("a.txt"), "after\n").unwrap();
+    put(&ssh, "/root/diff-optout.conf", "token=retired-s3cret\n").await;
+
+    let vars = HashMap::new();
+    let mut ctx = container.module_context(&ssh, &os_info, &vars, true);
+    ctx.plan_base_dir = dir.path();
+    ctx.diff = true;
+
+    let file = params(
+        "/root/diff-optout.conf",
+        &[("src", s("app.conf")), ("diff", ParamValue::Bool(false))],
+    );
+    let diff = pending_diff(FileModule.check(&ctx, &file).await.unwrap()).unwrap();
+    assert_eq!(
+        diff,
+        "/root/diff-optout.conf: diff off for this task (diff=#false)"
+    );
+
+    let site = params(
+        "/root/diff-optout-site",
+        &[
+            ("src", s("site")),
+            ("recurse", ParamValue::Bool(true)),
+            ("diff", ParamValue::Bool(false)),
+        ],
+    );
+    let diff = pending_diff(FileModule.check(&ctx, &site).await.unwrap()).unwrap();
+    assert_eq!(
+        diff,
+        "/root/diff-optout-site: diff off for this task (diff=#false)"
+    );
+}
+
 async fn install_fake_docker(ssh: &SshSession) {
     let out = ssh
         .exec(&format!(

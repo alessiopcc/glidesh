@@ -153,6 +153,11 @@ fn as_text(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
+/// The note for a task written with `diff=#false`.
+pub fn opted_out(path: &str) -> String {
+    format!("{path}: diff off for this task (diff=#false)")
+}
+
 fn hidden_private(path: &str) -> String {
     format!("{path}: diff hidden (not readable by other users)")
 }

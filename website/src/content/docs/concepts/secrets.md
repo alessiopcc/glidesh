@@ -212,7 +212,8 @@ a secret shows no diff at all, only `diff hidden (content contains a secret)`. R
 not be enough: the old side can hold a value rotated out of the vault, which is no longer
 registered, and the `+`/`-` prefixes split a multi-line secret such as a key so it no longer
 matches. A secret the plan no longer uses is not registered at all, so a `file` that other users
-cannot read — on the host or under the plan's `mode` — shows no diff either.
+cannot read — on the host or under the plan's `mode` — shows no diff either. For a
+world-readable file that may still hold one, set `diff=#false` on the task.
 [`container`](/modules/container/#--diff) names changed parameters, never their values.
 
 ## What external plugins see

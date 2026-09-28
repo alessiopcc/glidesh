@@ -101,6 +101,7 @@ file "backups/${@host.name}-dump.sql" {
 | `owner` | string | Remote file owner |
 | `group` | string | Remote file group |
 | `mode` | string | Remote file permissions (e.g., `"0644"`) |
+| `diff` | boolean | `#false` keeps this task's content out of [`--diff`](#--diff) (default `#true`) |
 
 ## Path Resolution
 
@@ -159,6 +160,16 @@ file that is already in place. Instead of a diff, a one-line note says why none 
   `diff hidden (not readable by other users)`. Matching secrets cannot catch a value the plan
   no longer uses — it is not registered, yet the host's copy still holds it — so a file kept
   private is treated as sensitive whatever it contains.
+- **A task written with `diff=#false`**: `diff off for this task (diff=#false)`.
+
+That leaves one case glidesh cannot catch: a world-readable file whose host copy still holds
+a secret the plan no longer uses. glidesh keeps no state between runs, so it cannot know that
+text was ever a secret. Anyone on the host can already read such a file, but a diff would
+copy the value into the run log and CI output. Mark tasks like that with `diff=#false`:
+
+```kdl
+file "/etc/app/legacy.conf" src="legacy.conf" diff=#false
+```
 
 A change to `owner`, `group`, or `mode` alone has no diff: the pending line already names
 each attribute, as `Fix attrs on /etc/app.conf: mode: 644 -> 600`. Fetch mode has none either.
