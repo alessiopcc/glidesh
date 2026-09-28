@@ -61,7 +61,6 @@ plan "gpu-inference" {
         }
     }
 
-    step "Smoke test the API" subscribe="Serve the model" {
-        shell "curl -sf http://localhost:${api-port}/v1/models"
-    }
+    // Every run, not only after a change: a gate is not work, so it reports nothing.
+    step "Wait until the model is served" until="curl -sf http://localhost:${api-port}/v1/models | grep -q '${model}'" until-timeout=600 until-interval=10
 }

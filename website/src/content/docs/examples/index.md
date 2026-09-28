@@ -39,9 +39,9 @@ Deploy a containerized application with port mappings, environment variables, an
 
 ## gpu-inference
 
-Deploy a GPU inference server: a one-shot weight download, host IPC namespace and GPU flags, and a readiness gate that blocks until the API is serving.
+Deploy a GPU inference server: a one-shot weight download, host IPC namespace and GPU flags, a readiness gate that blocks until the API is serving, and an [`until=`](/advanced/until/) gate that holds the run until the model is listed.
 
-**Modules used:** container, shell, subscribe
+**Modules used:** container, subscribe, until
 
 [View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/gpu-inference)
 

@@ -157,11 +157,11 @@ command, so `--dry-run` prints the command it would have run and connects to not
 :::caution
 A preview is read-only with respect to *desired state*, but it is not a no-op on the
 target: computing it runs the read-only probes a plan asks for. That includes `shell`
-`check=` guards, container readiness gates, and container-runtime detection. Nothing is
+`check=` guards, container readiness gates, step `until=` gates, and container-runtime detection. Nothing is
 installed, written, or restarted, but those commands do execute.
 :::
 
-Four details worth knowing:
+Details worth knowing:
 
 - `register` captures an empty value in a dry run, because the task's own command never
   ran. A later `loop="${var}"` over a registered variable therefore iterates zero times,
@@ -173,6 +173,8 @@ Four details worth knowing:
 - A `shell` task with no `check=` guard has no state to compare against, so it always
   reports `would change`. Give it a guard and it reports `ok` whenever the guard
   succeeds.
+- A step's [`until=`](/advanced/until/) gate is checked once and never waited for; a gate
+  that is not open yet is reported as `until not met yet`, and the preview goes on.
 - A step using [`subscribe`](/advanced/subscribe/) whose target changed is reported as it
   would run: a restart, recreate or command it would redo is `would change`, with a reason
   ending in `(triggered)`; a task with nothing to redo is `ok`.

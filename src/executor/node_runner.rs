@@ -5,18 +5,22 @@ use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::condition::{Condition, Outcome, Scope};
 use glidesh::config::tags::TagFilter;
 use glidesh::config::template::{TemplateData, interpolate_args};
-use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
+use glidesh::config::types::{
+    LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef, UntilGate,
+};
 use glidesh::error::GlideshError;
 use glidesh::modules::context::{ModuleContext, Trigger};
 use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
+use glidesh::ssh::connection::CommandOutput;
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// One iteration of a step `loop`. A flat item binds `${@item}`; a structured
@@ -139,6 +143,32 @@ pub struct NodeRunner {
 pub struct SyncSlot {
     pub seat: Seat,
     pub permits: Arc<Semaphore>,
+}
+
+/// How often a long `until=` wait reports that it is still waiting.
+const WAIT_REPORT_EVERY: Duration = Duration::from_secs(30);
+
+/// Lines of the gate command's last output kept in a timeout error.
+const GATE_OUTPUT_LINES: usize = 20;
+
+/// The failure of a gate that never opened, with the last attempt's output — it is nearly
+/// always where the real answer is.
+fn gate_timeout_error(gate: &UntilGate, last: &CommandOutput) -> String {
+    let output: Vec<&str> = last
+        .stdout
+        .lines()
+        .chain(last.stderr.lines())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let tail = &output[output.len().saturating_sub(GATE_OUTPUT_LINES)..];
+    let mut message = format!(
+        "until= did not succeed within {}s: `{}` last exited {}",
+        gate.timeout, gate.command, last.exit_code
+    );
+    if !tail.is_empty() {
+        message.push_str(&format!("; last output:\n{}", tail.join("\n")));
+    }
+    message
 }
 
 /// Whether a task counts toward the run's changed total.
@@ -495,6 +525,14 @@ impl NodeRunner {
                 }
             }
 
+            if let Some(gate) = &step.until {
+                if let Err(error) = self.wait_for_gate(step, gate, &vars, &session).await {
+                    self.emit_step_error(&step.name, &error);
+                    let _ = session.close().await;
+                    return Ok(self.finish(false, &progress));
+                }
+            }
+
             match &step.loop_source {
                 None => {
                     match self
@@ -577,6 +615,68 @@ impl NodeRunner {
             module: module.to_string(),
             resource: resource.to_string(),
             error: error.to_string(),
+        });
+    }
+
+    /// Poll a step's `until=` gate until its command exits 0, or fail once it has not
+    /// within the timeout. A preview checks once and never waits. The gate is never a change.
+    async fn wait_for_gate(
+        &self,
+        step: &Step,
+        gate: &UntilGate,
+        vars: &HashMap<String, String>,
+        session: &SshSession,
+    ) -> Result<(), String> {
+        let mut command = glidesh::config::template::interpolate(&gate.command, vars)
+            .map_err(|e| format!("until=: {e}"))?;
+        if token::contains_secret_token(&command) {
+            command = self
+                .secrets
+                .decrypt_inline(&command)
+                .map_err(|e| format!("until=: {e}"))?;
+        }
+        let run_as = step
+            .run_as
+            .clone()
+            .merge_over(&self.plan.run_as)
+            .merge_over(&self.host.run_as)
+            .resolve(glidesh::modules::escalation::password());
+
+        let started = Instant::now();
+        let timeout = Duration::from_secs(gate.timeout);
+        let mut last_report: Option<Instant> = None;
+        loop {
+            let out = session
+                .exec_as(&command, run_as.as_ref())
+                .await
+                .map_err(|e| format!("until=: {e}"))?;
+            if out.exit_code == 0 {
+                return Ok(());
+            }
+            let elapsed = started.elapsed();
+            if self.dry_run || elapsed >= timeout {
+                if !self.dry_run {
+                    return Err(gate_timeout_error(gate, &out));
+                }
+                self.report_waiting(step, gate, elapsed, true);
+                return Ok(());
+            }
+            if last_report.is_none_or(|at| at.elapsed() >= WAIT_REPORT_EVERY) {
+                self.report_waiting(step, gate, elapsed, false);
+                last_report = Some(Instant::now());
+            }
+            tokio::time::sleep((timeout - elapsed).min(Duration::from_secs(gate.interval))).await;
+        }
+    }
+
+    fn report_waiting(&self, step: &Step, gate: &UntilGate, elapsed: Duration, preview: bool) {
+        let _ = self.event_tx.send(ExecutorEvent::StepWaiting {
+            host: self.host.name.clone(),
+            step: step.name.clone(),
+            command: gate.command.clone(),
+            elapsed_secs: elapsed.as_secs(),
+            timeout_secs: gate.timeout,
+            preview,
         });
     }
 
@@ -932,6 +1032,59 @@ impl NodeRunner {
 mod tests {
     use super::*;
     use glidesh::modules::detect::{ContainerRuntime, InitSystem, OsFamily, PkgManager};
+
+    fn until_gate() -> UntilGate {
+        UntilGate {
+            command: "curl -sf ${url}".into(),
+            timeout: 60,
+            interval: 3,
+        }
+    }
+
+    /// The command as written, not interpolated: the error goes to logs and the terminal.
+    #[test]
+    fn a_gate_timeout_names_the_command_its_exit_and_its_last_output() {
+        let out = CommandOutput {
+            exit_code: 7,
+            stdout: "partial\n".into(),
+            stderr: "connection refused\n".into(),
+        };
+        let err = gate_timeout_error(&until_gate(), &out);
+        assert!(
+            err.starts_with("until= did not succeed within 60s: `curl -sf ${url}` last exited 7"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("last output:\npartial\nconnection refused"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_gate_timeout_keeps_only_the_tail_of_long_output() {
+        let stdout: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        let out = CommandOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+        let err = gate_timeout_error(&until_gate(), &out);
+        assert!(
+            err.contains("line 31\n") && !err.contains("line 30\n"),
+            "{err}"
+        );
+        assert!(err.ends_with("line 50"), "{err}");
+    }
+
+    #[test]
+    fn a_silent_gate_timeout_has_no_output_section() {
+        let out = CommandOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: " \n".into(),
+        };
+        assert!(!gate_timeout_error(&until_gate(), &out).contains("last output"));
+    }
 
     fn collection(rows: Vec<Vec<(&str, &str)>>) -> Vec<HashMap<String, String>> {
         rows.into_iter()

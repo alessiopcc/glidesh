@@ -25,7 +25,7 @@
 - **9 built-in modules** — shell, host, package, user, systemd, container, file, disk, nix
 - **Encrypted secrets** — commit `secrets.kdl` safely; values decrypt in memory and are redacted from every log. Unlock with a shared passphrase or with per-person SSH keys
 - **Dry-run support** — preview changes before applying them, with `--diff` for the detail
-- **Targeted runs** — `when=` conditions, `--tags`/`--skip-tags`, and rolling batches with `serial`/`max-fail`
+- **Targeted runs** — `when=` conditions, `--tags`/`--skip-tags`, rolling batches with `serial`/`max-fail`, and `until=` gates that hold a step until the host is ready
 - **Interactive TUI** — real-time progress with a terminal UI (with non-TTY fallback)
 
 ## Install

@@ -112,7 +112,7 @@ container "vllm" {
 
 ### Readiness
 
-`subscribe` orders steps; it does not wait for the service a step started to become usable. These parameters make a container task block until it is actually ready, so the next step can rely on it.
+`subscribe` orders steps; it does not wait for the service a step started to become usable. These parameters make a container task block until it is actually ready, so the next step can rely on it. To wait for something that is not one container — a service registering elsewhere, a cluster reaching quorum — use a step's [`until=`](/advanced/until/).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

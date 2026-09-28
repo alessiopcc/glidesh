@@ -471,6 +471,8 @@ mod tests {
             "tags=",
             "--skip-tags",
             "SUBSCRIBE",
+            "until=",
+            "until-timeout",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

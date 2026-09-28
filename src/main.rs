@@ -713,6 +713,21 @@ fn event_lines(
                 reason
             )],
         ),
+        ExecutorEvent::StepWaiting {
+            host,
+            command,
+            elapsed_secs,
+            timeout_secs,
+            preview,
+            ..
+        } => (
+            OutStream::Out,
+            vec![format!(
+                "[{}]   {}",
+                display_id(host, display_ids),
+                executor::waiting_text(command, *elapsed_secs, *timeout_secs, *preview)
+            )],
+        ),
         ExecutorEvent::TaskSkipped {
             host,
             module,
@@ -1792,6 +1807,25 @@ mod tests {
             &no_display_ids(),
         );
         assert_eq!(lines, ["[web-1]   skipped (when: ${x})"]);
+    }
+
+    #[test]
+    fn a_waiting_step_shows_its_gate() {
+        let (_, lines) = event_lines(
+            &ExecutorEvent::StepWaiting {
+                host: "web-1".to_string(),
+                step: "Wait".to_string(),
+                command: "curl -sf localhost".to_string(),
+                elapsed_secs: 0,
+                timeout_secs: 300,
+                preview: false,
+            },
+            &no_display_ids(),
+        );
+        assert_eq!(
+            lines,
+            ["[web-1]   waiting until: curl -sf localhost (up to 300s)"]
+        );
     }
 
     #[test]

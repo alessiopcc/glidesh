@@ -101,6 +101,8 @@ PLAN SYNTAX
   Step attributes:
     when=\"<condition>\"          skip the step unless the condition holds
     tags=\"web,deploy\"           select the step with --tags / --skip-tags (see TAGS)
+    until=\"<command>\"           before the tasks, rerun the command on the host until it
+                                exits 0 (see UNTIL); a step may be only a gate, no body
     loop=\"${var}\"               repeat for each line of var (or each row of a list
                                 variable); the value is ${@item} (or ${@item.<field>})
     subscribe=\"<step>, <step>\"  when a named earlier step changed something, redo this step's
@@ -136,6 +138,13 @@ TAGS
   A step left out is reported as skipped, does not trigger its subscribers, and leaves its
   register= variables undefined: tag a step that registers what others need `always`.
   A tag no step carries is an error, so a typo cannot silently run nothing.
+
+UNTIL (wait for the host to be ready)
+  step \"Wait for API\" until=\"curl -sf localhost:8080/health\" until-timeout=600 until-interval=5
+  Defaults: until-timeout=300, until-interval=3 (seconds). Runs once per step, before its
+  tasks and loop, after when= and tags. Timing out fails the host with the command's last
+  output. Waiting is not a change: it never triggers subscribers. --dry-run checks once and
+  never waits. Prefer it to a polling shell with retries=, which counts as a change.
 
 SUBSCRIBE
   A step with subscribe= is triggered when a step it names changed something. Triggered:

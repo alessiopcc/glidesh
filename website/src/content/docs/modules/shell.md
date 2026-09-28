@@ -16,6 +16,10 @@ shell "curl -sf http://localhost:8080/health" {
 }
 ```
 
+`retries` is for a command that can fail transiently. To wait for something to become ready
+before a step, use the step's [`until=`](/advanced/until/) instead: a polling `shell` task
+counts as a change on every run, and triggers every step that subscribes to it.
+
 ## Parameters
 
 | Parameter | Type | Description |
