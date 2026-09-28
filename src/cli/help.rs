@@ -81,6 +81,7 @@ Examples:
   glidesh run -i inventory.kdl -p plan.kdl
   glidesh run -i inventory.kdl -p plan.kdl -t web --dry-run --diff
   glidesh run -i inventory.kdl -p plan.kdl -t web-1,db:db-1 --serial 1 --max-fail 0
+  glidesh run -i inventory.kdl -p plan.kdl --tags config --skip-tags slow
   glidesh run -i inventory.kdl                  # each host runs the plan= its inventory names
   glidesh run --host 10.0.0.5 -u deploy -p plan.kdl
   glidesh run --host 10.0.0.5 -u deploy -c uptime
@@ -99,6 +100,7 @@ PLAN SYNTAX
   Steps run in order; tasks in a step run in order. A step stops the host on failure.
   Step attributes:
     when=\"<condition>\"          skip the step unless the condition holds
+    tags=\"web,deploy\"           select the step with --tags / --skip-tags (see TAGS)
     loop=\"${var}\"               repeat for each line of var (or each row of a list
                                 variable); the value is ${@item} (or ${@item.<field>})
     subscribe=\"<step>, <step>\"  run even if already in place when a named earlier step changed
@@ -126,6 +128,13 @@ CONDITIONS (when=)
   ${a} == value   ${a} != value   ${a}   defined ${a}   undefined ${a}   !term   x && y   x || y
   Comparisons are string equality; single-quote values with spaces. && binds tighter than
   ||; no parentheses. Example: when=\"${@os.family} == debian && defined ${port}\"
+
+TAGS
+  --tags web,db        run only steps tagged web or db, plus steps tagged `always`
+  --skip-tags slow     skip steps tagged slow; wins over --tags and `always`
+  A step left out is reported as skipped, does not trigger its subscribers, and leaves its
+  register= variables undefined: tag a step that registers what others need `always`.
+  A tag no step carries is an error, so a typo cannot silently run nothing.
 
 MODULES (each checks the host first and changes only what differs)
   shell \"<command>\"           cmd=<string|list>  check=\"<cmd>\" (exit 0 = already done, skip)

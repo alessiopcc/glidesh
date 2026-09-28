@@ -3,6 +3,7 @@ use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::condition::{Condition, Outcome, Scope};
+use glidesh::config::tags::TagFilter;
 use glidesh::config::template::{TemplateData, interpolate_args};
 use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
 use glidesh::error::GlideshError;
@@ -116,6 +117,7 @@ pub struct NodeRunner {
     pub key: PrivateKeyWithHashAlg,
     pub dry_run: bool,
     pub diff: bool,
+    pub tags: Arc<TagFilter>,
     pub host_key_policy: HostKeyPolicy,
     pub event_tx: EventSink,
     pub inventory_template_data: Arc<TemplateData>,
@@ -464,7 +466,15 @@ impl NodeRunner {
                 collections: &template_data.collections,
                 unknown: &progress.unknown,
             };
-            match gate(step.when.as_ref(), &scope) {
+            // Tags first: a step the run did not select never has its condition evaluated.
+            let decision = match self.tags.excludes(&step.tags) {
+                Some(reason) => Ok(Gate::Skip {
+                    reason,
+                    decided: true,
+                }),
+                None => gate(step.when.as_ref(), &scope),
+            };
+            match decision {
                 Ok(Gate::Run) => {}
                 Ok(Gate::Skip { reason, decided }) => {
                     let _ = self.event_tx.send(ExecutorEvent::StepSkipped {

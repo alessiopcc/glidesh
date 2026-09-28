@@ -98,7 +98,8 @@ pub enum ExecutorEvent {
         step: String,
         error: String,
     },
-    /// A step's `when=` did not hold, so none of its tasks ran.
+    /// A step's `when=` did not hold, or `--tags`/`--skip-tags` left it out, so none of its
+    /// tasks ran.
     StepSkipped {
         host: String,
         step: String,

@@ -8,6 +8,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use executor::result::ExecutorEvent;
 use glidesh::config;
+use glidesh::config::tags::TagFilter;
 use glidesh::config::template::TemplateData;
 use glidesh::config::types::{ExecutionMode, Inventory, RunAsMethod, RunAsSpec, RunAsUser};
 use glidesh::error::GlideshError;
@@ -517,6 +518,8 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     if group_plans.is_empty() {
         return Err(GlideshError::NoTargets);
     }
+    let tags = TagFilter::from_args(args.tags.as_deref(), args.skip_tags.as_deref())?;
+    tags.check_known(group_plans.iter().map(|gp| gp.plan.as_ref()))?;
 
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
@@ -540,6 +543,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         registry,
         key,
         secrets,
+        Arc::new(tags),
         &run_name,
         &all_host_names,
         &args,
@@ -1474,11 +1478,13 @@ async fn run_command_on_hosts(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_with_ui(
     group_plans: Vec<executor::GroupPlan>,
     registry: Arc<ModuleRegistry>,
     key: russh_keys::key::PrivateKeyWithHashAlg,
     secrets: Arc<glidesh::secrets::Secrets>,
+    tags: Arc<TagFilter>,
     run_name: &str,
     host_names: &[(String, String, String)],
     args: &cli::RunArgs,
@@ -1550,6 +1556,7 @@ async fn run_with_ui(
                 concurrency,
                 dry_run,
                 diff,
+                tags,
                 host_key_policy,
                 secrets,
                 combined_tx,
@@ -1604,6 +1611,7 @@ async fn run_with_ui(
             concurrency,
             dry_run,
             diff,
+            tags,
             host_key_policy,
             secrets,
             event_tx,
