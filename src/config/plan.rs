@@ -130,7 +130,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                 }
             }
             "step" => {
-                items.push(PlanItem::Step(parse_step(node)?));
+                items.push(PlanItem::Step(Box::new(parse_step(node)?)));
             }
             "vars-file" => {
                 let path = node
@@ -485,6 +485,16 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
 
     reject_unknown_step_attrs(node, &name)?;
 
+    let tags = match node.get("tags") {
+        Some(value) => {
+            let list = value.as_string().ok_or_else(|| GlideshError::ConfigParse {
+                message: format!("step '{name}': tags= must be a string, like \"web,deploy\""),
+            })?;
+            super::tags::parse_list(list, &format!("step '{name}'"))?
+        }
+        None => Vec::new(),
+    };
+
     let when = parse_when(node)?;
     if let Some(cond) = &when {
         if let Some(var) = cond.variables().find(|v| is_item_var(v)) {
@@ -515,11 +525,19 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         subscribe,
         run_as,
         when,
+        tags,
         source_dir: None,
     })
 }
 
-const STEP_ATTRS: &[&str] = &["loop", "subscribe", "when", "run-as", "run-as-method"];
+const STEP_ATTRS: &[&str] = &[
+    "loop",
+    "subscribe",
+    "when",
+    "tags",
+    "run-as",
+    "run-as-method",
+];
 
 /// A misspelled step attribute used to be ignored, which for `when=` means a guard that
 /// silently never applies — the step runs unconditionally.
@@ -596,6 +614,15 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
                 }
             } else if key == "run-as" || key == "run-as-method" || key == "when" {
                 // Captured separately, not a module arg.
+            } else if key == "tags" && !module.starts_with("external.") {
+                // No built-in module reads it, so the task would run under every --tags
+                // while looking selected. A plugin may take its own `tags` parameter.
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "{module} '{resource}': tags= goes on the step, not on a task; \
+                         move the task to its own step to tag it"
+                    ),
+                });
             } else {
                 let value = kdl_value_to_param(entry.value());
                 args.insert(key, value);
@@ -1326,6 +1353,18 @@ plan "parent" {
     }
 
     #[test]
+    fn included_steps_keep_their_tags() {
+        let (_dir, plan) = resolve_tree(&[
+            ("main.kdl", r#"plan "main" { include "roles/web.kdl" }"#),
+            (
+                "roles/web.kdl",
+                r#"plan "web" { step "Web" tags="web,deploy" { shell "true" } }"#,
+            ),
+        ]);
+        assert_eq!(plan.steps()[0].tags, ["web", "deploy"]);
+    }
+
+    #[test]
     fn test_parse_external_module() {
         let input = r#"
 plan "test" {
@@ -1754,6 +1793,32 @@ plan "test" {
         assert!(step.tasks[0].when.is_some());
     }
 
+    #[test]
+    fn tags_are_a_comma_list_on_the_step() {
+        let step = one_step(r#"step "s" tags="web, deploy" { shell "echo" }"#);
+        assert_eq!(step.tags, ["web", "deploy"]);
+        assert!(one_step(r#"step "s" { shell "echo" }"#).tags.is_empty());
+    }
+
+    #[test]
+    fn a_builtin_task_cannot_be_tagged_but_a_plugin_may_take_tags() {
+        let err = plan_err(r#"step "s" { shell "echo" tags="web" }"#);
+        assert!(err.contains("tags= goes on the step"), "{err}");
+        let step = one_step(r#"step "s" { external "acme/vm" "web" tags="prod" }"#);
+        assert!(step.tasks[0].args.contains_key("tags"));
+    }
+
+    #[test]
+    fn malformed_tags_fail_to_parse() {
+        let err = plan_err(r#"step "s" tags="web,,db" { shell "echo" }"#);
+        assert!(
+            err.contains("step 's'") && err.contains("invalid tag list"),
+            "{err}"
+        );
+        let err = plan_err(r#"step "s" tags=#true { shell "echo" }"#);
+        assert!(err.contains("must be a string"), "{err}");
+    }
+
     /// A misspelled `when` must not leave a step running unguarded.
     #[test]
     fn an_unknown_step_attribute_is_rejected() {
@@ -1765,7 +1830,7 @@ plan "test" {
     fn every_documented_step_attribute_is_accepted() {
         one_step(
             r#"step "a" { shell "echo" }
-            step "s" loop="${xs}" subscribe="a" when="${x}" run-as="root" run-as-method="sudo" {
+            step "s" loop="${xs}" subscribe="a" when="${x}" tags="t" run-as="root" run-as-method="sudo" {
                 shell "echo"
             }"#,
         );

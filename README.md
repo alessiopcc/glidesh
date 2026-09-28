@@ -24,7 +24,8 @@
 - **Modern config** — uses [KDL](https://kdl.dev) for clean, readable inventory and plan files
 - **9 built-in modules** — shell, host, package, user, systemd, container, file, disk, nix
 - **Encrypted secrets** — commit `secrets.kdl` safely; values decrypt in memory and are redacted from every log. Unlock with a shared passphrase or with per-person SSH keys
-- **Dry-run support** — preview changes before applying them
+- **Dry-run support** — preview changes before applying them, with `--diff` for the detail
+- **Targeted runs** — `when=` conditions, `--tags`/`--skip-tags`, and rolling batches with `serial`/`max-fail`
 - **Interactive TUI** — real-time progress with a terminal UI (with non-TTY fallback)
 
 ## Install

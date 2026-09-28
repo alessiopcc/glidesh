@@ -15,6 +15,20 @@ Deploy nginx with a templated configuration file.
 glidesh run -i examples/web-server/inventory.kdl -p examples/web-server/plan.kdl
 ```
 
+### Run part of the plan
+
+Each step is tagged (`packages`, `config`, `service`, `check`), so a run can pick steps:
+
+```bash
+# Push a config change: deploy it, then run the health check
+glidesh run -i examples/web-server/inventory.kdl -p examples/web-server/plan.kdl --tags config
+
+# Everything except package installation
+glidesh run -i examples/web-server/inventory.kdl -p examples/web-server/plan.kdl --skip-tags packages
+```
+
+See [Tags](https://glidesh.netlify.app/advanced/tags/).
+
 ## Files
 
 - `inventory.kdl` — target hosts

@@ -4,6 +4,7 @@ use crate::executor::host_coordinator::HostCoordinator;
 use crate::executor::node_runner::{NodeRunner, SyncSlot};
 use crate::executor::result::{ExecutorEvent, NodeResult, RunSummary};
 use crate::executor::rollout;
+use glidesh::config::tags::TagFilter;
 use glidesh::config::template::TemplateData;
 use glidesh::config::types::{ExecutionMode, Plan, ResolvedHost};
 use glidesh::error::GlideshError;
@@ -23,6 +24,7 @@ pub struct Engine {
     pub concurrency: usize,
     pub dry_run: bool,
     pub diff: bool,
+    pub tags: Arc<TagFilter>,
     pub host_key_policy: HostKeyPolicy,
     pub inventory_template_data: Arc<TemplateData>,
     pub plan_base_dir: Arc<PathBuf>,
@@ -123,6 +125,7 @@ impl Engine {
             let key = self.key.clone();
             let dry_run = self.dry_run;
             let diff = self.diff;
+            let tags = self.tags.clone();
             let host_key_policy = self.host_key_policy;
             let tx = shared.sink.clone();
             let inv = self.inventory_template_data.clone();
@@ -144,6 +147,7 @@ impl Engine {
                     key,
                     dry_run,
                     diff,
+                    tags,
                     host_key_policy,
                     event_tx: tx,
                     inventory_template_data: inv,
@@ -211,6 +215,7 @@ pub async fn run(
     concurrency: usize,
     dry_run: bool,
     diff: bool,
+    tags: Arc<TagFilter>,
     host_key_policy: HostKeyPolicy,
     secrets: Arc<Secrets>,
     event_tx: mpsc::UnboundedSender<ExecutorEvent>,
@@ -222,6 +227,7 @@ pub async fn run(
         let k = key.clone();
         let tx = event_tx.clone();
         let secrets = secrets.clone();
+        let tags = tags.clone();
 
         let handle = tokio::spawn(async move {
             let engine = Engine {
@@ -232,6 +238,7 @@ pub async fn run(
                 concurrency,
                 dry_run,
                 diff,
+                tags,
                 host_key_policy,
                 inventory_template_data: gp.inventory_template_data,
                 plan_base_dir: gp.plan_base_dir,

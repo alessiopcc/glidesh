@@ -329,7 +329,7 @@ pub struct Plan {
 
 #[derive(Debug, Clone)]
 pub enum PlanItem {
-    Step(Step),
+    Step(Box<Step>),
     Include(String), // path to another plan file
 }
 
@@ -339,7 +339,7 @@ impl Plan {
         self.items
             .iter()
             .filter_map(|item| match item {
-                PlanItem::Step(s) => Some(s),
+                PlanItem::Step(s) => Some(s.as_ref()),
                 PlanItem::Include(_) => None,
             })
             .collect()
@@ -363,6 +363,8 @@ pub struct Step {
     /// Evaluated once, before the step's `loop` is resolved — so it can guard a loop over a
     /// variable that might not exist, and cannot see `@item`.
     pub when: Option<Condition>,
+    /// Selects the step with `--tags` / `--skip-tags`; see `config::tags`.
+    pub tags: Vec<String>,
     /// Directory of the included plan this step came from, set by `resolve_includes`;
     /// `None` for the top-level plan's own steps. Relative `file` sources resolve from here.
     pub source_dir: Option<std::path::PathBuf>,

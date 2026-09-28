@@ -66,7 +66,7 @@ Displays the full log file with syntax highlighting:
 - **Green** — successful results
 - **Gray** — check operations and skipped steps or tasks
 
-A step or task skipped by [`when=`](/advanced/conditionals/) is logged as `[SKIPPED]` with the condition that caused it. The node's closing `[COMPLETE]` line adds `skipped=N` when anything was skipped.
+A step or task skipped by [`when=`](/advanced/conditionals/) is logged as `[SKIPPED]` with the condition that caused it; a step left out by [tags](/advanced/tags/), with the tag rule. The node's closing `[COMPLETE]` line adds `skipped=N` when anything was skipped.
 
 Each command result records its captured `stdout` and `stderr` (indented and prefixed with `stdout |` / `stderr |`) along with the exit code, so a failure's output is preserved in the log instead of being discarded. Each stream is capped at 8 KiB per result; longer output is truncated with a `… [truncated]` marker. Orchestration failures that never reach a module — an unknown module name, an unresolved `${…}` reference, or an undefined loop variable — are logged as failed steps rather than vanishing silently.
 

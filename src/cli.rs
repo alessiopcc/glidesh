@@ -297,6 +297,16 @@ pub struct RunArgs {
     #[arg(short, long, value_parser = ["sync", "async"])]
     pub mode: Option<String>,
 
+    /// Run only the steps tagged with one of these (comma-separated), plus steps tagged
+    /// `always`. A tag no step carries is an error
+    #[arg(long, value_name = "TAGS", conflicts_with = "command")]
+    pub tags: Option<String>,
+
+    /// Skip the steps tagged with any of these (comma-separated), even `always` ones or ones
+    /// --tags selects. A tag no step carries is an error
+    #[arg(long, value_name = "TAGS", conflicts_with = "command")]
+    pub skip_tags: Option<String>,
+
     /// Roll out in batches, overriding the plan's `serial`: comma-separated host counts or
     /// percentages, used in order with the last repeating (e.g. "1,25%")
     #[arg(long, value_name = "SIZES")]
@@ -457,6 +467,9 @@ mod tests {
             "PLAN SYNTAX",
             "CONDITIONS",
             "${@os.family}",
+            "TAGS",
+            "tags=",
+            "--skip-tags",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }
@@ -507,6 +520,14 @@ mod tests {
     }
 
     /// `-c` used to be silently ignored without `--host`, and silently won over `--plan`.
+    #[test]
+    fn tags_do_not_apply_to_an_adhoc_command() {
+        let parsed = Cli::try_parse_from([
+            "glidesh", "run", "--host", "h", "-c", "uptime", "--tags", "web",
+        ]);
+        assert!(parsed.is_err());
+    }
+
     #[test]
     fn an_adhoc_command_needs_a_host_and_no_plan() {
         let parse = |args: &[&str]| Cli::try_parse_from([&["glidesh", "run"], args].concat());

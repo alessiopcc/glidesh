@@ -151,3 +151,42 @@ plan "fail" {
     let skipped = ssh.exec("test -e /root/second-b").await.unwrap();
     assert_ne!(skipped.exit_code, 0, "b failed and must not run step 2");
 }
+
+/// A step left out by `--tags` is still a step every host passes through together: the
+/// hosts keep in lockstep across it, and none waits forever for a step that never runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_holds_hosts_across_a_step_left_out_by_tags() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let dir = tempfile::tempdir().unwrap();
+    inventory(dir.path(), &container, &[("a", "3"), ("b", "0")]);
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        r#"
+plan "tagged" {
+    step "First" tags="deploy" {
+        shell "sleep ${delay}; date +%s%N > /root/first-${@host.name}"
+    }
+    step "Left out" tags="slow" {
+        shell "touch /root/left-out-${@host.name}"
+    }
+    step "Second" tags="deploy" {
+        shell "date +%s%N > /root/second-${@host.name}"
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let (ok, out) = run(dir.path(), &["-m", "sync", "--tags", "deploy"]);
+    assert!(ok, "{out}");
+    let (a_first, b_second) = (stamp(&ssh, "first-a").await, stamp(&ssh, "second-b").await);
+    assert!(
+        b_second >= a_first,
+        "b started step 3 before a finished step 1 ({b_second} < {a_first})"
+    );
+    let left_out = ssh.exec("ls /root/left-out-* 2>/dev/null").await.unwrap();
+    assert!(left_out.stdout.trim().is_empty(), "{}", left_out.stdout);
+}

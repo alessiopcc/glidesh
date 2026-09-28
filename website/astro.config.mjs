@@ -60,6 +60,7 @@ export default defineConfig({
 						{ label: 'Conditionals', slug: 'advanced/conditionals' },
 						{ label: 'Loops & Register', slug: 'advanced/loops-register' },
 						{ label: 'Subscribe', slug: 'advanced/subscribe' },
+						{ label: 'Tags', slug: 'advanced/tags' },
 						{ label: 'Plan Includes', slug: 'advanced/plan-includes' },
 						{ label: 'Writing Plugins', slug: 'advanced/writing-plugins' },
 					],
