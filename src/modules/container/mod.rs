@@ -46,6 +46,9 @@ fn desired_state(params: &ModuleParams) -> &str {
 
 const KNOWN_STATES: &[&str] = &["running", "run-once", "stopped", "absent"];
 
+/// The `--diff` detail for a drifted container that carries no field-hashes label.
+const NO_FIELD_HASHES: &str = "created without per-parameter hashes (by an older glidesh or by hand); recreating it records them";
+
 /// Which runtime to drive, and whether it is already on the host.
 ///
 /// Kept separate from installing it so `check` can stay read-only: a check that
@@ -209,10 +212,8 @@ impl ContainerModule {
             }
             let recorded = inspect_label(ctx, runtime, name, run_args::FIELD_HASHES_LABEL).await?;
             let desired = run_args::desired_field_hashes(runtime, params)?;
-            let diff = run_args::describe_field_changes(&desired, &recorded).unwrap_or_else(|| {
-                "created without per-parameter hashes (by an older glidesh or by hand);                  recreating it records them"
-                    .to_string()
-            });
+            let diff = run_args::describe_field_changes(&desired, &recorded)
+                .unwrap_or_else(|| NO_FIELD_HASHES.to_string());
             return Ok(ModuleStatus::pending_with_diff(plan, diff));
         }
 
