@@ -82,14 +82,8 @@ pub fn content_diff(
     private: bool,
     secrets: Option<&SecretRegistry>,
 ) -> String {
-    // Matching registered secrets cannot catch everything: a value the plan no longer
-    // uses is not registered, yet the host's copy still holds it. A file its owner keeps
-    // from other users is treated as sensitive, whatever it contains.
-    if private || *remote == Remote::Private {
-        return hidden_private(path);
-    }
-    if local.len() as u64 > MAX_DIFF_BYTES {
-        return too_large(path, local.len() as u64);
+    if let Some(note) = local_note(path, local, private) {
+        return note;
     }
     let Some(new) = as_text(local) else {
         return binary(path);
@@ -123,6 +117,21 @@ pub fn content_diff(
         .context_radius(3)
         .header(&from, &format!("{path} (plan)"))
         .to_string()
+}
+
+/// Why no diff can be shown, judged from the plan's side alone, so the host's file is
+/// never downloaded only to be discarded.
+pub fn local_note(path: &str, local: &[u8], private: bool) -> Option<String> {
+    // Matching registered secrets cannot catch everything: a value the plan no longer
+    // uses is not registered, yet the host's copy still holds it. A file its owner keeps
+    // from other users is treated as sensitive, whatever it contains.
+    if private {
+        return Some(hidden_private(path));
+    }
+    if local.len() as u64 > MAX_DIFF_BYTES {
+        return Some(too_large(path, local.len() as u64));
+    }
+    as_text(local).is_none().then(|| binary(path))
 }
 
 /// Keep the first `max` lines, saying how many were cut.
@@ -327,5 +336,22 @@ mod tests {
         assert!(mode_may_be_private(Some("0600")));
         assert!(mode_may_be_private(Some("u=rw,go=")));
         assert!(mode_may_be_private(Some("a+r")));
+    }
+
+    #[test]
+    fn the_plan_side_alone_can_rule_out_a_diff() {
+        assert!(local_note("/f", b"text\n", false).is_none());
+        assert!(
+            local_note("/f", b"text\n", true)
+                .unwrap()
+                .contains("not readable")
+        );
+        assert!(local_note("/f", b"\0", false).unwrap().contains("binary"));
+        let big = vec![b'a'; MAX_DIFF_BYTES as usize + 1];
+        assert!(
+            local_note("/f", &big, false)
+                .unwrap()
+                .contains("diff limit")
+        );
     }
 }

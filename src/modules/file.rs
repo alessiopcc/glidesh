@@ -529,6 +529,9 @@ impl FileModule {
     ) -> Result<String, GlideshError> {
         let private =
             file_diff::mode_may_be_private(params.args.get("mode").and_then(|v| v.as_str()));
+        if let Some(note) = file_diff::local_note(dest, content, private) {
+            return Ok(note);
+        }
         let remote = if exists {
             file_diff::fetch_remote(ctx, dest).await?
         } else {
