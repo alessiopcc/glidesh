@@ -110,6 +110,16 @@ impl SecretRegistry {
         }
     }
 
+    /// A registry already holding `plaintexts`, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn holding(plaintexts: &[&str]) -> Self {
+        let registry = Self::default();
+        for plaintext in plaintexts {
+            registry.register(plaintext);
+        }
+        registry
+    }
+
     /// True if nothing has been registered (fast path: redaction is a no-op).
     pub fn is_empty(&self) -> bool {
         self.plaintexts.read().unwrap().is_empty()

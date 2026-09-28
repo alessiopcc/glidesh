@@ -1,6 +1,7 @@
 use crate::config::template::{TemplateData, defined_references, render};
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
+use crate::modules::file_diff;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -229,7 +230,15 @@ impl Module for FileModule {
 
                 Ok(ModuleStatus::Satisfied)
             }
-            _ => Ok(ModuleStatus::pending(format!("Upload {} -> {}", src, dest))),
+            remote_hash => {
+                let plan = format!("Upload {} -> {}", src, dest);
+                if !ctx.diff {
+                    return Ok(ModuleStatus::pending(plan));
+                }
+                let diff =
+                    Self::diff_against_remote(ctx, dest, remote_hash.is_some(), &content).await?;
+                Ok(ModuleStatus::pending_with_diff(plan, diff))
+            }
         }
     }
 
@@ -421,6 +430,7 @@ impl FileModule {
             desired_owner.is_some() || desired_group.is_some() || desired_mode.is_some();
         let mut content_changed = 0usize;
         let mut attrs_changed = 0usize;
+        let mut diffs = Vec::new();
 
         for rel_path in &local_files {
             let local_path = resolved_src.join(rel_path);
@@ -464,7 +474,20 @@ impl FileModule {
                         }
                     }
                 }
-                _ => content_changed += 1,
+                remote_hash => {
+                    content_changed += 1;
+                    if ctx.diff {
+                        diffs.push(
+                            Self::diff_against_remote(
+                                ctx,
+                                &remote_path,
+                                remote_hash.is_some(),
+                                &content,
+                            )
+                            .await?,
+                        );
+                    }
+                }
             }
         }
 
@@ -478,14 +501,46 @@ impl FileModule {
             if attrs_changed > 0 {
                 parts.push(format!("{} attrs", attrs_changed));
             }
-            Ok(ModuleStatus::pending(format!(
+            let plan = format!(
                 "Upload dir {} -> {} (changed: {} of {} files)",
                 src,
                 dest,
                 parts.join(", "),
                 local_files.len()
-            )))
+            );
+            if diffs.is_empty() {
+                Ok(ModuleStatus::pending(plan))
+            } else {
+                let diff = file_diff::truncate_lines(
+                    &diffs.join(
+                        "
+",
+                    ),
+                    file_diff::MAX_DIFF_LINES,
+                );
+                Ok(ModuleStatus::pending_with_diff(plan, diff))
+            }
         }
+    }
+
+    /// Only called once the hashes differ, so the download is spent on a real change.
+    async fn diff_against_remote(
+        ctx: &ModuleContext<'_>,
+        dest: &str,
+        exists: bool,
+        content: &[u8],
+    ) -> Result<String, GlideshError> {
+        let remote = if exists {
+            file_diff::fetch_remote(ctx, dest).await?
+        } else {
+            file_diff::Remote::Missing
+        };
+        Ok(file_diff::content_diff(
+            dest,
+            &remote,
+            content,
+            ctx.secrets.as_deref(),
+        ))
     }
 
     async fn apply_recurse(
