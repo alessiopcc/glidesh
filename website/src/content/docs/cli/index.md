@@ -93,6 +93,8 @@ glidesh run [OPTIONS]
 | `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
 | `--command <CMD>` | `-c` | Ad-hoc command to run | — |
 | `--mode <MODE>` | `-m` | [Execution mode](/concepts/execution-modes/): `sync` or `async`, overriding the plan's `mode` | the plan's `mode`, else `sync` |
+| `--serial <SIZES>` | — | [Roll out in batches](/concepts/execution-modes/#rolling-deploys), overriding the plan's `serial`: comma-separated counts or percentages, e.g. `1,25%` | the plan's `serial`, else one batch |
+| `--max-fail <N\|N%>` | — | Stop starting batches once more hosts than this have failed, overriding the plan's `max-fail` | the plan's `max-fail`, else stop only when a whole batch fails |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
 | `--dry-run` | — | Report what would change without applying it | `false` |
 | `--diff` | — | Show the detail behind each pending change, where the module can describe it | `false` |
@@ -245,7 +247,8 @@ glidesh validate -p plan.kdl -i inventory.kdl
 A plan is loaded exactly as `run` loads it, then checked for everything that can be known
 without contacting a host:
 
-- **Syntax**, including [`when=`](/advanced/conditionals/) conditions and unknown step attributes.
+- **Syntax**, including [`when=`](/advanced/conditionals/) conditions, unknown step attributes,
+  and the `mode`, [`serial` and `max-fail`](/concepts/execution-modes/#rolling-deploys) values.
 - **Includes and `vars-file`** are resolved, so a missing or broken included plan is reported.
 - **Step names** are unique across includes, and every `subscribe` names an earlier step.
 - **Modules exist.** A misspelled module name fails here. External modules are looked up next

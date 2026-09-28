@@ -275,6 +275,16 @@ pub struct RunArgs {
     #[arg(short, long, value_parser = ["sync", "async"])]
     pub mode: Option<String>,
 
+    /// Roll out in batches, overriding the plan's `serial`: comma-separated host counts or
+    /// percentages, used in order with the last repeating (e.g. "1,25%")
+    #[arg(long, value_name = "SIZES")]
+    pub serial: Option<String>,
+
+    /// Stop starting batches once more hosts than this have failed, overriding the plan's
+    /// `max-fail`: a count or a percentage of all hosts (e.g. "10%")
+    #[arg(long, value_name = "N|N%")]
+    pub max_fail: Option<String>,
+
     /// Max concurrent hosts (minimum 1)
     #[arg(long, default_value = "10", value_parser = parse_concurrency)]
     pub concurrency: usize,

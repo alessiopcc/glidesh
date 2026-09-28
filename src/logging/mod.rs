@@ -119,6 +119,31 @@ impl RunLogger {
 
     pub fn handle_event(&mut self, event: &ExecutorEvent) {
         match event {
+            ExecutorEvent::BatchStarted {
+                index,
+                total,
+                hosts,
+            } => {
+                for host in hosts {
+                    self.log_line(host, &format!("[BATCH] {}/{}", index + 1, total));
+                }
+            }
+            ExecutorEvent::HostsAborted { hosts, reason } => {
+                for host in hosts {
+                    self.log_line(host, &format!("[ABORTED] not started: {}", reason));
+                    self.node_summaries.insert(
+                        host.clone(),
+                        NodeSummary {
+                            status: "aborted".to_string(),
+                            changed: 0,
+                            skipped: 0,
+                            steps_completed: 0,
+                            failed_step: None,
+                            error: Some(reason.clone()),
+                        },
+                    );
+                }
+            }
             ExecutorEvent::NodeConnecting { host } => {
                 self.log_line(host, "[CONNECTING]");
                 self.node_summaries.insert(
@@ -322,6 +347,7 @@ mod tests {
                 failed: 0,
                 total_changed: 1,
                 total_skipped: 0,
+                aborted: 0,
                 dry_run,
             },
         }
@@ -474,6 +500,42 @@ mod tests {
 
         let raw = std::fs::read_to_string(logger.run_dir().join("summary.json")).unwrap();
         assert!(!raw.contains("skipped"), "{raw}");
+    }
+
+    #[test]
+    fn each_host_log_records_its_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = RunLogger::new_in(tmp.path(), "deploy").unwrap();
+        logger.handle_event(&ExecutorEvent::BatchStarted {
+            index: 1,
+            total: 3,
+            hosts: vec!["web-2".to_string(), "web-3".to_string()],
+        });
+        for host in ["web-2", "web-3"] {
+            let log = storage::read_node_log(logger.run_dir(), host).unwrap();
+            assert!(log.contains("[BATCH] 2/3"), "{host}: {log}");
+        }
+    }
+
+    /// An aborted host never connected, so nothing else would give it a summary entry.
+    #[test]
+    fn an_aborted_host_is_recorded_with_its_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = RunLogger::new_in(tmp.path(), "deploy").unwrap();
+        logger.handle_event(&ExecutorEvent::HostsAborted {
+            hosts: vec!["web-9".to_string()],
+            reason: "3 of 9 hosts failed, more than max-fail 2".to_string(),
+        });
+        logger.write_summary().unwrap();
+
+        let node = &storage::read_summary(logger.run_dir()).unwrap().nodes["web-9"];
+        assert_eq!(node.status, "aborted");
+        assert_eq!(
+            node.error.as_deref(),
+            Some("3 of 9 hosts failed, more than max-fail 2")
+        );
+        let log = storage::read_node_log(logger.run_dir(), "web-9").unwrap();
+        assert!(log.contains("[ABORTED] not started"), "{log}");
     }
 
     #[test]

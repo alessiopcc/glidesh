@@ -106,6 +106,47 @@ fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, Glidesh
     Ok(None)
 }
 
+/// The error a finished run exits with, if any. Hosts a stopped rollout never started count
+/// against it as much as failed ones: the change did not reach them.
+fn run_failure(summary: &executor::result::RunSummary) -> Option<GlideshError> {
+    if summary.failed == 0 && summary.aborted == 0 {
+        return None;
+    }
+    let mut message = format!("{} host(s) failed", summary.failed);
+    if summary.aborted > 0 {
+        message.push_str(&format!(", {} not started", summary.aborted));
+    }
+    Some(GlideshError::Executor { message })
+}
+
+/// `--serial` and `--max-fail`, when given, override the plan's own settings — so one plan can
+/// be rolled out more cautiously, say `--serial 1 --max-fail 0`, without editing it.
+///
+/// A bad value is a command-line error, not a plan one, so it is reported without the
+/// plan-parse wording.
+fn apply_rollout_override(
+    plan: &mut glidesh::config::types::Plan,
+    serial: Option<&str>,
+    max_fail: Option<&str>,
+) -> Result<(), GlideshError> {
+    let as_flag_error = |e: GlideshError| match e {
+        GlideshError::ConfigParse { message } => GlideshError::Other(message),
+        other => other,
+    };
+    if let Some(sizes) = serial {
+        plan.serial = sizes
+            .split(',')
+            .map(|s| config::plan::parse_amount_text(s, "--serial", 1))
+            .collect::<Result<_, _>>()
+            .map_err(as_flag_error)?;
+    }
+    if let Some(limit) = max_fail {
+        plan.max_fail =
+            Some(config::plan::parse_amount_text(limit, "--max-fail", 0).map_err(as_flag_error)?);
+    }
+    Ok(())
+}
+
 /// `--mode`, when given, overrides the plan's own `mode` in either direction.
 fn apply_mode_override(plan: &mut glidesh::config::types::Plan, mode: Option<&str>) {
     match mode {
@@ -312,6 +353,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         merge_secret_structured(&mut plan, &secret_structured);
 
         apply_mode_override(&mut plan, args.mode.as_deref());
+        apply_rollout_override(&mut plan, args.serial.as_deref(), args.max_fail.as_deref())?;
 
         let targets = if let Some(ref host) = args.host {
             let user = args.user.as_deref().unwrap_or("root").to_string();
@@ -445,6 +487,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             merge_secret_structured(&mut plan, &secret_structured);
 
             apply_mode_override(&mut plan, args.mode.as_deref());
+            apply_rollout_override(&mut plan, args.serial.as_deref(), args.max_fail.as_deref())?;
 
             let pn = plan.name.clone();
             let gn = group_name.clone();
@@ -667,6 +710,33 @@ fn event_lines(
                 reason
             )],
         ),
+        ExecutorEvent::BatchStarted {
+            index,
+            total,
+            hosts,
+        } => (
+            OutStream::Out,
+            vec![format!(
+                "--- Batch {}/{}: {} ---",
+                index + 1,
+                total,
+                hosts
+                    .iter()
+                    .map(|h| display_id(h, display_ids))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )],
+        ),
+        ExecutorEvent::HostsAborted { hosts, reason } => (
+            OutStream::Err,
+            std::iter::once(format!("--- Rollout stopped: {} ---", reason))
+                .chain(
+                    hosts
+                        .iter()
+                        .map(|h| format!("[{}] ABORTED (not started)", display_id(h, display_ids))),
+                )
+                .collect(),
+        ),
         ExecutorEvent::NodeComplete {
             host,
             success,
@@ -693,10 +763,11 @@ fn event_lines(
                     "\n--- Run Complete ---".to_string()
                 },
                 format!(
-                    "Hosts: {} total, {} ok, {} failed, {} {}{}",
+                    "Hosts: {} total, {} ok, {} failed{}, {} {}{}",
                     summary.total_hosts,
                     summary.succeeded,
                     summary.failed,
+                    executor::aborted_suffix(summary.aborted),
                     summary.total_changed,
                     if summary.dry_run {
                         "would change"
@@ -759,17 +830,7 @@ fn cmd_logs(args: cli::LogsArgs) -> Result<(), GlideshError> {
             .unwrap_or_default();
 
         if let Ok(summary) = logging::storage::read_summary(run_dir) {
-            let node_count = summary.nodes.len();
-            let ok = summary.nodes.values().filter(|n| n.status == "ok").count();
-            let failed = summary
-                .nodes
-                .values()
-                .filter(|n| n.status == "failed")
-                .count();
-            println!(
-                "  {}  ({} nodes: {} ok, {} failed)",
-                name, node_count, ok, failed
-            );
+            println!("  {}  ({})", name, summary.node_counts());
         } else {
             println!("  {}  (no summary)", name);
         }
@@ -1491,10 +1552,8 @@ async fn run_with_ui(
         let _ = log_consumer.await;
 
         if let Ok(Ok(summary)) = engine_result {
-            if summary.failed > 0 {
-                return Err(GlideshError::Executor {
-                    message: format!("{} host(s) failed", summary.failed),
-                });
+            if let Some(err) = run_failure(&summary) {
+                return Err(err);
             }
         }
     } else {
@@ -1522,10 +1581,8 @@ async fn run_with_ui(
         .await?;
         let _ = consumer.await;
 
-        if summary.failed > 0 {
-            return Err(GlideshError::Executor {
-                message: format!("{} host(s) failed", summary.failed),
-            });
+        if let Some(err) = run_failure(&summary) {
+            return Err(err);
         }
     }
 
@@ -1616,6 +1673,7 @@ mod tests {
                 failed: 0,
                 total_changed: 3,
                 total_skipped: 0,
+                aborted: 0,
                 dry_run,
             },
         };
@@ -1706,6 +1764,7 @@ mod tests {
                     failed: 0,
                     total_changed: 1,
                     total_skipped: 2,
+                    aborted: 0,
                     dry_run: true,
                 },
             },
@@ -1921,6 +1980,118 @@ mod tests {
             ExecutionMode::Async,
             "no flag keeps the plan's mode"
         );
+    }
+
+    #[test]
+    fn a_batch_names_its_hosts() {
+        let (stream, lines) = event_lines(
+            &ExecutorEvent::BatchStarted {
+                index: 1,
+                total: 3,
+                hosts: vec!["web-3".into(), "web-4".into()],
+            },
+            &no_display_ids(),
+        );
+        assert_eq!(stream, OutStream::Out);
+        assert_eq!(lines, ["--- Batch 2/3: web-3, web-4 ---"]);
+    }
+
+    #[test]
+    fn a_stopped_rollout_gives_its_reason_and_every_host_left_out() {
+        let (stream, lines) = event_lines(
+            &ExecutorEvent::HostsAborted {
+                hosts: vec!["web-5".into(), "web-6".into()],
+                reason: "3 of 6 hosts failed, more than max-fail 1".into(),
+            },
+            &no_display_ids(),
+        );
+        assert_eq!(stream, OutStream::Err);
+        assert_eq!(
+            lines,
+            [
+                "--- Rollout stopped: 3 of 6 hosts failed, more than max-fail 1 ---",
+                "[web-5] ABORTED (not started)",
+                "[web-6] ABORTED (not started)",
+            ]
+        );
+    }
+
+    fn summary_with(failed: usize, aborted: usize) -> executor::result::RunSummary {
+        executor::result::RunSummary {
+            total_hosts: 6,
+            succeeded: 6 - failed - aborted,
+            failed,
+            total_changed: 1,
+            total_skipped: 0,
+            aborted,
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn the_summary_counts_aborted_hosts_only_when_there_are_some() {
+        let line = |s| {
+            event_lines(
+                &ExecutorEvent::RunComplete { summary: s },
+                &no_display_ids(),
+            )
+            .1[1]
+                .clone()
+        };
+        assert_eq!(
+            line(summary_with(1, 0)),
+            "Hosts: 6 total, 5 ok, 1 failed, 1 changed"
+        );
+        assert_eq!(
+            line(summary_with(2, 3)),
+            "Hosts: 6 total, 1 ok, 2 failed, 3 aborted, 1 changed"
+        );
+    }
+
+    #[test]
+    fn aborted_hosts_fail_the_run() {
+        assert!(run_failure(&summary_with(0, 0)).is_none());
+        let err = run_failure(&summary_with(2, 3)).unwrap().to_string();
+        assert!(err.contains("2 host(s) failed, 3 not started"), "{err}");
+    }
+
+    #[test]
+    fn the_rollout_flags_override_the_plan() {
+        let mut plan = config::parse_plan("plan \"p\" {\n serial 5\n max-fail 0\n}").unwrap();
+        apply_rollout_override(&mut plan, Some("1, 25%"), Some("10%")).unwrap();
+        assert_eq!(
+            plan.serial,
+            [
+                glidesh::config::types::Amount::Count(1),
+                glidesh::config::types::Amount::Percent(25)
+            ]
+        );
+        assert_eq!(
+            plan.max_fail,
+            Some(glidesh::config::types::Amount::Percent(10))
+        );
+
+        let mut plan = config::parse_plan("plan \"p\" {\n serial 5\n}").unwrap();
+        apply_rollout_override(&mut plan, None, None).unwrap();
+        assert_eq!(plan.serial, [glidesh::config::types::Amount::Count(5)]);
+    }
+
+    #[test]
+    fn a_bad_rollout_flag_is_rejected_like_the_plan_setting() {
+        let mut plan = config::parse_plan("plan \"p\" { }").unwrap();
+        for sizes in ["0", "", ",", "1,,2"] {
+            let err = apply_rollout_override(&mut plan, Some(sizes), None).unwrap_err();
+            assert!(
+                err.to_string().contains("--serial must be"),
+                "{sizes:?}: {err}"
+            );
+            assert!(
+                !matches!(err, GlideshError::ConfigParse { .. }),
+                "a flag is not a plan file: {err}"
+            );
+        }
+        let err = apply_rollout_override(&mut plan, None, Some("150%")).unwrap_err();
+        assert!(err.to_string().contains("--max-fail must be"), "{err}");
     }
 
     #[test]

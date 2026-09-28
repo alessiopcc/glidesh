@@ -17,6 +17,17 @@ When you run a plan, the TUI shows a split-screen view:
 - **Middle**: node table with host status, current step, and timing
 - **Bottom**: scrollable log panel (combined or per-node)
 
+A host's status is one of:
+
+| Status | Meaning |
+|---|---|
+| `QUEUED` | Not started yet — waiting for a free [`--concurrency`](/concepts/execution-modes/#concurrency) slot, or for an earlier [batch](/concepts/execution-modes/#rolling-deploys) |
+| `CONNECTING` | Opening its SSH connection |
+| `RUNNING` | Working through the plan |
+| `OK` | Finished without a failure |
+| `FAILED` | Stopped on a failure |
+| `ABORTED` | Never started: a [rolling run](/concepts/execution-modes/#rolling-deploys) was stopped before its batch |
+
 ```bash
 glidesh run -i inventory.kdl -p deploy.kdl
 ```
