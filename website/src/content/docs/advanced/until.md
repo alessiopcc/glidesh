@@ -60,9 +60,10 @@ is ready. `until=` asks whether the host is ready for a whole step.
   if it would have succeeded — so a command that hangs cannot hold the step past
   `until-timeout`. glidesh stops trying once another attempt could not start before the
   deadline.
-- While it waits, the run says so — `waiting until: <command> (up to 600s)`, then every 30
-  seconds `still waiting (90s of 600s)` — in the plain output, the TUI and the
-  [run log](/concepts/logs/).
+- While it waits, the run says so — `waiting until: <command> (up to 600s)` once the first
+  attempt fails (or after 30 seconds of a slow one), then every 30 seconds
+  `still waiting (90s of 600s)`, even while an attempt is running — in the plain output, the
+  TUI and the [run log](/concepts/logs/).
 - The command is interpolated like any parameter, so it can use `${@host.address}` and other
   variables, and runs with the step's [`run-as`](/advanced/run-as/).
 - The gate is not a task: it has no `register`, and it does not count toward the summary.

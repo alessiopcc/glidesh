@@ -148,6 +148,20 @@ pub struct SyncSlot {
 /// How often a long `until=` wait reports that it is still waiting.
 const WAIT_REPORT_EVERY: Duration = Duration::from_secs(30);
 
+/// When an `until=` gate last said it was waiting.
+struct WaitReports {
+    started: Instant,
+    last: Option<Instant>,
+}
+
+impl WaitReports {
+    /// The first report comes as soon as an attempt fails, or this long into a slow first
+    /// attempt; later ones this long after the previous.
+    fn next_due(&self) -> Instant {
+        self.last.unwrap_or(self.started) + WAIT_REPORT_EVERY
+    }
+}
+
 /// Lines of the gate command's last output kept in a timeout error.
 const GATE_OUTPUT_LINES: usize = 20;
 
@@ -655,7 +669,10 @@ impl NodeRunner {
         let deadline = started.checked_add(Duration::from_secs(gate.timeout));
         let left =
             |now: Instant| deadline.map_or(Duration::MAX, |d| d.saturating_duration_since(now));
-        let mut last_report: Option<Instant> = None;
+        let mut reports = WaitReports {
+            started,
+            last: None,
+        };
         loop {
             // Each attempt is bounded by what is left of the timeout: a command that never
             // exits would otherwise hold the step forever, and one that exits 0 after the
@@ -663,10 +680,15 @@ impl NodeRunner {
             let remaining = left(Instant::now());
             let attempt =
                 tokio::time::timeout(remaining, session.exec_as(&command, run_as.as_ref()));
-            let out = match attempt.await {
+            let result = if self.dry_run {
+                attempt.await
+            } else {
+                self.reporting(step, gate, &mut reports, attempt).await
+            };
+            let out = match result {
                 Ok(result) => result.map_err(|e| format!("until=: {e}"))?,
                 Err(_) if self.dry_run => {
-                    self.report_waiting(step, gate, started.elapsed(), true);
+                    self.report_preview(step, gate);
                     return Ok(());
                 }
                 Err(_) => return Err(gate_timeout_error(gate, None)),
@@ -674,29 +696,70 @@ impl NodeRunner {
             if out.exit_code == 0 {
                 return Ok(());
             }
-            let elapsed = started.elapsed();
             if self.dry_run {
-                self.report_waiting(step, gate, elapsed, true);
+                self.report_preview(step, gate);
                 return Ok(());
             }
             if left(Instant::now()) < Duration::from_secs(gate.interval) {
                 return Err(gate_timeout_error(gate, Some(&out)));
             }
-            if last_report.is_none_or(|at| at.elapsed() >= WAIT_REPORT_EVERY) {
-                self.report_waiting(step, gate, elapsed, false);
-                last_report = Some(Instant::now());
+            if reports.last.is_none() {
+                self.report_waiting(step, gate, &mut reports);
             }
-            tokio::time::sleep(Duration::from_secs(gate.interval)).await;
+            let pause = tokio::time::sleep(Duration::from_secs(gate.interval));
+            self.reporting(step, gate, &mut reports, pause).await;
         }
     }
 
-    fn report_waiting(&self, step: &Step, gate: &UntilGate, elapsed: Duration, preview: bool) {
+    /// Await `work`, reporting that the gate is still waiting whenever a report falls due —
+    /// so neither a slow attempt nor a long `until-interval` goes quiet.
+    async fn reporting<F: std::future::Future>(
+        &self,
+        step: &Step,
+        gate: &UntilGate,
+        reports: &mut WaitReports,
+        work: F,
+    ) -> F::Output {
+        tokio::pin!(work);
+        loop {
+            let due = tokio::time::Instant::from_std(reports.next_due());
+            tokio::select! {
+                out = &mut work => return out,
+                _ = tokio::time::sleep_until(due) => self.report_waiting(step, gate, reports),
+            }
+        }
+    }
+
+    fn report_waiting(&self, step: &Step, gate: &UntilGate, reports: &mut WaitReports) {
+        self.send_waiting(
+            step,
+            gate,
+            reports.started.elapsed(),
+            reports.last.is_none(),
+            false,
+        );
+        reports.last = Some(Instant::now());
+    }
+
+    fn report_preview(&self, step: &Step, gate: &UntilGate) {
+        self.send_waiting(step, gate, Duration::ZERO, true, true);
+    }
+
+    fn send_waiting(
+        &self,
+        step: &Step,
+        gate: &UntilGate,
+        elapsed: Duration,
+        first: bool,
+        preview: bool,
+    ) {
         let _ = self.event_tx.send(ExecutorEvent::StepWaiting {
             host: self.host.name.clone(),
             step: step.name.clone(),
             command: gate.command.clone(),
             elapsed_secs: elapsed.as_secs(),
             timeout_secs: gate.timeout,
+            first,
             preview,
         });
     }
@@ -1095,6 +1158,21 @@ mod tests {
             "{err}"
         );
         assert!(err.ends_with("line 50"), "{err}");
+    }
+
+    /// A slow first attempt still opens the wait on time; afterwards reports keep a steady
+    /// pace from the previous one.
+    #[test]
+    fn wait_reports_fall_due_from_the_start_then_from_the_last_report() {
+        let started = Instant::now();
+        let mut reports = WaitReports {
+            started,
+            last: None,
+        };
+        assert_eq!(reports.next_due(), started + WAIT_REPORT_EVERY);
+        let at = started + Duration::from_secs(5);
+        reports.last = Some(at);
+        assert_eq!(reports.next_due(), at + WAIT_REPORT_EVERY);
     }
 
     #[test]

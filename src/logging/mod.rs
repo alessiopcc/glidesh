@@ -263,6 +263,7 @@ impl RunLogger {
                 command,
                 elapsed_secs,
                 timeout_secs,
+                first,
                 preview,
             } => {
                 self.log_line(
@@ -270,7 +271,7 @@ impl RunLogger {
                     &format!(
                         "[WAITING] [step: {}] {}",
                         step,
-                        waiting_text(command, *elapsed_secs, *timeout_secs, *preview)
+                        waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
                     ),
                 );
             }
@@ -555,6 +556,7 @@ mod tests {
             command: "test -e /ready".to_string(),
             elapsed_secs: 30,
             timeout_secs: 300,
+            first: false,
             preview: false,
         });
         let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();

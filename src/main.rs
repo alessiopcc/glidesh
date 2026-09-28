@@ -718,6 +718,7 @@ fn event_lines(
             command,
             elapsed_secs,
             timeout_secs,
+            first,
             preview,
             ..
         } => (
@@ -725,7 +726,7 @@ fn event_lines(
             vec![format!(
                 "[{}]   {}",
                 display_id(host, display_ids),
-                executor::waiting_text(command, *elapsed_secs, *timeout_secs, *preview)
+                executor::waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
             )],
         ),
         ExecutorEvent::TaskSkipped {
@@ -1818,6 +1819,7 @@ mod tests {
                 command: "curl -sf localhost".to_string(),
                 elapsed_secs: 0,
                 timeout_secs: 300,
+                first: true,
                 preview: false,
             },
             &no_display_ids(),

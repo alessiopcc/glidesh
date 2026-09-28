@@ -43,10 +43,16 @@ pub fn skipped_suffix(skipped: usize) -> String {
 }
 
 /// How a `StepWaiting` event reads, in the plain output, the TUI and the run log alike.
-pub fn waiting_text(command: &str, elapsed_secs: u64, timeout_secs: u64, preview: bool) -> String {
+pub fn waiting_text(
+    command: &str,
+    elapsed_secs: u64,
+    timeout_secs: u64,
+    first: bool,
+    preview: bool,
+) -> String {
     if preview {
         format!("until not met yet: {command} (a run would wait up to {timeout_secs}s)")
-    } else if elapsed_secs == 0 {
+    } else if first {
         format!("waiting until: {command} (up to {timeout_secs}s)")
     } else {
         format!("still waiting ({elapsed_secs}s of {timeout_secs}s) until: {command}")
@@ -118,8 +124,9 @@ pub enum ExecutorEvent {
         tasks: usize,
         reason: String,
     },
-    /// A step's `until=` gate has not opened yet. Sent on the first failed attempt and then
-    /// at most every `WAIT_REPORT_EVERY`, so a long wait shows progress without flooding.
+    /// A step's `until=` gate has not opened yet. Sent when the first attempt fails (or is
+    /// still running after `WAIT_REPORT_EVERY`) and then every `WAIT_REPORT_EVERY`, so a
+    /// long wait shows progress without flooding.
     StepWaiting {
         host: String,
         step: String,
@@ -127,6 +134,8 @@ pub enum ExecutorEvent {
         command: String,
         elapsed_secs: u64,
         timeout_secs: u64,
+        /// The wait's first report, which opens it; later ones say it is still going on.
+        first: bool,
         /// A preview checks the gate once and never waits; this reports it closed.
         preview: bool,
     },
@@ -172,15 +181,15 @@ mod tests {
     #[test]
     fn waiting_says_how_long_and_a_preview_that_it_would_wait() {
         assert_eq!(
-            waiting_text("test -e /r", 0, 300, false),
+            waiting_text("test -e /r", 4, 300, true, false),
             "waiting until: test -e /r (up to 300s)"
         );
         assert_eq!(
-            waiting_text("test -e /r", 60, 300, false),
+            waiting_text("test -e /r", 60, 300, false, false),
             "still waiting (60s of 300s) until: test -e /r"
         );
         assert_eq!(
-            waiting_text("test -e /r", 0, 300, true),
+            waiting_text("test -e /r", 0, 300, true, true),
             "until not met yet: test -e /r (a run would wait up to 300s)"
         );
     }

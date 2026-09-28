@@ -101,6 +101,7 @@ impl EventSink {
                 command,
                 elapsed_secs,
                 timeout_secs,
+                first,
                 preview,
             } => ExecutorEvent::StepWaiting {
                 host,
@@ -108,6 +109,7 @@ impl EventSink {
                 command: scrub(command),
                 elapsed_secs,
                 timeout_secs,
+                first,
                 preview,
             },
             ExecutorEvent::TaskSkipped {
@@ -191,6 +193,7 @@ mod tests {
             command: "curl -u admin:hunter2 localhost".into(),
             elapsed_secs: 0,
             timeout_secs: 300,
+            first: true,
             preview: false,
         })
         .unwrap();
