@@ -57,7 +57,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                 mode = match mode_str {
                     Some("sync") => ExecutionMode::Sync,
                     Some("async") => ExecutionMode::Async,
-                    // A typo used to fall back to sync silently.
+                    // Rejected rather than defaulted: a typo would silently run in sync mode.
                     other => {
                         return Err(GlideshError::ConfigParse {
                             message: format!(

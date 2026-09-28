@@ -141,7 +141,6 @@ async fn a_canary_batch_then_the_rest() {
     }
 }
 
-/// `--max-fail 0` stops at the first failure; the hosts after it are never touched.
 #[tokio::test(flavor = "multi_thread")]
 async fn max_fail_stops_the_rollout_and_reports_the_rest_as_aborted() {
     skip_unless_integration!();
@@ -170,7 +169,6 @@ async fn max_fail_stops_the_rollout_and_reports_the_rest_as_aborted() {
     assert!(!ran(&ssh, "b").await && !ran(&ssh, "c").await, "{out}");
 }
 
-/// Without `max-fail`, one failure in a batch is not enough to stop — a whole batch is.
 #[tokio::test(flavor = "multi_thread")]
 async fn without_max_fail_only_a_wholly_failed_batch_stops() {
     skip_unless_integration!();
@@ -200,7 +198,6 @@ async fn without_max_fail_only_a_wholly_failed_batch_stops() {
     assert!(!ran(&ssh, "g").await && !ran(&ssh, "h").await, "{out}");
 }
 
-/// A `host` task runs once per run, not once per batch: later batches reuse its result.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_once_host_task_runs_once_across_batches() {
     skip_unless_integration!();

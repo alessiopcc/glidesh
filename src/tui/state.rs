@@ -567,7 +567,6 @@ mod tests {
         );
     }
 
-    /// A host waiting for a slot or an earlier batch is not connecting yet.
     #[test]
     fn a_host_is_queued_until_it_starts_connecting() {
         let mut s = state();
