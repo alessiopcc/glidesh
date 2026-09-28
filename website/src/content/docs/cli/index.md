@@ -246,11 +246,11 @@ runs otherwise.
 glidesh logs [OPTIONS]
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--last` | Print the most recent run |
-| `--node <HOST>` | Print only this host's log |
-| `--run <TEXT>` | Print the run whose directory name contains this text, such as a timestamp or plan name |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--last` | Print the most recent run | `false` |
+| `--node <HOST>` | Print only this host's log | every host |
+| `--run <TEXT>` | Print the run whose directory name contains this text, such as a timestamp or plan name | — |
 
 ```bash
 glidesh logs --last

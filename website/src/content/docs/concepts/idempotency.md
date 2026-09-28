@@ -4,9 +4,13 @@ description: How each module decides whether a host already matches the plan, an
 ---
 
 glidesh keeps no state between runs. Every task asks the host whether it already matches
-the plan, and changes only what differs — so running a plan twice is safe, and the second
-run reports nothing to change. A host edited by hand since the last run (drift) is found the
-same way and put back.
+the plan, and changes only what differs — so running a plan twice is safe. A host edited by
+hand since the last run (drift) is found the same way and put back.
+
+Whether a second run reports nothing to change depends on the modules a plan uses. Most
+compare state and report `ok` once it is in place; a few cannot know whether their work is
+done and run every time — `shell` without `check=`, `host`, and some `nix` actions. The
+table below says which is which.
 
 Each task has two phases: **check** compares the host with the plan, and **apply** makes the
 change when check found one. A task that was already in place reports `ok`; one that was
