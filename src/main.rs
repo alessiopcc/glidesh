@@ -143,12 +143,14 @@ fn load_secrets(
         structured = sf.structured;
     }
     // Which credential to look for depends on how the file was wrapped, so this happens
-    // after the config is parsed rather than from the flags alone.
+    // after the config is parsed rather than from the flags alone. Without a provider block
+    // there is no key to unwrap, so nothing is prompted for or read.
     let identity = match config.as_ref().map(|c| &c.provider) {
+        None => None,
         Some(glidesh::secrets::config::Provider::Age) => Some(glidesh::secrets::Identity::SshKey(
             secret_identity_path(flags.secret_identity.as_deref(), key),
         )),
-        _ => source_secret_pass(flags)?.map(glidesh::secrets::Identity::Passphrase),
+        Some(_) => source_secret_pass(flags)?.map(glidesh::secrets::Identity::Passphrase),
     };
     glidesh::secrets::set_identity(identity);
     let secrets = glidesh::secrets::Secrets::open(config.as_ref(), glidesh::secrets::identity())?;
@@ -1885,6 +1887,18 @@ mod tests {
             source_secret_pass(&args.secrets).unwrap().as_deref(),
             Some("from-file")
         );
+    }
+
+    /// The pass file does not exist, so reading it would fail the command.
+    #[test]
+    fn no_secrets_file_means_no_passphrase_is_sourced() {
+        let dir = tempfile::tempdir().unwrap();
+        let flags = cli::SecretSourceArgs {
+            secret_pass_file: Some(dir.path().join("does-not-exist")),
+            ..Default::default()
+        };
+        let loaded = load_secrets(&flags, None, dir.path()).unwrap();
+        assert!(loaded.vars.is_empty());
     }
 
     #[test]
