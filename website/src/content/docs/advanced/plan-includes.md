@@ -37,13 +37,54 @@ plans/
 
 The `include "common/security.kdl"` in `main.kdl` resolves to `plans/common/security.kdl`.
 
+Every relative path inside an included plan — its own `include`s, its `vars-file`s, and
+`file` sources — resolves from **that plan's** directory, so a reusable plan can keep its
+files beside it:
+
+```
+plans/
+├── main.kdl
+└── roles/web/
+    ├── plan.kdl
+    ├── defaults.kdl
+    └── nginx.conf
+```
+
+```kdl
+// plans/main.kdl
+plan "main" {
+    include "roles/web/plan.kdl"
+}
+```
+
+```kdl
+// plans/roles/web/plan.kdl
+plan "web" {
+    vars-file "defaults.kdl"                   // → plans/roles/web/defaults.kdl
+
+    step "Configure nginx" {
+        file "/etc/nginx/nginx.conf" src="nginx.conf" template=#true
+        // src → plans/roles/web/nginx.conf
+    }
+}
+```
+
+:::caution[Changed after v1.2.0]
+Earlier versions resolved an included plan's `file` sources from the top-level plan's
+directory. [`glidesh validate`](/cli/#glidesh-validate) points at a source it finds only
+there: `…/nginx.conf exists, but an included plan's sources resolve from its own directory`.
+Move the file next to the included plan, or give `src` a path relative to it.
+:::
+
 ## How It Works
 
 Included plan steps are **inlined** at parse time. The `include` directive is replaced with the steps from the included plan. The result is a flat sequence of steps, as if they were written directly in the parent plan.
 
 ## Variable Merging
 
-Included plans can define their own `vars` block. These are merged with the parent plan's variables, with the **parent's values taking precedence** on conflicts.
+Included plans can define their own `vars` block and `vars-file`s. These are merged into the parent plan's variables, with the **parent's values taking precedence** on conflicts. The merged variables are visible to every step, not only the included plan's own.
+
+When two plans included side by side define the same variable, the one included first wins; within an included plan, inline `vars` win over its `vars-file`s, as they do at the top level.
 
 ```kdl
 // common/security.kdl

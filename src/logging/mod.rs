@@ -52,6 +52,8 @@ pub struct RunLogger {
     started_at: chrono::DateTime<Utc>,
     node_files: HashMap<String, fs::File>,
     node_summaries: HashMap<String, NodeSummary>,
+    /// Per host. A skipped step is started too, so this counts every step a host reached.
+    steps_started: HashMap<String, usize>,
     /// Learned from the closing `RunComplete`, so a saved summary records whether its
     /// `changed` counts were applied or merely previewed.
     dry_run: bool,
@@ -77,6 +79,7 @@ impl RunLogger {
             started_at: now,
             node_files: HashMap::new(),
             node_summaries: HashMap::new(),
+            steps_started: HashMap::new(),
             dry_run: false,
         })
     }
@@ -181,6 +184,7 @@ impl RunLogger {
                     host,
                     &format!("[step: {}] ({}/{})", step, step_index + 1, total_steps),
                 );
+                *self.steps_started.entry(host.clone()).or_default() += 1;
             }
             ExecutorEvent::ModuleCheck {
                 host,
@@ -292,8 +296,16 @@ impl RunLogger {
                         status, counted, changed, skipped
                     ),
                 );
+                // A host stops at the first failure, so a failed host's last started step
+                // is the one that failed.
+                let started = self.steps_started.get(host).copied().unwrap_or(0);
                 if let Some(summary) = self.node_summaries.get_mut(host) {
                     summary.status = status.to_string();
+                    summary.steps_completed = if *success {
+                        started
+                    } else {
+                        started.saturating_sub(1)
+                    };
                 }
             }
             ExecutorEvent::RunComplete { summary } => self.dry_run = summary.dry_run,
@@ -432,6 +444,48 @@ mod tests {
             assert!(log.contains(expected), "expected {expected} in: {log}");
             assert!(!log.contains(absent), "unexpected {absent} in: {log}");
         }
+    }
+
+    fn step_started(index: usize) -> ExecutorEvent {
+        ExecutorEvent::StepStarted {
+            host: "web-1".to_string(),
+            step: format!("step {index}"),
+            step_index: index,
+            total_steps: 3,
+        }
+    }
+
+    fn steps_completed_after(started: usize, success: bool) -> usize {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        for index in 0..started {
+            logger.handle_event(&step_started(index));
+        }
+        logger.handle_event(&ExecutorEvent::NodeComplete {
+            host: "web-1".to_string(),
+            success,
+            changed: 0,
+            skipped: 0,
+            dry_run: false,
+        });
+        logger.write_summary().unwrap();
+        storage::read_summary(logger.run_dir()).unwrap().nodes["web-1"].steps_completed
+    }
+
+    #[test]
+    fn a_successful_host_completed_every_step_it_started() {
+        assert_eq!(steps_completed_after(3, true), 3);
+        assert_eq!(steps_completed_after(0, true), 0);
+    }
+
+    #[test]
+    fn a_failed_host_did_not_complete_the_step_it_failed_in() {
+        assert_eq!(steps_completed_after(2, false), 1);
+        assert_eq!(
+            steps_completed_after(0, false),
+            0,
+            "failed before its first step"
+        );
     }
 
     #[test]

@@ -574,7 +574,7 @@ glidesh runs every plugin process inside a sandbox:
 | **stderr redaction** | All | Plugin stderr is scrubbed of decrypted secrets before it reaches the debug log. |
 | **Temp workdir** | All | Plugin CWD is the system temp directory, not the project directory. |
 | **Session isolation** | Unix | `setsid()` — plugin cannot signal glidesh's process group. |
-| **Filesystem restriction** | Linux 5.13+ | [landlock](https://docs.kernel.org/userspace-api/landlock.html) limits access to `/tmp`, `/usr`, `/lib`, `/lib64`. Home dirs, project files, and SSH keys are blocked. |
+| **Filesystem restriction** | Linux 5.13+ | [landlock](https://docs.kernel.org/userspace-api/landlock.html) limits access to `/tmp`, `/usr`, `/lib`, `/lib64`, plus read and execute on the plugin's own file. Home dirs, project files — including the files next to the plugin — and SSH keys are blocked. A plugin must therefore be self-contained: it cannot load helper files from its own directory. |
 
 Runtime (check/apply) processes also receive `GLIDESH_PROTOCOL_VERSION` and `GLIDESH_MODULE_NAME` environment variables.
 

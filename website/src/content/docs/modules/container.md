@@ -212,6 +212,8 @@ Removal is verified: if the existing container cannot be removed, the task fails
 
 Readiness parameters (`wait`, `wait-timeout`, `wait-interval`, `ready-cmd`) are glidesh-side and deliberately excluded from the hash — changing a probe must not recreate a healthy container.
 
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
+
 ## `--diff`
 
 With [`--diff`](/cli/#previewing-a-run), a container about to be recreated because its

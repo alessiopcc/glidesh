@@ -108,6 +108,12 @@ impl ModuleRegistry {
         registry
     }
 
+    /// Names of the built-in modules, in no particular order. `host` is not among them: the
+    /// executor runs it itself.
+    pub fn builtin_names(&self) -> impl Iterator<Item = &str> {
+        self.modules.keys().map(String::as_str)
+    }
+
     pub fn with_external(inventory_dir: Option<&Path>) -> Self {
         let mut registry = Self::new();
 

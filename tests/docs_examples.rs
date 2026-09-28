@@ -69,3 +69,46 @@ fn every_plan_in_the_docs_parses() {
         failures.join("\n")
     );
 }
+
+/// Every plan under `examples/` loads as `run` loads it — includes and `vars-file`s resolved
+/// — and every local `file` source it names exists.
+#[test]
+fn every_example_plan_resolves() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for entry in std::fs::read_dir(&examples).unwrap() {
+        let plan_path = entry.unwrap().path().join("plan.kdl");
+        if !plan_path.exists() {
+            continue;
+        }
+        checked += 1;
+        let content = std::fs::read_to_string(&plan_path).unwrap();
+        let dir = plan_path.parent().unwrap();
+        let result = glidesh::config::parse_plan(&content).and_then(|mut plan| {
+            glidesh::config::resolve_includes(&mut plan, dir)?;
+            Ok(plan)
+        });
+        match result {
+            Ok(plan) => failures.extend(
+                glidesh::config::checks::missing_file_sources(&plan, dir)
+                    .into_iter()
+                    .map(|m| format!("{}: {m}", plan_path.display())),
+            ),
+            Err(e) => failures.push(format!("{}: {e}", plan_path.display())),
+        }
+    }
+    assert!(checked >= 10, "only {checked} example plans found");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An included plan's variables reach the run: the multi-tier example's `${ntp-service}` is
+/// defined only in the plan it includes.
+#[test]
+fn the_multi_tier_example_gets_its_variable_from_the_included_plan() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/multi-tier");
+    let content = std::fs::read_to_string(dir.join("plan.kdl")).unwrap();
+    let mut plan = glidesh::config::parse_plan(&content).unwrap();
+    glidesh::config::resolve_includes(&mut plan, &dir).unwrap();
+    assert_eq!(plan.vars["ntp-service"], "chrony");
+}

@@ -363,6 +363,16 @@ pub struct Step {
     /// Evaluated once, before the step's `loop` is resolved — so it can guard a loop over a
     /// variable that might not exist, and cannot see `@item`.
     pub when: Option<Condition>,
+    /// Directory of the included plan this step came from, set by `resolve_includes`;
+    /// `None` for the top-level plan's own steps. Relative `file` sources resolve from here.
+    pub source_dir: Option<std::path::PathBuf>,
+}
+
+impl Step {
+    /// The directory this step's relative paths resolve from.
+    pub fn base_dir<'a>(&'a self, plan_dir: &'a std::path::Path) -> &'a std::path::Path {
+        self.source_dir.as_deref().unwrap_or(plan_dir)
+    }
 }
 
 #[derive(Debug, Clone)]

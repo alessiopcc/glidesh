@@ -722,7 +722,7 @@ impl NodeRunner {
                 template_data,
                 dry_run: self.dry_run,
                 diff: self.diff,
-                plan_base_dir: &self.plan_base_dir,
+                plan_base_dir: step.base_dir(&self.plan_base_dir),
                 run_as,
                 secrets: Some(self.secrets.registry()),
             };

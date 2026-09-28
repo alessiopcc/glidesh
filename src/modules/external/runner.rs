@@ -29,7 +29,7 @@ impl ExternalModule {
 
     fn spawn_plugin(&self, secrets: Option<Arc<SecretRegistry>>) -> Result<Child, GlideshError> {
         let mut cmd = super::discovery::build_tokio_command(&self.info);
-        super::sandbox::apply_runtime_sandbox(&mut cmd, &self.info.name);
+        super::sandbox::apply_runtime_sandbox(&mut cmd, &self.info.name, Some(&self.info.path));
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());

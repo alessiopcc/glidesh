@@ -18,7 +18,7 @@ package "telnet" state="absent"
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | *(positional)* | string | Package name |
-| `state` | string | `"present"` (install) or `"absent"` (remove) |
+| `state` | string | `"present"` (install, the default) or `"absent"` (remove) |
 
 ## Supported Package Managers
 
@@ -41,6 +41,8 @@ The package manager is detected automatically based on the target host's OS.
 ## Idempotency
 
 The module checks if the package is already installed (or already absent) before acting. No action is taken if the current state matches the desired state.
+
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
 
 ## Example
 

@@ -193,6 +193,18 @@ This renders to:
 reverse_proxy 10.0.1.5:8080
 ```
 
+### Group members
+
+`@group.<name>` is the list of hosts in an inventory group, for
+[template loops](/advanced/loops-register/#looping-over-inventory-groups). Each host has
+`name`, `address`, `user`, and `port`:
+
+```
+${for h in @group.backend}
+server ${h.address}:8080;
+${endfor}
+```
+
 ## Structured Variables
 
 Variables can also be lists of named fields, used for [template loops](/advanced/loops-register/#template-loops) and [structured step loops](/advanced/loops-register/#looping-over-structured-variables). Define them in a `vars` block using `-` nodes with named properties:

@@ -25,14 +25,14 @@ glidesh console [OPTIONS]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--inventory <PATH>` | `-i` | Path to the inventory file | `./inventory.kdl` |
-| `--target <NAME>` | `-t` | Target filter: group name, host name, or group:hostname | — |
-| `--command <CMD>` | `-c` | Command to run (skips the TUI; runs on resolved targets) | — |
-| `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
+| `--target <NAME>` | `-t` | A group, a host, or `group:host`; comma-separate several | — |
+| `--command <CMD>` | `-c` | Run this command on every target and print each host's output, instead of a shell | — |
+| `--key <PATH>` | `-k` | SSH private key — see [SSH Key Resolution](#ssh-key-resolution) | `~/.ssh/id_ed25519` |
 | `--concurrency <N>` | — | Max concurrent hosts when running a command (minimum 1) | `10` |
-| `--no-host-key-check` | — | Skip SSH host key verification | `false` |
-| `--accept-new-host-key` | — | Accept and save unknown host keys | `false` |
+| `--no-host-key-check` | — | Do not verify host keys against `~/.ssh/known_hosts` | `false` |
+| `--accept-new-host-key` | — | Trust and save the key of a host not yet in `~/.ssh/known_hosts`; a changed key still fails | `false` |
 | `--vars` | — | Substitute `${var}` references in `--command` from host variables and secrets (see [Variables and secrets](/cli/console/#variables-and-secrets---vars)) | `false` |
-| `--secrets <PATH>` | — | Path to the secrets file (used with `--vars`) | `secrets.kdl` next to the inventory |
+| `--secrets <PATH>` | — | Path to the secrets file (used with `--vars`) | `GLIDESH_SECRETS`, else `secrets.kdl` next to the inventory, else in the current directory |
 | `--ask-secret-pass` | — | Prompt for the secrets passphrase | `false` |
 | `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
 | `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key` |
@@ -76,7 +76,9 @@ The console resolves SSH keys using the same [resolution order](#ssh-key-resolut
 
 ## `glidesh run`
 
-Execute a plan against target hosts.
+Apply a plan to the hosts of an inventory, or run one command on a single host. Every
+task checks the host before changing it — see [Idempotency & Drift](/concepts/idempotency/)
+for what each module compares. `glidesh run --help` lists examples and those rules too.
 
 ```
 glidesh run [OPTIONS]
@@ -84,24 +86,27 @@ glidesh run [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--plan <PATH>` | `-p` | Path to the plan file | — |
-| `--inventory <PATH>` | `-i` | Path to the inventory file | — |
+| `--plan <PATH>` | `-p` | Plan to apply | each host's [`plan=`](#inventory-linked-plans) |
+| `--inventory <PATH>` | `-i` | Inventory listing the hosts to run on | — |
 | `--target <NAME>` | `-t` | Target filter: group name, host name, `group:hostname`, or a comma-separated list of any of these | — |
-| `--host <ADDR>` | — | Single host for ad-hoc mode | — |
-| `--user <USER>` | `-u` | SSH user (ad-hoc mode only) | `root` |
-| `--port <PORT>` | `-P` | SSH port | `22` |
-| `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
-| `--command <CMD>` | `-c` | Ad-hoc command to run | — |
+| `--host <ADDR>` | — | Run on this one address instead of an inventory, with `--plan` or `--command` | — |
+| `--user <USER>` | `-u` | SSH user for `--host` (inventory hosts set their own) | `root` |
+| `--port <PORT>` | `-P` | SSH port for `--host` (inventory hosts set their own) | `22` |
+| `--key <PATH>` | `-k` | SSH private key — see [SSH Key Resolution](#ssh-key-resolution) | `~/.ssh/id_ed25519` |
+| `--command <CMD>` | `-c` | Run this one command on `--host` instead of a plan ([ad-hoc mode](#ad-hoc-mode)) | — |
 | `--mode <MODE>` | `-m` | [Execution mode](/concepts/execution-modes/): `sync` or `async`, overriding the plan's `mode` | the plan's `mode`, else `sync` |
 | `--serial <SIZES>` | — | [Roll out in batches](/concepts/execution-modes/#rolling-deploys), overriding the plan's `serial`: comma-separated counts or percentages, e.g. `1,25%` | the plan's `serial`, else one batch |
 | `--max-fail <N\|N%>` | — | Stop starting batches once more hosts than this have failed, overriding the plan's `max-fail` | the plan's `max-fail`, else stop only when a whole batch fails |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
 | `--dry-run` | — | Report what would change without applying it | `false` |
 | `--diff` | — | Show the detail behind each pending change, where the module can describe it | `false` |
-| `--no-tui` | `-T` | Disable TUI, use plain text output | `false` |
-| `--no-host-key-check` | — | Skip SSH host key verification | `false` |
-| `--accept-new-host-key` | — | Accept and save unknown host keys to known_hosts | `false` |
-| `--secrets <PATH>` | — | Path to the secrets file | `secrets.kdl` next to the inventory |
+| `--no-tui` | `-T` | Plain text output instead of the TUI (automatic when output is not a terminal) | `false` |
+| `--no-host-key-check` | — | Do not verify host keys against `~/.ssh/known_hosts` | `false` |
+| `--accept-new-host-key` | — | Trust and save the key of a host not yet in `~/.ssh/known_hosts`; a changed key still fails | `false` |
+| `--run-as <USER>` | — | Run tasks as this user, e.g. `root`; a [`run-as`](/advanced/run-as/) in the inventory or plan overrides it | — |
+| `--run-as-method <METHOD>` | — | How to become the `--run-as` user: `sudo`, `doas`, or `su` | `sudo` |
+| `--ask-pass` | — | Prompt for the escalation password (else `GLIDESH_RUNAS_PASS`) | `false` |
+| `--secrets <PATH>` | — | Path to the secrets file | `GLIDESH_SECRETS`, else `secrets.kdl` next to the inventory, else in the current directory |
 | `--ask-secret-pass` | — | Prompt for the secrets passphrase (else `GLIDESH_SECRET_PASS`) | `false` |
 | `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
 | `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key`, else `~/.ssh/id_ed25519` |
@@ -187,6 +192,9 @@ Run a single command on a host without a plan or inventory:
 glidesh run --host 192.168.1.10 -u deploy -c "uptime"
 ```
 
+`--command` needs `--host` and cannot be combined with `--plan`. To run a command on
+inventory hosts, use the console: `glidesh console -i inventory.kdl -t web -c "uptime"`.
+
 ### Plan mode
 
 Run a plan against an inventory:
@@ -230,17 +238,19 @@ glidesh run -i inventory.kdl
 
 ## `glidesh logs`
 
-View logs from past runs. Logs are stored in `~/.glidesh/runs/`.
+Browse past runs and their per-host logs. Logs are stored in `~/.glidesh/runs/`. Without
+`--last` or `--run`, glidesh opens a log browser on a terminal and lists the 20 most recent
+runs otherwise.
 
 ```
 glidesh logs [OPTIONS]
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--last` | Show the last run |
-| `--node <NAME>` | Filter by node name |
-| `--run <DIR>` | Specific run directory |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--last` | Print the most recent run | `false` |
+| `--node <HOST>` | Print only this host's log | every host |
+| `--run <TEXT>` | Print the run whose directory name contains this text, such as a timestamp or plan name | — |
 
 ```bash
 glidesh logs --last
@@ -277,10 +287,14 @@ without contacting a host:
 - **Modules exist.** A misspelled module name fails here. External modules are looked up next
   to the inventory when `-i` is given, otherwise in `./modules/` and `~/.glidesh/modules/`.
 - **Every `file` task has a `src`, and local sources exist.** A `src` is resolved from the
-  plan's directory, as a run resolves it. Not checked: a `fetch` source, which is a path on the host, and a `src`
-  containing `${…}`, which only a run can resolve.
+  directory of the plan the task is written in — an [included plan](/advanced/plan-includes/#path-resolution)'s
+  own — as a run resolves it. Not checked: a `fetch` source, which is a path on the host, and
+  a `src` containing `${…}`, which only a run can resolve.
 
-Every problem is listed, not only the first.
+Every problem is listed, not only the first, and the command exits non-zero if there is any.
+
+With `-i` alone, the inventory and its secrets file are parsed, but the plans its hosts name
+with `plan=` are not checked; pass each one with `-p`.
 
 It also **warns**, without failing, when a `file` upload without `template #true` contains
 `${name}` for a variable a run would define — a plan variable, any host's inventory variable
@@ -349,6 +363,7 @@ GLIDESH_SECRET_PASS=… glidesh secret get db-password
 | `GLIDESH_SECRETS` | Path to the secrets file, overriding auto-discovery. |
 | `GLIDESH_SECRET_IDENTITY` | SSH private key that unlocks an age-wrapped secrets file. Honoured by every subcommand; outranked by `--secret-identity`. |
 | `GLIDESH_RUNAS_PASS` | Privilege-escalation password for `run-as` (else `--ask-pass`). |
+| `VISUAL`, `EDITOR` | Editor for `glidesh secret edit` and for opening a log from the logs browser (`VISUAL` first). |
 
 ```bash
 RUST_LOG=glidesh=debug glidesh run -i inventory.kdl -p plan.kdl

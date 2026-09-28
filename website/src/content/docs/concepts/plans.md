@@ -44,6 +44,8 @@ plan "deploy-app" {
 - **max-fail** — stop a rolling run once too many hosts fail, e.g. `max-fail "10%"` (overridden by `--max-fail`)
 - **vars** — plan-scoped variables, merged with inventory vars (supports both scalar and [structured variables](/concepts/variables/#structured-variables))
 - **vars-file** — load variables from an external KDL file (see below)
+- **run-as** / **run-as-method** — attributes on the `plan` node that escalate privileges for every step, e.g. `plan "deploy" run-as="root" { … }` — see [Privilege Escalation](/advanced/run-as/)
+- **step** and **include** — the plan's steps, and other plans inlined among them (see [Steps](#steps) and [Including Other Plans](#including-other-plans))
 
 ## External Vars Files
 
@@ -134,7 +136,7 @@ plan "deploy" {
 }
 ```
 
-Absolute paths are used as-is. You can run glidesh from any directory — paths always resolve from the plan file's location.
+Absolute paths are used as-is. You can run glidesh from any directory — paths always resolve from the plan file's location. For an [included plan](/advanced/plan-includes/#path-resolution), that is the included file's own directory.
 
 ## Including Other Plans
 

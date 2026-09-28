@@ -44,7 +44,7 @@ Each `host` node takes two positional arguments:
 2. **Address** — IP or hostname to connect to
 
 Optional properties:
-- `user` — SSH username (overrides group/global vars)
+- `user` — SSH username (default: the `deploy-user` variable, else `root`)
 - `port` — SSH port (default: 22)
 - `plan` — path to a plan file to run on this host (see [Inline Plans](#inline-plans))
 
@@ -89,6 +89,12 @@ Optional properties on `jump`:
 - `port` — SSH port on the bastion (default: 22)
 
 **Resolution order:** a host-level `jump` overrides the group-level `jump`. If no `user` is set on the jump node, it inherits the resolved user of the target host.
+
+## Privilege Escalation
+
+A top-level `run-as "<user>"` node sets the default escalation for every host; `group` and
+`host` accept `run-as="<user>"` and `run-as-method="sudo|doas|su"` attributes. See
+[Privilege Escalation](/advanced/run-as/) for how these combine with plan-level settings.
 
 ## Inline Plans
 
@@ -135,6 +141,7 @@ The most specific value wins. Variables can be referenced in plans using `${var-
 | Variable | Description |
 |----------|-------------|
 | `ssh-key` | Path to the SSH private key. Used when `--key` is not provided on the CLI. Supports `~` expansion. |
+| `deploy-user` | SSH username for hosts without a `user=` of their own. Defaults to `root`. |
 
 ```kdl
 vars {

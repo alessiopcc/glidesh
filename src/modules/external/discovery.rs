@@ -150,7 +150,7 @@ fn probe_module(path: &Path) -> Result<ExternalModuleInfo, String> {
     };
 
     let mut cmd = build_probe_command(path, interpreter.as_deref());
-    super::sandbox::apply_probe_sandbox(&mut cmd);
+    super::sandbox::apply_probe_sandbox(&mut cmd, Some(path));
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

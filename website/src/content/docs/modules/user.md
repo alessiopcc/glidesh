@@ -26,13 +26,15 @@ user "olduser" {
 |-----------|------|-------------|
 | *(positional)* | string | Username |
 | `uid` | integer | Numeric user ID |
-| `groups` | string(s) | Supplementary groups |
+| `groups` | string or list | Supplementary groups: `groups "docker" "sudo"`, a `-` list block, or `groups="docker,sudo"` |
 | `shell` | string | Login shell |
-| `state` | string | `"present"` or `"absent"` |
+| `state` | string | `"present"` (default) or `"absent"` |
 
 ## Idempotency
 
 The module queries user properties (`id`, `getent`) and compares them against the desired state. Only mismatched properties are modified. If the user already exists with the correct uid, shell, and groups, no action is taken.
+
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
 
 ## Example
 

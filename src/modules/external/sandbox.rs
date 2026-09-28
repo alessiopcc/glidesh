@@ -4,6 +4,8 @@
 //! temp working directory, Unix session isolation (`setsid`), and
 //! Linux filesystem restriction (landlock, best-effort).
 
+use std::path::Path;
+
 fn minimal_env() -> Vec<(String, String)> {
     let mut env = Vec::new();
     let passthrough: &[&str] = if cfg!(windows) {
@@ -20,12 +22,19 @@ fn minimal_env() -> Vec<(String, String)> {
     env
 }
 
-pub fn apply_probe_sandbox(cmd: &mut std::process::Command) {
-    apply_common_std(cmd);
+/// `module` is the plugin's own file, which the sandbox must let the child read and execute
+/// wherever it lives — a plugin sits next to the inventory or in `~/.glidesh/modules/`, both
+/// outside the directories the sandbox otherwise allows.
+pub fn apply_probe_sandbox(cmd: &mut std::process::Command, module: Option<&Path>) {
+    apply_common_std(cmd, module);
 }
 
-pub fn apply_runtime_sandbox(cmd: &mut tokio::process::Command, module_name: &str) {
-    apply_common_tokio(cmd);
+pub fn apply_runtime_sandbox(
+    cmd: &mut tokio::process::Command,
+    module_name: &str,
+    module: Option<&Path>,
+) {
+    apply_common_tokio(cmd, module);
     cmd.env(
         "GLIDESH_PROTOCOL_VERSION",
         super::protocol::PROTOCOL_VERSION.to_string(),
@@ -33,7 +42,9 @@ pub fn apply_runtime_sandbox(cmd: &mut tokio::process::Command, module_name: &st
     cmd.env("GLIDESH_MODULE_NAME", module_name);
 }
 
-fn apply_common_std(cmd: &mut std::process::Command) {
+fn apply_common_std(cmd: &mut std::process::Command, module: Option<&Path>) {
+    #[cfg(not(unix))]
+    let _ = module;
     cmd.env_clear();
     for (k, v) in minimal_env() {
         cmd.env(&k, &v);
@@ -45,14 +56,16 @@ fn apply_common_std(cmd: &mut std::process::Command) {
         use std::os::unix::process::CommandExt;
         // Build the landlock ruleset in the parent process (heap allocation is safe here).
         // Only the final restrict_self() syscall runs in the child after fork().
-        let mut prepared = prepare_landlock();
+        let mut prepared = prepare_landlock(module);
         unsafe {
             cmd.pre_exec(move || pre_exec_sandbox(prepared.take()));
         }
     }
 }
 
-fn apply_common_tokio(cmd: &mut tokio::process::Command) {
+fn apply_common_tokio(cmd: &mut tokio::process::Command, module: Option<&Path>) {
+    #[cfg(not(unix))]
+    let _ = module;
     cmd.env_clear();
     for (k, v) in minimal_env() {
         cmd.env(&k, &v);
@@ -61,7 +74,7 @@ fn apply_common_tokio(cmd: &mut tokio::process::Command) {
 
     #[cfg(unix)]
     {
-        let mut prepared = prepare_landlock();
+        let mut prepared = prepare_landlock(module);
         unsafe {
             cmd.pre_exec(move || pre_exec_sandbox(prepared.take()));
         }
@@ -92,7 +105,7 @@ type PreparedLandlock = Option<()>;
 /// Build the landlock ruleset in the parent process. All heap allocation
 /// (PathFd opens, Ruleset builder, rule additions) happens here, before fork().
 #[cfg(target_os = "linux")]
-fn prepare_landlock() -> PreparedLandlock {
+fn prepare_landlock(module: Option<&Path>) -> PreparedLandlock {
     use landlock::{
         ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
         RulesetCreatedAttr,
@@ -107,17 +120,31 @@ fn prepare_landlock() -> PreparedLandlock {
     let fd_usr = PathFd::new("/usr").ok()?;
     let fd_lib = PathFd::new("/lib").ok()?;
     let fd_lib64 = PathFd::new("/lib64").ok()?;
+    // A rule on a file may only carry file rights; a directory right here would make
+    // `add_rule` fail and the whole ruleset be dropped, leaving the child unsandboxed.
+    let module_rule = match module {
+        Some(path) => Some(PathBeneath::new(
+            PathFd::new(path).ok()?,
+            AccessFs::ReadFile | AccessFs::Execute,
+        )),
+        None => None,
+    };
 
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))
         .and_then(|r: Ruleset| r.set_compatibility(CompatLevel::BestEffort).create())
         .and_then(|r: landlock::RulesetCreated| {
-            r.set_compatibility(CompatLevel::BestEffort)
+            let r = r
+                .set_compatibility(CompatLevel::BestEffort)
                 .add_rule(PathBeneath::new(fd_temp, read_write))?
                 .add_rule(PathBeneath::new(fd_usr, read_exec))?
                 .add_rule(PathBeneath::new(fd_lib, read_exec))?
-                .add_rule(PathBeneath::new(fd_lib64, read_exec))
+                .add_rule(PathBeneath::new(fd_lib64, read_exec))?;
+            match module_rule {
+                Some(rule) => r.add_rule(rule),
+                None => Ok(r),
+            }
         })
         .ok()?;
 
@@ -125,7 +152,7 @@ fn prepare_landlock() -> PreparedLandlock {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn prepare_landlock() -> PreparedLandlock {
+fn prepare_landlock(_module: Option<&Path>) -> PreparedLandlock {
     None
 }
 
@@ -181,6 +208,6 @@ mod tests {
     #[test]
     fn probe_sandbox_sets_env_clear() {
         let mut cmd = std::process::Command::new("echo");
-        apply_probe_sandbox(&mut cmd);
+        apply_probe_sandbox(&mut cmd, None);
     }
 }
