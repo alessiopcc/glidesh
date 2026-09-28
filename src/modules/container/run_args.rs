@@ -18,6 +18,10 @@ pub(super) const PARAM_HASH_LABEL: &str = "sh.glide.param-hash";
 /// carrying any value — an `environment` entry may be a secret.
 pub(super) const FIELD_HASHES_LABEL: &str = "sh.glide.field-hashes";
 
+/// Labels glidesh writes itself. The runtime keeps the last of two labels with one key,
+/// and a plan's `labels` come after glidesh's, so a plan could otherwise overwrite them.
+const RESERVED_LABEL_PREFIX: &str = "sh.glide.";
+
 /// Flags emitted as `--flag=value`.
 const EQ_FLAGS: &[(&str, &str)] = &[
     ("cgroupns", "--cgroupns"),
@@ -367,6 +371,26 @@ pub(super) fn build_run_args(
     for (key, flag) in LIST_FLAGS {
         if let Some(values) = params.args.get(*key).and_then(|v| v.as_list()) {
             args.push_list(key, flag, values, !ORDER_INSENSITIVE_LISTS.contains(key));
+        }
+    }
+
+    if let Some(labels) = params.args.get("labels").and_then(|v| v.as_map()) {
+        let mut reserved: Vec<&str> = labels
+            .keys()
+            .map(String::as_str)
+            .filter(|k| k.starts_with(RESERVED_LABEL_PREFIX))
+            .collect();
+        if !reserved.is_empty() {
+            reserved.sort_unstable();
+            return Err(GlideshError::Module {
+                module: "container".to_string(),
+                message: format!(
+                    "container '{}': label(s) {} use the reserved '{}' prefix",
+                    params.resource_name,
+                    reserved.join(", "),
+                    RESERVED_LABEL_PREFIX
+                ),
+            });
         }
     }
 
@@ -1353,5 +1377,20 @@ plan "p" {
             cmd.contains(&format!("--label '{FIELD_HASHES_LABEL}={hashes}'")),
             "{cmd}"
         );
+    }
+
+    #[test]
+    fn a_plan_cannot_set_the_labels_glidesh_writes() {
+        for key in [PARAM_HASH_LABEL, FIELD_HASHES_LABEL, "sh.glide.other"] {
+            let params = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                ("labels", map(&[(key, "forged"), ("team", "web")])),
+            ]);
+            let err = build_run_command("docker", "web", &params)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(key), "{err}");
+            assert!(err.contains("reserved 'sh.glide.' prefix"), "{err}");
+        }
     }
 }

@@ -59,7 +59,7 @@ Unknown parameters are rejected at check time, so a typo (`privledged`) fails lo
 | `ports` | list | Port mappings (`host:container`) |
 | `environment` | map | Environment variables |
 | `volumes` | list | Volume mounts (`host:container`) |
-| `labels` | map | Container labels |
+| `labels` | map | Container labels. Keys starting with `sh.glide.` are reserved for the labels glidesh writes, and are rejected |
 | `network` | string | `"host"`, `"bridge"`, `"none"`, `"container:<name>"`, or a custom network name (auto-created if it doesn't exist) |
 | `network-alias` | list | Extra DNS names on the attached network |
 | `dns` | list | DNS servers |
