@@ -152,8 +152,15 @@ const WAIT_REPORT_EVERY: Duration = Duration::from_secs(30);
 const GATE_OUTPUT_LINES: usize = 20;
 
 /// The failure of a gate that never opened, with the last attempt's output — it is nearly
-/// always where the real answer is.
-fn gate_timeout_error(gate: &UntilGate, last: &CommandOutput) -> String {
+/// always where the real answer is. `None` when that attempt was still running at the
+/// deadline, so it has no exit code and its output never arrived.
+fn gate_timeout_error(gate: &UntilGate, last: Option<&CommandOutput>) -> String {
+    let Some(last) = last else {
+        return format!(
+            "until= did not succeed within {}s: `{}` was still running at the deadline",
+            gate.timeout, gate.command
+        );
+    };
     let output: Vec<&str> = last
         .stdout
         .lines()
@@ -643,29 +650,40 @@ impl NodeRunner {
             .resolve(glidesh::modules::escalation::password());
 
         let started = Instant::now();
-        let timeout = Duration::from_secs(gate.timeout);
+        let deadline = started + Duration::from_secs(gate.timeout);
         let mut last_report: Option<Instant> = None;
         loop {
-            let out = session
-                .exec_as(&command, run_as.as_ref())
-                .await
-                .map_err(|e| format!("until=: {e}"))?;
+            // Each attempt is bounded by what is left of the timeout: a command that never
+            // exits would otherwise hold the step forever, and one that exits 0 after the
+            // deadline must not open the gate late.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let attempt =
+                tokio::time::timeout(remaining, session.exec_as(&command, run_as.as_ref()));
+            let out = match attempt.await {
+                Ok(result) => result.map_err(|e| format!("until=: {e}"))?,
+                Err(_) if self.dry_run => {
+                    self.report_waiting(step, gate, started.elapsed(), true);
+                    return Ok(());
+                }
+                Err(_) => return Err(gate_timeout_error(gate, None)),
+            };
             if out.exit_code == 0 {
                 return Ok(());
             }
             let elapsed = started.elapsed();
-            if self.dry_run || elapsed >= timeout {
-                if !self.dry_run {
-                    return Err(gate_timeout_error(gate, &out));
-                }
+            if self.dry_run {
                 self.report_waiting(step, gate, elapsed, true);
                 return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining < Duration::from_secs(gate.interval) {
+                return Err(gate_timeout_error(gate, Some(&out)));
             }
             if last_report.is_none_or(|at| at.elapsed() >= WAIT_REPORT_EVERY) {
                 self.report_waiting(step, gate, elapsed, false);
                 last_report = Some(Instant::now());
             }
-            tokio::time::sleep((timeout - elapsed).min(Duration::from_secs(gate.interval))).await;
+            tokio::time::sleep(Duration::from_secs(gate.interval)).await;
         }
     }
 
@@ -1049,7 +1067,7 @@ mod tests {
             stdout: "partial\n".into(),
             stderr: "connection refused\n".into(),
         };
-        let err = gate_timeout_error(&until_gate(), &out);
+        let err = gate_timeout_error(&until_gate(), Some(&out));
         assert!(
             err.starts_with("until= did not succeed within 60s: `curl -sf ${url}` last exited 7"),
             "{err}"
@@ -1068,12 +1086,20 @@ mod tests {
             stdout,
             stderr: String::new(),
         };
-        let err = gate_timeout_error(&until_gate(), &out);
+        let err = gate_timeout_error(&until_gate(), Some(&out));
         assert!(
             err.contains("line 31\n") && !err.contains("line 30\n"),
             "{err}"
         );
         assert!(err.ends_with("line 50"), "{err}");
+    }
+
+    #[test]
+    fn a_gate_still_running_at_the_deadline_says_so() {
+        assert_eq!(
+            gate_timeout_error(&until_gate(), None),
+            "until= did not succeed within 60s: `curl -sf ${url}` was still running at the deadline"
+        );
     }
 
     #[test]
@@ -1083,7 +1109,7 @@ mod tests {
             stdout: String::new(),
             stderr: " \n".into(),
         };
-        assert!(!gate_timeout_error(&until_gate(), &out).contains("last output"));
+        assert!(!gate_timeout_error(&until_gate(), Some(&out)).contains("last output"));
     }
 
     fn collection(rows: Vec<Vec<(&str, &str)>>) -> Vec<HashMap<String, String>> {

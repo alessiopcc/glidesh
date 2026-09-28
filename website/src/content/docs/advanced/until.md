@@ -53,14 +53,18 @@ is ready. `until=` asks whether the host is ready for a whole step.
   skipped step does not wait.
 - **Timing out fails the host**, like any failing step: the host stops and the error names the
   command, its last exit code and the tail of its last output. Nothing after it runs on that
-  host.
+  host. An attempt that is still running at the deadline is cut off and does not count, even
+  if it would have succeeded — so a command that hangs cannot hold the step past
+  `until-timeout`. glidesh stops trying once another attempt could not start before the
+  deadline.
 - While it waits, the run says so — `waiting until: <command> (up to 600s)`, then every 30
   seconds `still waiting (90s of 600s)` — in the plain output, the TUI and the
   [run log](/concepts/logs/).
 - The command is interpolated like any parameter, so it can use `${@host.address}` and other
   variables, and runs with the step's [`run-as`](/advanced/run-as/).
 - The gate is not a task: it has no `register`, and it does not count toward the summary.
-- **`--dry-run`** runs the command once and never waits. A gate that is not open yet is
+- **`--dry-run`** runs the command once and never waits between attempts (that one attempt
+  is still cut off at `until-timeout`). A gate that is not open yet is
   reported — `until not met yet: … (a run would wait up to 600s)` — and the preview goes on to
   the step's tasks.
 

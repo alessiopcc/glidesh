@@ -7,7 +7,7 @@ mod common;
 
 use assert_cmd::Command;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `Counted` opens on its third attempt. `Looped` counts its attempts: once per step, not
 /// per item. `Barrier` is a gate with no tasks, and `Handler` subscribes to it: waiting is
@@ -37,6 +37,16 @@ plan "timeout" {
     }
     step "After" {
         shell "touch /root/until-after-timeout"
+    }
+}
+"#;
+
+/// The command outlives the timeout and would then succeed: the gate must fail at the
+/// deadline rather than wait for it, and must not open late.
+const HANGING_PLAN: &str = r#"
+plan "hanging" {
+    step "Hangs" until="sleep 60; true" until-timeout=3 {
+        shell "touch /root/until-hung"
     }
 }
 "#;
@@ -125,6 +135,21 @@ async fn a_gate_that_never_opens_fails_the_host_with_its_last_output() {
             "{path}: nothing may run after the gate fails"
         );
     }
+
+    std::fs::write(dir.path().join("plan.kdl"), HANGING_PLAN).unwrap();
+    let started = Instant::now();
+    let (ok, out) = run(dir.path(), &[]);
+    assert!(!ok, "{out}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "a hanging gate must be cut off at its timeout, not waited for"
+    );
+    assert!(out.contains("was still running at the deadline"), "{out}");
+    let ran = ssh.exec("test -e /root/until-hung").await.unwrap();
+    assert_ne!(
+        ran.exit_code, 0,
+        "a gate cut off at its deadline must not open"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
