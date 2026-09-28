@@ -527,12 +527,8 @@ impl FileModule {
         exists: bool,
         content: &[u8],
     ) -> Result<String, GlideshError> {
-        let private = params
-            .args
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .and_then(file_diff::others_can_read)
-            == Some(false);
+        let private =
+            file_diff::mode_may_be_private(params.args.get("mode").and_then(|v| v.as_str()));
         let remote = if exists {
             file_diff::fetch_remote(ctx, dest).await?
         } else {

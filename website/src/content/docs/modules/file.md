@@ -154,7 +154,8 @@ file that is already in place. Instead of a diff, a one-line note says why none 
 - **Content holding a [secret](/concepts/secrets/#redaction)**: `diff hidden (content contains a secret)`.
   Redaction would not be enough here — the old side can hold the value a rotated secret
   replaced, and a diff's `+`/`-` prefixes split a multi-line secret so it no longer matches.
-- **A file other users cannot read**, on the host or under the plan's `mode` (`600`, `640`):
+- **A file other users cannot read**, on the host or under the plan's `mode` (`600`, `640`,
+  or any symbolic mode such as `u=rw,go=`, which glidesh does not evaluate):
   `diff hidden (not readable by other users)`. Matching secrets cannot catch a value the plan
   no longer uses — it is not registered, yet the host's copy still holds it — so a file kept
   private is treated as sensitive whatever it contains.

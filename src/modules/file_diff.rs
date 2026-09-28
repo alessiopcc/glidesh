@@ -58,6 +58,13 @@ pub async fn fetch_remote(ctx: &ModuleContext<'_>, path: &str) -> Result<Remote,
     Ok(Remote::Content(ctx.download_file(path).await?))
 }
 
+/// Whether the plan's `mode` could leave the file unreadable by other users. Only an octal
+/// mode can be read without the file's current mode; a symbolic one (`u=rw,go=`) goes to
+/// `chmod` as written, so it counts as private.
+pub fn mode_may_be_private(mode: Option<&str>) -> bool {
+    mode.is_some_and(|m| others_can_read(m) != Some(true))
+}
+
 /// Whether an octal mode (`644`, `0600`, `4755`) lets other users read the file, or `None`
 /// if it is not one.
 pub fn others_can_read(mode: &str) -> Option<bool> {
@@ -311,5 +318,14 @@ mod tests {
         assert_eq!(others_can_read("0600"), Some(false));
         assert_eq!(others_can_read("u+rw"), None);
         assert_eq!(others_can_read(""), None);
+    }
+
+    #[test]
+    fn a_symbolic_or_restrictive_plan_mode_counts_as_private() {
+        assert!(!mode_may_be_private(None));
+        assert!(!mode_may_be_private(Some("644")));
+        assert!(mode_may_be_private(Some("0600")));
+        assert!(mode_may_be_private(Some("u=rw,go=")));
+        assert!(mode_may_be_private(Some("a+r")));
     }
 }
