@@ -15,6 +15,9 @@ pub struct RunSummary {
     pub total_changed: usize,
     /// Tasks not run because a `when=` was false — a skipped step counts each of its tasks.
     pub total_skipped: usize,
+    /// Hosts never started because `max-fail` stopped a rolling run. Included in
+    /// `total_hosts`.
+    pub aborted: usize,
     /// Nothing was applied: `total_changed` counts what *would* change.
     pub dry_run: bool,
 }
@@ -37,6 +40,15 @@ pub fn skipped_suffix(skipped: usize) -> String {
         String::new()
     } else {
         format!(", {skipped} skipped")
+    }
+}
+
+/// The aborted count as a summary suffix — empty unless a rolling run was stopped.
+pub fn aborted_suffix(aborted: usize) -> String {
+    if aborted == 0 {
+        String::new()
+    } else {
+        format!(", {aborted} aborted")
     }
 }
 
@@ -102,6 +114,18 @@ pub enum ExecutorEvent {
         /// As written in the plan: interpolating it could fail on the very variable whose
         /// absence caused the skip.
         resource: String,
+        reason: String,
+    },
+    /// A rolling run is starting its next batch. Sent only when there is more than one.
+    BatchStarted {
+        /// Zero-based.
+        index: usize,
+        total: usize,
+        hosts: Vec<String>,
+    },
+    /// `max-fail` stopped a rolling run; these hosts were never started.
+    HostsAborted {
+        hosts: Vec<String>,
         reason: String,
     },
     NodeComplete {

@@ -39,7 +39,9 @@ plan "deploy-app" {
 
 ## Top-Level Properties
 
-- **mode** — `"sync"` (default) or `"async"` (can be overridden with `--mode` on CLI)
+- **mode** — `"sync"` (default) or `"async"` (can be overridden with `--mode` on CLI) — see [Execution Modes](/concepts/execution-modes/)
+- **serial** — roll out in batches, e.g. `serial 1 "25%"` (overridden by `--serial`) — see [Rolling Deploys](/concepts/execution-modes/#rolling-deploys)
+- **max-fail** — stop a rolling run once too many hosts fail, e.g. `max-fail "10%"` (overridden by `--max-fail`)
 - **vars** — plan-scoped variables, merged with inventory vars (supports both scalar and [structured variables](/concepts/variables/#structured-variables))
 - **vars-file** — load variables from an external KDL file (see below)
 

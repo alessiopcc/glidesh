@@ -54,6 +54,8 @@ pub enum NodeStatus {
     Running,
     Done,
     Failed,
+    /// Never started: a rolling run was stopped by `max-fail` before its batch.
+    Aborted,
 }
 
 impl std::fmt::Display for NodeStatus {
@@ -64,6 +66,7 @@ impl std::fmt::Display for NodeStatus {
             NodeStatus::Running => write!(f, "RUNNING"),
             NodeStatus::Done => write!(f, "OK"),
             NodeStatus::Failed => write!(f, "FAILED"),
+            NodeStatus::Aborted => write!(f, "ABORTED"),
         }
     }
 }
@@ -269,6 +272,31 @@ impl TuiState {
                 );
                 self.total_skipped += 1;
             }
+            ExecutorEvent::BatchStarted {
+                index,
+                total,
+                hosts,
+            } => {
+                self.combined_log.push(format!(
+                    "── Batch {}/{}: {} ──",
+                    index + 1,
+                    total,
+                    hosts.join(", ")
+                ));
+            }
+            ExecutorEvent::HostsAborted { hosts, reason } => {
+                self.combined_log
+                    .push(format!("ROLLOUT STOPPED: {}", reason));
+                for host in hosts {
+                    if let Some(&idx) = self.node_index.get(host) {
+                        self.nodes[idx].status = NodeStatus::Aborted;
+                        self.nodes[idx].finished_at = Some(Instant::now());
+                        // Counted as done, so the progress bar still reaches the end.
+                        self.completed += 1;
+                    }
+                    self.push_node_log(host, format!("ABORTED (not started): {}", reason));
+                }
+            }
             ExecutorEvent::NodeComplete {
                 host,
                 success,
@@ -294,7 +322,7 @@ impl TuiState {
                 self.run_complete = true;
                 self.finished_at = Some(Instant::now());
                 self.summary_line = Some(format!(
-                    "{}: {} hosts, {} ok, {} failed, {} {}{}",
+                    "{}: {} hosts, {} ok, {} failed{}, {} {}{}",
                     if summary.dry_run {
                         "Dry run complete (nothing applied)"
                     } else {
@@ -303,6 +331,7 @@ impl TuiState {
                     summary.total_hosts,
                     summary.succeeded,
                     summary.failed,
+                    crate::executor::aborted_suffix(summary.aborted),
                     summary.total_changed,
                     if summary.dry_run {
                         "would change"
@@ -520,6 +549,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aborted_hosts_are_marked_and_counted_as_done() {
+        let mut s = state();
+        s.handle_event(&ExecutorEvent::HostsAborted {
+            hosts: vec!["web-1".to_string()],
+            reason: "every host in the last batch failed (1 of 1)".to_string(),
+        });
+        assert_eq!(s.nodes[0].status, NodeStatus::Aborted);
+        assert_eq!(s.completed, 1);
+        assert!(
+            s.combined_log
+                .iter()
+                .any(|l| l.contains("ROLLOUT STOPPED: every host")),
+            "{:?}",
+            s.combined_log
+        );
+    }
+
     /// A host waiting for a slot or an earlier batch is not connecting yet.
     #[test]
     fn a_host_is_queued_until_it_starts_connecting() {
@@ -565,6 +612,7 @@ mod tests {
                 failed: 0,
                 total_changed: 2,
                 total_skipped: 0,
+                aborted: 0,
                 dry_run: true,
             },
         });
@@ -609,6 +657,7 @@ mod tests {
                     failed: 0,
                     total_changed: 1,
                     total_skipped: skipped,
+                    aborted: 0,
                     dry_run: false,
                 },
             });

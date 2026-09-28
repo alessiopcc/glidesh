@@ -179,26 +179,35 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
     })
 }
 
-/// A host count (`2`) or a percentage (`"25%"`), at least `min`. A count may also be written
-/// as a string (`"2"`).
-fn parse_amount(value: &kdl::KdlValue, setting: &str, min: usize) -> Result<Amount, GlideshError> {
-    let fail = |got: String| GlideshError::ConfigParse {
+fn amount_error(setting: &str, min: usize, got: &str) -> GlideshError {
+    GlideshError::ConfigParse {
         message: format!(
             "{setting} must be a host count of at least {min} or a percentage of \
              {min}–100%, got {got}"
         ),
-    };
+    }
+}
+
+/// A host count (`2`) or a percentage (`"25%"`), at least `min`. A count may also be written
+/// as a string (`"2"`).
+fn parse_amount(value: &kdl::KdlValue, setting: &str, min: usize) -> Result<Amount, GlideshError> {
     if let Some(n) = value.as_integer() {
         return usize::try_from(n)
             .ok()
             .filter(|n| *n >= min)
             .map(Amount::Count)
-            .ok_or_else(|| fail(n.to_string()));
+            .ok_or_else(|| amount_error(setting, min, &n.to_string()));
     }
-    let Some(text) = value.as_string() else {
-        return Err(fail(value.to_string()));
-    };
-    let shown = format!("\"{text}\"");
+    match value.as_string() {
+        Some(text) => parse_amount_text(text, setting, min),
+        None => Err(amount_error(setting, min, &value.to_string())),
+    }
+}
+
+/// [`parse_amount`] for text — also how `--serial` and `--max-fail` read their values, so the
+/// command line and a plan accept exactly the same thing.
+pub fn parse_amount_text(text: &str, setting: &str, min: usize) -> Result<Amount, GlideshError> {
+    let fail = || amount_error(setting, min, &format!("\"{text}\""));
     match text.trim().strip_suffix('%') {
         Some(pct) => pct
             .trim()
@@ -206,14 +215,14 @@ fn parse_amount(value: &kdl::KdlValue, setting: &str, min: usize) -> Result<Amou
             .ok()
             .filter(|p| *p <= 100 && usize::from(*p) >= min)
             .map(Amount::Percent)
-            .ok_or_else(|| fail(shown)),
+            .ok_or_else(fail),
         None => text
             .trim()
             .parse::<usize>()
             .ok()
             .filter(|n| *n >= min)
             .map(Amount::Count)
-            .ok_or_else(|| fail(shown)),
+            .ok_or_else(fail),
     }
 }
 

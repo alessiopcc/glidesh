@@ -18,11 +18,15 @@ const COLOR_GAUGE_UNFILLED: Color = Color::Rgb(60, 60, 60);
 const COLOR_BORDER_INACTIVE: Color = Color::Rgb(80, 80, 80);
 
 /// Returns the frame accent color based on run state:
-/// blue while running, green on success, red on failure.
+/// blue while running, green on success, red on failure — a stopped rollout included.
 fn frame_color(state: &TuiState) -> Color {
     if !state.run_complete {
         COLOR_BLUE
-    } else if state.nodes.iter().any(|n| n.status == NodeStatus::Failed) {
+    } else if state
+        .nodes
+        .iter()
+        .any(|n| matches!(n.status, NodeStatus::Failed | NodeStatus::Aborted))
+    {
         COLOR_RED
     } else {
         COLOR_GREEN
@@ -135,25 +139,27 @@ fn render_node_table(frame: &mut Frame, area: Rect, state: &TuiState) {
         .map(|(i, node)| {
             let icon = status_icon(&node.status, state.spinner_tick);
             let icon_color = match node.status {
-                NodeStatus::Queued => Color::DarkGray,
+                NodeStatus::Queued | NodeStatus::Aborted => Color::DarkGray,
                 NodeStatus::Connecting | NodeStatus::Running => Color::Cyan,
                 NodeStatus::Done => Color::Green,
                 NodeStatus::Failed => Color::Red,
             };
 
-            let step_display =
-                if node.status == NodeStatus::Done || node.status == NodeStatus::Failed {
-                    "--".to_string()
-                } else if node.total_steps > 0 {
-                    format!(
-                        "[{}/{}] {}",
-                        node.step_index + 1,
-                        node.total_steps,
-                        node.current_step
-                    )
-                } else {
-                    node.current_step.clone()
-                };
+            let step_display = if matches!(
+                node.status,
+                NodeStatus::Done | NodeStatus::Failed | NodeStatus::Aborted
+            ) {
+                "--".to_string()
+            } else if node.total_steps > 0 {
+                format!(
+                    "[{}/{}] {}",
+                    node.step_index + 1,
+                    node.total_steps,
+                    node.current_step
+                )
+            } else {
+                node.current_step.clone()
+            };
 
             let elapsed = elapsed_str(match node.finished_at {
                 Some(t) => t.duration_since(node.started_at),
@@ -427,7 +433,8 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
 
 fn status_icon(status: &NodeStatus, tick: usize) -> char {
     match status {
-        NodeStatus::Queued => '\u{00b7}', // ·
+        NodeStatus::Queued => '\u{00b7}',  // ·
+        NodeStatus::Aborted => '\u{2013}', // –
         NodeStatus::Connecting | NodeStatus::Running => {
             // Animate every 4 ticks (~64ms per frame at 16ms poll)
             SPINNER_FRAMES[(tick / 4) % SPINNER_FRAMES.len()]
@@ -440,6 +447,7 @@ fn status_icon(status: &NodeStatus, tick: usize) -> char {
 fn status_color(status: &NodeStatus) -> Color {
     match status {
         NodeStatus::Queued => Color::DarkGray,
+        NodeStatus::Aborted => Color::Magenta,
         NodeStatus::Connecting => Color::Yellow,
         NodeStatus::Running => Color::Cyan,
         NodeStatus::Done => Color::Green,
