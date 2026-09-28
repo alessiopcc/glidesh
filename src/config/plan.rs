@@ -51,11 +51,19 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                     .entries()
                     .iter()
                     .find(|e| e.name().is_none())
-                    .and_then(|e| e.value().as_string())
-                    .unwrap_or("sync");
+                    .and_then(|e| e.value().as_string());
                 mode = match mode_str {
-                    "async" => ExecutionMode::Async,
-                    _ => ExecutionMode::Sync,
+                    Some("sync") => ExecutionMode::Sync,
+                    Some("async") => ExecutionMode::Async,
+                    // A typo used to fall back to sync silently.
+                    other => {
+                        return Err(GlideshError::ConfigParse {
+                            message: format!(
+                                "mode must be \"sync\" or \"async\", got {}",
+                                other.map_or("nothing".to_string(), |m| format!("\"{m}\""))
+                            ),
+                        });
+                    }
                 };
             }
             "vars" => {
@@ -1541,6 +1549,25 @@ plan "test" {
                 shell "echo"
             }"#,
         );
+    }
+
+    #[test]
+    fn a_mode_must_be_sync_or_async() {
+        for (body, expect) in [
+            (r#"mode "sync""#, Some(ExecutionMode::Sync)),
+            (r#"mode "async""#, Some(ExecutionMode::Async)),
+            (r#"mode "asinc""#, None),
+            ("mode", None),
+        ] {
+            let parsed = parse_plan(&format!("plan \"p\" {{\n{body}\n}}"));
+            match expect {
+                Some(mode) => assert_eq!(parsed.unwrap().mode, mode, "{body}"),
+                None => {
+                    let err = parsed.unwrap_err().to_string();
+                    assert!(err.contains("\"sync\" or \"async\""), "{body}: {err}");
+                }
+            }
+        }
     }
 
     #[test]
