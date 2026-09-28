@@ -15,7 +15,7 @@ A minimal example that deploys an HTTP echo server. Great starting point.
 
 ## web-server
 
-Install nginx, deploy a templated configuration file, enable the service, and run a health check.
+Install nginx, deploy a templated configuration file, enable the service, and run a health check. Every step is [tagged](/advanced/tags/), so `--tags config` pushes only a configuration change.
 
 **Modules used:** package, file (template), systemd, shell
 

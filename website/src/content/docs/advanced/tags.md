@@ -17,8 +17,8 @@ plan "web" {
     step "Deploy config" tags="config" {
         file "/etc/nginx/nginx.conf" src="nginx.conf"
     }
-    step "Restart nginx" subscribe="Deploy config" tags="config" {
-        systemd "nginx" state="restarted"
+    step "Start nginx" tags="service" {
+        systemd "nginx" state="started" enabled=#true
     }
     step "Warm caches" tags="config,slow" {
         shell "/opt/app/bin/warm --version ${version}"
@@ -27,8 +27,8 @@ plan "web" {
 ```
 
 ```bash
-glidesh run -i inventory.kdl -p plan.kdl --tags config                 # Detect, Deploy, Restart, Warm
-glidesh run -i inventory.kdl -p plan.kdl --tags config --skip-tags slow   # Detect, Deploy, Restart
+glidesh run -i inventory.kdl -p plan.kdl --tags config                 # Detect, Deploy, Warm
+glidesh run -i inventory.kdl -p plan.kdl --tags config --skip-tags slow   # Detect, Deploy
 glidesh run -i inventory.kdl -p plan.kdl --skip-tags packages          # everything but Install
 ```
 
@@ -42,7 +42,8 @@ glidesh run -i inventory.kdl -p plan.kdl --skip-tags packages          # everyth
   steps whose `register` variables later steps need.
 - **`--skip-tags x,y`** leaves out every step carrying any of the named tags. It wins over
   `--tags` and over `always`.
-- **A tag no step carries is an error**, reported before connecting to any host. A typo in
+- **A tag no step carries is an error**, reported before connecting to any host or asking
+  for the secrets passphrase. A typo in
   `--tags` would otherwise run nothing, and one in `--skip-tags` would run the very steps it
   meant to hold back. With an inventory whose groups run different plans, a tag counts as
   known if any of those plans uses it.

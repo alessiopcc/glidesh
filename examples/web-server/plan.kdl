@@ -6,11 +6,11 @@ plan "web-server" {
         doc-root "/var/www/html"
     }
 
-    step "Install nginx" {
+    step "Install nginx" tags="packages" {
         package "nginx" state="present"
     }
 
-    step "Deploy nginx config" {
+    step "Deploy nginx config" tags="config" {
         file "/etc/nginx/sites-available/default" {
             src "files/nginx.conf"
             template #true
@@ -20,14 +20,14 @@ plan "web-server" {
         }
     }
 
-    step "Start nginx" {
+    step "Start nginx" tags="service" {
         systemd "nginx" {
             state "started"
             enabled #true
         }
     }
 
-    step "Health check" {
+    step "Health check" tags="config,service,check" {
         shell "curl -sf http://localhost/" {
             retries 5
             delay 2

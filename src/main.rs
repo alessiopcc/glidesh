@@ -157,37 +157,51 @@ fn apply_mode_override(plan: &mut glidesh::config::types::Plan, mode: Option<&st
     }
 }
 
-/// The secrets file a command loads, opened for decryption.
-struct LoadedSecrets {
-    secrets: Arc<glidesh::secrets::Secrets>,
+/// The secrets file, parsed but not yet opened: nothing has been prompted for or read
+/// beyond the file itself.
+struct ParsedSecrets {
+    config: Option<secrets_config::SecretsConfig>,
     vars: HashMap<String, String>,
     structured: HashMap<String, Vec<HashMap<String, String>>>,
 }
 
-/// Discover, parse and open the secrets file, for `run` and `console` alike. With no file,
-/// the result is empty and locked, and nothing is prompted for.
-fn load_secrets(
+/// Discover and parse the secrets file, for `run` and `console` alike. With no file, the
+/// result is empty and opening it prompts for nothing.
+fn parse_secrets(
     flags: &cli::SecretSourceArgs,
-    key: Option<&std::path::Path>,
     inv_base_dir: &std::path::Path,
-) -> Result<LoadedSecrets, GlideshError> {
+) -> Result<ParsedSecrets, GlideshError> {
     let secrets_arg = flags.secrets.as_ref().map(|p| expand_tilde(p));
     let secrets_path =
         glidesh::secrets::config::discover_secrets_path(secrets_arg.as_deref(), Some(inv_base_dir));
-    let mut vars = HashMap::new();
-    let mut structured = HashMap::new();
-    let mut config = None;
-    if let Some(ref sp) = secrets_path {
-        let content = glidesh::secrets::store::read(sp)?;
-        let sf = glidesh::secrets::config::parse_secrets_file(&content)?;
-        config = sf.config;
-        vars = sf.vars;
-        structured = sf.structured;
-    }
+    let Some(sp) = secrets_path else {
+        return Ok(ParsedSecrets {
+            config: None,
+            vars: HashMap::new(),
+            structured: HashMap::new(),
+        });
+    };
+    let content = glidesh::secrets::store::read(&sp)?;
+    let sf = glidesh::secrets::config::parse_secrets_file(&content)?;
+    Ok(ParsedSecrets {
+        config: sf.config,
+        vars: sf.vars,
+        structured: sf.structured,
+    })
+}
+
+/// Unlock the secrets file for decryption. This is where a passphrase is prompted for or an
+/// SSH identity read, so `run` calls it only once everything that can fail without them
+/// has been checked.
+fn open_secrets(
+    flags: &cli::SecretSourceArgs,
+    key: Option<&std::path::Path>,
+    config: Option<&secrets_config::SecretsConfig>,
+) -> Result<Arc<glidesh::secrets::Secrets>, GlideshError> {
     // Which credential to look for depends on how the file was wrapped, so this happens
     // after the config is parsed rather than from the flags alone. Without a provider block
     // there is no key to unwrap, so nothing is prompted for or read.
-    let identity = match config.as_ref().map(|c| &c.provider) {
+    let identity = match config.map(|c| &c.provider) {
         None => None,
         Some(glidesh::secrets::config::Provider::Age) => Some(glidesh::secrets::Identity::SshKey(
             secret_identity_path(flags.secret_identity.as_deref(), key),
@@ -195,12 +209,7 @@ fn load_secrets(
         Some(_) => source_secret_pass(flags)?.map(glidesh::secrets::Identity::Passphrase),
     };
     glidesh::secrets::set_identity(identity);
-    let secrets = glidesh::secrets::Secrets::open(config.as_ref(), glidesh::secrets::identity())?;
-    Ok(LoadedSecrets {
-        secrets,
-        vars,
-        structured,
-    })
+    glidesh::secrets::Secrets::open(config, glidesh::secrets::identity())
 }
 
 /// Secret-file scalars sit under the inventory-global vars: an inline global var wins.
@@ -317,11 +326,11 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         .and_then(|p| p.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
-    let LoadedSecrets {
-        secrets,
+    let ParsedSecrets {
+        config: secrets_provider,
         vars: secret_vars,
         structured: secret_structured,
-    } = load_secrets(&args.secrets, args.key.as_deref(), inv_base_dir)?;
+    } = parse_secrets(&args.secrets, inv_base_dir)?;
     let inventory = inventory.map(|mut inv| {
         add_secret_vars(&mut inv, &secret_vars);
         inv
@@ -520,6 +529,11 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     }
     let tags = TagFilter::from_args(args.tags.as_deref(), args.skip_tags.as_deref())?;
     tags.check_known(group_plans.iter().map(|gp| gp.plan.as_ref()))?;
+    let secrets = open_secrets(
+        &args.secrets,
+        args.key.as_deref(),
+        secrets_provider.as_ref(),
+    )?;
 
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
@@ -1210,9 +1224,9 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
         let inv_dir = inv_path
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let loaded = load_secrets(&args.secrets, args.key.as_deref(), inv_dir)?;
-        add_secret_vars(&mut inventory, &loaded.vars);
-        loaded.secrets
+        let parsed = parse_secrets(&args.secrets, inv_dir)?;
+        add_secret_vars(&mut inventory, &parsed.vars);
+        open_secrets(&args.secrets, args.key.as_deref(), parsed.config.as_ref())?
     } else {
         glidesh::secrets::Secrets::locked()
     };
@@ -1994,8 +2008,9 @@ mod tests {
             secret_pass_file: Some(dir.path().join("does-not-exist")),
             ..Default::default()
         };
-        let loaded = load_secrets(&flags, None, dir.path()).unwrap();
-        assert!(loaded.vars.is_empty());
+        let parsed = parse_secrets(&flags, dir.path()).unwrap();
+        assert!(parsed.vars.is_empty());
+        open_secrets(&flags, None, parsed.config.as_ref()).unwrap();
     }
 
     #[test]

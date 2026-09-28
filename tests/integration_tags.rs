@@ -37,6 +37,20 @@ async fn tags_select_the_steps_that_run() {
     let dir = tempfile::tempdir().unwrap();
     write_fixtures(dir.path(), container.port, &container);
 
+    let preview = glidesh(dir.path(), &["--tags", "config", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let preview = String::from_utf8(preview).unwrap();
+    assert!(
+        preview.contains("skipped (not in --tags config)") && preview.contains(", 1 skipped"),
+        "a preview reports the same selection:\n{preview}"
+    );
+    let touched = ssh.exec("ls /root/tags-* 2>/dev/null").await.unwrap();
+    assert!(touched.stdout.trim().is_empty(), "{}", touched.stdout);
+
     let out = glidesh(dir.path(), &["--tags", "config", "--skip-tags", "slow"])
         .assert()
         .success()
@@ -79,7 +93,7 @@ async fn tags_select_the_steps_that_run() {
 }
 
 /// A misspelled tag would otherwise run nothing, or run what it meant to hold back — so it
-/// fails before connecting to any host.
+/// fails before connecting to any host, loading an SSH key, or unlocking the secrets file.
 #[test]
 fn an_unknown_tag_fails_before_connecting() {
     let dir = tempfile::tempdir().unwrap();
@@ -89,8 +103,18 @@ fn an_unknown_tag_fails_before_connecting() {
         "host \"target\" \"192.0.2.1\" user=\"root\"\n",
     )
     .unwrap();
+    Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("GLIDESH_SECRET_PASS", "pw")
+        .args(["secret", "init", "--file", "secrets.kdl"])
+        .assert()
+        .success();
     for flag in ["--tags", "--skip-tags"] {
+        // Unlocking would fail on this missing passphrase file, had it come first.
         let out = glidesh(dir.path(), &[flag, "confg"])
+            .env_remove("GLIDESH_SECRET_PASS")
+            .env("GLIDESH_SECRET_PASS_FILE", dir.path().join("absent.txt"))
             .assert()
             .failure()
             .get_output()

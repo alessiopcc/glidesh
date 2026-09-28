@@ -112,3 +112,41 @@ fn the_multi_tier_example_gets_its_variable_from_the_included_plan() {
     glidesh::config::resolve_includes(&mut plan, &dir).unwrap();
     assert_eq!(plan.vars["ntp-service"], "chrony");
 }
+
+/// Every `--tags` / `--skip-tags` an example's README shows must name tags its plan uses, or
+/// the command it tells readers to copy fails.
+#[test]
+fn every_tag_an_example_readme_uses_exists_in_its_plan() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let dir = entry.unwrap().path();
+        let Ok(readme) = std::fs::read_to_string(dir.join("README.md")) else {
+            continue;
+        };
+        for line in readme.lines().filter(|l| l.contains("glidesh run")) {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let value = |flag: &str| {
+                words
+                    .windows(2)
+                    .find(|w| w[0] == flag)
+                    .map(|w| w[1].to_string())
+            };
+            let (tags, skip) = (value("--tags"), value("--skip-tags"));
+            if tags.is_none() && skip.is_none() {
+                continue;
+            }
+            let content = std::fs::read_to_string(dir.join("plan.kdl")).unwrap();
+            let mut plan = glidesh::config::parse_plan(&content).unwrap();
+            glidesh::config::resolve_includes(&mut plan, &dir).unwrap();
+            glidesh::config::tags::TagFilter::from_args(tags.as_deref(), skip.as_deref())
+                .and_then(|f| f.check_known([&plan].into_iter()))
+                .unwrap_or_else(|e| panic!("{}: `{line}`: {e}", dir.display()));
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "no example shows --tags; the check would pass vacuously"
+    );
+}

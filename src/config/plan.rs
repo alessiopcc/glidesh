@@ -1353,6 +1353,18 @@ plan "parent" {
     }
 
     #[test]
+    fn included_steps_keep_their_tags() {
+        let (_dir, plan) = resolve_tree(&[
+            ("main.kdl", r#"plan "main" { include "roles/web.kdl" }"#),
+            (
+                "roles/web.kdl",
+                r#"plan "web" { step "Web" tags="web,deploy" { shell "true" } }"#,
+            ),
+        ]);
+        assert_eq!(plan.steps()[0].tags, ["web", "deploy"]);
+    }
+
+    #[test]
     fn test_parse_external_module() {
         let input = r#"
 plan "test" {

@@ -170,6 +170,31 @@ mod tests {
         assert_eq!(filter(None, Some("slow")).excludes(&[]), None);
     }
 
+    /// With inventory `plan=`s, several plans run at once; a tag any of them uses is known.
+    #[test]
+    fn a_tag_is_known_if_any_plan_that_runs_uses_it() {
+        let web =
+            crate::config::parse_plan(r#"plan "web" { step "a" tags="web" { shell "true" } }"#)
+                .unwrap();
+        let db = crate::config::parse_plan(r#"plan "db" { step "b" tags="db" { shell "true" } }"#)
+            .unwrap();
+        assert!(
+            filter(Some("web,db"), None)
+                .check_known([&web, &db].into_iter())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn with_no_tags_anywhere_the_error_says_so() {
+        let plan = crate::config::parse_plan(r#"plan "p" { step "a" { shell "true" } }"#).unwrap();
+        let err = filter(None, Some("slow"))
+            .check_known([&plan].into_iter())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no step has tags"), "{err}");
+    }
+
     #[test]
     fn a_tag_no_step_carries_is_an_error() {
         let plan = crate::config::parse_plan(
