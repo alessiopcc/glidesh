@@ -10,8 +10,18 @@ use crate::error::GlideshError;
 use crate::modules::ModuleParams;
 use crate::util::shell_escape;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 pub(super) const PARAM_HASH_LABEL: &str = "sh.glide.param-hash";
+
+/// A short hash per plan parameter, so `--diff` can name what drifted without the label
+/// carrying any value — an `environment` entry may be a secret.
+pub(super) const FIELD_HASHES_LABEL: &str = "sh.glide.field-hashes";
+
+/// Labels glidesh writes itself. The runtime keeps the last of two labels with one key,
+/// and a plan's `labels` and `extra-args` come after glidesh's, so a plan could otherwise
+/// overwrite them.
+const RESERVED_LABEL_PREFIX: &str = "sh.glide.";
 
 /// Flags emitted as `--flag=value`.
 const EQ_FLAGS: &[(&str, &str)] = &[
@@ -274,17 +284,26 @@ pub(super) struct RunArgs {
     /// The same content, canonicalised for hashing: values of order-insensitive
     /// list flags are sorted, so reordering them in a plan is not drift.
     canonical: Vec<String>,
+    /// The canonical tokens again, grouped by the plan parameter that produced them.
+    fields: BTreeMap<&'static str, Vec<String>>,
 }
 
 impl RunArgs {
-    fn push(&mut self, token: String) {
+    fn push(&mut self, field: &'static str, token: String) {
         self.canonical.push(token.clone());
+        self.fields.entry(field).or_default().push(token.clone());
         self.tokens.push(token);
     }
 
     /// Emit one `--flag value` pair per element, in plan order for the command
     /// and in sorted order for the hash when the flag is order-insensitive.
-    fn push_list(&mut self, flag: &str, values: &[String], order_matters: bool) {
+    fn push_list(
+        &mut self,
+        field: &'static str,
+        flag: &str,
+        values: &[String],
+        order_matters: bool,
+    ) {
         for value in values {
             self.tokens.push(flag.to_string());
             self.tokens.push(shell_escape(value));
@@ -293,9 +312,12 @@ impl RunArgs {
         if !order_matters {
             canonical.sort_unstable();
         }
+        let recorded = self.fields.entry(field).or_default();
         for value in canonical {
             self.canonical.push(flag.to_string());
             self.canonical.push(shell_escape(value));
+            recorded.push(flag.to_string());
+            recorded.push(shell_escape(value));
         }
     }
 }
@@ -319,52 +341,55 @@ pub(super) fn build_run_args(
     let mut args = RunArgs {
         tokens: Vec::new(),
         canonical: Vec::new(),
+        fields: BTreeMap::new(),
     };
 
     for (key, flag) in EQ_FLAGS {
         if let Some(value) = text_of(params, key) {
-            args.push(format!("{}={}", flag, shell_escape(&value)));
+            args.push(key, format!("{}={}", flag, shell_escape(&value)));
         }
     }
 
     for (key, flag) in VALUE_FLAGS {
         if let Some(value) = text_of(params, key) {
-            args.push(flag.to_string());
-            args.push(shell_escape(&value));
+            args.push(key, flag.to_string());
+            args.push(key, shell_escape(&value));
         }
     }
 
     for (key, flag) in BOOL_FLAGS {
         if params.args.get(*key).and_then(|v| v.as_bool()) == Some(true) {
-            args.push(flag.to_string());
+            args.push(key, flag.to_string());
         }
     }
 
     if let Some(gpus) = text_of(params, "gpus") {
         for token in gpu_args(runtime, &gpus) {
-            args.push(token);
+            args.push("gpus", token);
         }
     }
 
     for (key, flag) in LIST_FLAGS {
         if let Some(values) = params.args.get(*key).and_then(|v| v.as_list()) {
-            args.push_list(flag, values, !ORDER_INSENSITIVE_LISTS.contains(key));
+            args.push_list(key, flag, values, !ORDER_INSENSITIVE_LISTS.contains(key));
         }
     }
+
+    reject_reserved_labels(params)?;
 
     for (key, flag) in MAP_FLAGS {
         if let Some(map) = params.args.get(*key).and_then(|v| v.as_map()) {
             let mut pairs: Vec<_> = map.iter().collect();
             pairs.sort_by_key(|(k, _)| *k);
             for (k, v) in pairs {
-                args.push(flag.to_string());
-                args.push(shell_escape(&format!("{}={}", k, v)));
+                args.push(key, flag.to_string());
+                args.push(key, shell_escape(&format!("{}={}", k, v)));
             }
         }
     }
 
     for token in healthcheck_args(params)? {
-        args.push(token);
+        args.push("healthcheck", token);
     }
 
     // Escape hatch: forwarded verbatim, unquoted, for flags glidesh has no
@@ -372,21 +397,57 @@ pub(super) fn build_run_args(
     // hash — these are raw flags whose order can matter.
     if let Some(extra) = params.args.get("extra-args").and_then(|v| v.as_list()) {
         for token in extra {
-            args.push(token.clone());
+            args.push("extra-args", token.clone());
         }
     }
 
-    args.push(shell_escape(&qualify_image(&raw_image, runtime)));
+    args.push("image", shell_escape(&qualify_image(&raw_image, runtime)));
 
     // The command keeps its own quoting so shell metacharacters written in the
     // plan (`nginx -g 'daemon off;'`) reach the container intact.
     if let Some(command) = text_of(params, "command") {
         if !command.is_empty() {
-            args.push(command);
+            args.push("command", command);
         }
     }
 
     Ok(args)
+}
+
+fn reject_reserved_labels(params: &ModuleParams) -> Result<(), GlideshError> {
+    let mut reserved: Vec<&str> = params
+        .args
+        .get("labels")
+        .and_then(|v| v.as_map())
+        .into_iter()
+        .flat_map(|labels| labels.keys().map(String::as_str))
+        .filter(|k| k.starts_with(RESERVED_LABEL_PREFIX))
+        .collect();
+    reserved.sort_unstable();
+    // Raw tokens can spell a label several ways (`--label k=v`, `--label=k=v`, `-l k=v`),
+    // so any mention of the prefix is refused rather than parsed.
+    reserved.extend(
+        params
+            .args
+            .get("extra-args")
+            .and_then(|v| v.as_list())
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|token| token.contains(RESERVED_LABEL_PREFIX)),
+    );
+    if reserved.is_empty() {
+        return Ok(());
+    }
+    Err(GlideshError::Module {
+        module: "container".to_string(),
+        message: format!(
+            "container '{}': {} use the reserved '{}' label prefix",
+            params.resource_name,
+            reserved.join(", "),
+            RESERVED_LABEL_PREFIX
+        ),
+    })
 }
 
 /// `--gpus` is Docker-only; Podman exposes the same devices through CDI.
@@ -485,6 +546,68 @@ pub(super) fn spec_hash(runtime: &str, params: &ModuleParams) -> Result<String, 
     Ok(hash_args(&build_run_args(runtime, params)?.canonical))
 }
 
+/// The [`FIELD_HASHES_LABEL`] value: `param=hash` pairs, sorted by parameter.
+fn field_hashes(args: &RunArgs) -> String {
+    args.fields
+        .iter()
+        .map(|(field, tokens)| format!("{}={}", field, &hash_args(tokens)[..8]))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub(super) fn desired_field_hashes(
+    runtime: &str,
+    params: &ModuleParams,
+) -> Result<String, GlideshError> {
+    Ok(field_hashes(&build_run_args(runtime, params)?))
+}
+
+/// Which parameters differ between the field hashes a container was created with and the
+/// ones the plan wants now, or `None` if the recorded label is missing or unreadable.
+pub(super) fn describe_field_changes(desired: &str, recorded: &str) -> Option<String> {
+    let parse = |label: &str| -> Option<BTreeMap<String, String>> {
+        label
+            .split(',')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                pair.split_once('=')
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+            })
+            .collect()
+    };
+    let recorded = parse(recorded).filter(|fields| !fields.is_empty())?;
+    let desired = parse(desired)?;
+
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for (field, hash) in &desired {
+        match recorded.get(field) {
+            Some(old) if old == hash => {}
+            Some(_) => changed.push(field.as_str()),
+            None => added.push(field.as_str()),
+        }
+    }
+    for field in recorded.keys() {
+        if !desired.contains_key(field) {
+            removed.push(field.as_str());
+        }
+    }
+
+    let parts: Vec<String> = [("changed", changed), ("added", added), ("removed", removed)]
+        .into_iter()
+        .filter(|(_, fields)| !fields.is_empty())
+        .map(|(what, fields)| format!("{}: {}", what, fields.join(", ")))
+        .collect();
+    Some(if parts.is_empty() {
+        // The two labels disagree with each other: edited by hand, or written by a
+        // glidesh that generated the arguments differently.
+        "no parameter differs from its recorded hash".to_string()
+    } else {
+        parts.join("; ")
+    })
+}
+
 /// `<runtime> run -d` for a long-lived container, labelled with its spec hash.
 pub(super) fn build_run_command(
     runtime: &str,
@@ -494,11 +617,12 @@ pub(super) fn build_run_command(
     let args = build_run_args(runtime, params)?;
     let hash = hash_args(&args.canonical);
     Ok(format!(
-        "{} run -d --name {} --label {}={} {}",
+        "{} run -d --name {} --label {}={} --label {} {}",
         runtime,
         shell_escape(container_name),
         PARAM_HASH_LABEL,
         hash,
+        shell_escape(&format!("{}={}", FIELD_HASHES_LABEL, field_hashes(&args))),
         args.tokens.join(" ")
     ))
 }
@@ -1147,5 +1271,166 @@ plan "p" {
             qualify_image("ghcr.io/org/app:v1", "podman"),
             "ghcr.io/org/app:v1"
         );
+    }
+
+    fn full_spec() -> ModuleParams {
+        make_params(vec![
+            ("image", ParamValue::String("nginx:1.27".into())),
+            (
+                "ports",
+                ParamValue::List(vec!["80:80".into(), "443:443".into()]),
+            ),
+            ("environment", map(&[("TZ", "UTC"), ("MODE", "prod")])),
+            ("volumes", ParamValue::List(vec!["/srv:/srv".into()])),
+            ("restart", ParamValue::String("always".into())),
+            ("privileged", ParamValue::Bool(true)),
+            (
+                "command",
+                ParamValue::String("nginx -g 'daemon off;'".into()),
+            ),
+        ])
+    }
+
+    #[test]
+    fn the_spec_hash_is_unchanged_so_upgrading_recreates_nothing() {
+        // Pinned to the value released glidesh writes; a change here recreates every
+        // container it manages on the next run.
+        assert_eq!(
+            spec_hash("docker", &full_spec()).unwrap(),
+            "d0d1522728b4b2d905372844449b7e4b9442ec5e9a844dfbacd7f549e7a8a788"
+        );
+    }
+
+    #[test]
+    fn every_parameter_gets_its_own_field_hash() {
+        let hashes = desired_field_hashes("docker", &full_spec()).unwrap();
+        let fields: Vec<&str> = hashes
+            .split(',')
+            .map(|pair| pair.split_once('=').unwrap().0)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "command",
+                "environment",
+                "image",
+                "ports",
+                "privileged",
+                "restart",
+                "volumes"
+            ]
+        );
+        assert!(
+            hashes
+                .split(',')
+                .all(|pair| pair.split_once('=').unwrap().1.len() == 8)
+        );
+    }
+
+    #[test]
+    fn field_hashes_carry_no_values() {
+        let params = make_params(vec![
+            ("image", ParamValue::String("x".into())),
+            ("environment", map(&[("DB_PASSWORD", "hunter2-secret")])),
+        ]);
+        let hashes = desired_field_hashes("docker", &params).unwrap();
+        assert!(!hashes.contains("hunter2"), "{hashes}");
+        assert!(!hashes.contains("DB_PASSWORD"), "{hashes}");
+    }
+
+    #[test]
+    fn reordering_an_order_insensitive_list_changes_no_field() {
+        let mut reordered = full_spec();
+        reordered.args.insert(
+            "ports".into(),
+            ParamValue::List(vec!["443:443".into(), "80:80".into()]),
+        );
+        assert_eq!(
+            desired_field_hashes("docker", &reordered).unwrap(),
+            desired_field_hashes("docker", &full_spec()).unwrap()
+        );
+    }
+
+    #[test]
+    fn changed_added_and_removed_parameters_are_named() {
+        let recorded = desired_field_hashes("docker", &full_spec()).unwrap();
+        let mut wanted = full_spec();
+        wanted
+            .args
+            .insert("image".into(), ParamValue::String("nginx:1.28".into()));
+        wanted
+            .args
+            .insert("environment".into(), map(&[("TZ", "UTC")]));
+        wanted
+            .args
+            .insert("memory".into(), ParamValue::String("512m".into()));
+        wanted.args.remove("volumes");
+        let desired = desired_field_hashes("docker", &wanted).unwrap();
+        assert_eq!(
+            describe_field_changes(&desired, &recorded).unwrap(),
+            "changed: environment, image; added: memory; removed: volumes"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_label_gives_no_detail() {
+        let desired = desired_field_hashes("docker", &full_spec()).unwrap();
+        assert_eq!(describe_field_changes(&desired, ""), None);
+        assert_eq!(describe_field_changes(&desired, "garbage"), None);
+    }
+
+    #[test]
+    fn agreeing_field_hashes_say_so() {
+        let desired = desired_field_hashes("docker", &full_spec()).unwrap();
+        assert_eq!(
+            describe_field_changes(&desired, &desired).unwrap(),
+            "no parameter differs from its recorded hash"
+        );
+    }
+
+    #[test]
+    fn a_long_lived_container_is_labelled_with_its_field_hashes() {
+        let cmd = build_run_command("docker", "web", &full_spec()).unwrap();
+        let hashes = desired_field_hashes("docker", &full_spec()).unwrap();
+        assert!(
+            cmd.contains(&format!("--label '{FIELD_HASHES_LABEL}={hashes}'")),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn a_plan_cannot_set_the_labels_glidesh_writes() {
+        for key in [PARAM_HASH_LABEL, FIELD_HASHES_LABEL, "sh.glide.other"] {
+            let params = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                ("labels", map(&[(key, "forged"), ("team", "web")])),
+            ]);
+            let err = build_run_command("docker", "web", &params)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(key), "{err}");
+            assert!(err.contains("reserved 'sh.glide.' label prefix"), "{err}");
+        }
+    }
+
+    #[test]
+    fn extra_args_cannot_set_the_labels_glidesh_writes_either() {
+        for extra in [
+            vec!["--label", "sh.glide.field-hashes=forged"],
+            vec!["--label=sh.glide.param-hash=forged"],
+            vec!["-l", "sh.glide.param-hash=forged"],
+        ] {
+            let params = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                (
+                    "extra-args",
+                    ParamValue::List(extra.iter().map(|t| t.to_string()).collect()),
+                ),
+            ]);
+            let err = build_run_command("docker", "web", &params)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("reserved 'sh.glide.' label prefix"), "{err}");
+        }
     }
 }

@@ -5,6 +5,7 @@ pub mod disk;
 pub mod escalation;
 pub mod external;
 pub mod file;
+pub mod file_diff;
 pub mod host;
 pub mod nix;
 pub mod package;

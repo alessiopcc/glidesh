@@ -117,9 +117,32 @@ reason it gave — `Recreate container lmcache (configuration changed)`, `Upload
 glidesh run -i inventory.kdl -p plan.kdl --dry-run
 ```
 
-Add `--diff` for the detail behind each pending change, where the module can describe it.
-It works on a real run too — the detail behind a change is as useful once the change is
-made — and may cost extra round trips.
+Add `--diff` for the detail behind each pending change, where the module can describe it:
+
+```bash
+glidesh run -i inventory.kdl -p plan.kdl --dry-run --diff
+```
+
+```
+[web:web-1]   file '/etc/app.conf': would change
+[web:web-1]     stdout | Upload app.conf -> /etc/app.conf
+[web:web-1]     stdout | --- /etc/app.conf (host)
+[web:web-1]     stdout | +++ /etc/app.conf (plan)
+[web:web-1]     stdout | @@ -1,2 +1,2 @@
+[web:web-1]     stdout |  name=app
+[web:web-1]     stdout | -port=80
+[web:web-1]     stdout | +port=8080
+[web:web-1]     stdout | [dry-run] Would copy app.conf -> /etc/app.conf
+```
+
+Two modules describe their changes: [`file`](/modules/file/#--diff) shows a unified diff
+of the content, and [`container`](/modules/container/#--diff) names the parameters that
+drifted. [External modules](/advanced/writing-plugins/) may return a diff of their own.
+
+`--diff` works on a real run too — the detail behind a change is as useful once the
+change is made. There it goes to the [run log](/concepts/logs/) rather than the console,
+like the rest of a task's output. It may cost extra round trips: `file` downloads the
+destination to diff it.
 
 In [ad-hoc mode](#ad-hoc-mode) there is no desired state to compare against, only a
 command, so `--dry-run` prints the command it would have run and connects to nothing.

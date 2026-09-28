@@ -101,6 +101,7 @@ file "backups/${@host.name}-dump.sql" {
 | `owner` | string | Remote file owner |
 | `group` | string | Remote file group |
 | `mode` | string | Remote file permissions (e.g., `"0644"`) |
+| `diff` | boolean | `#false` keeps this task's content out of [`--diff`](#--diff) (default `#true`) |
 
 ## Path Resolution
 
@@ -128,6 +129,50 @@ This resolves to `plans/files/nginx.conf` regardless of where you run glidesh fr
 ## Idempotency
 
 Copy and template modes compare SHA256 checksums between the local and remote files. If they match, the transfer is skipped. When `owner`, `group`, or `mode` are specified, the module also checks the remote file's attributes — if only permissions differ, the attributes are corrected without re-uploading the file. This applies to both single-file and recursive directory copies. Fetch mode always downloads.
+
+## `--diff`
+
+With [`--diff`](/cli/#previewing-a-run), a copy or template whose content differs shows a
+unified diff from the file on the host to the one the plan wants. A destination that does
+not exist yet is diffed against nothing, so every line shows as added. A recursive copy
+shows one diff per changed file, up to 500 lines in all. Like any task output, a diff is
+[capped at 8 KiB](/concepts/logs/) in the console, the TUI and the run log.
+
+```
+--- /etc/app.conf (host)
++++ /etc/app.conf (plan)
+@@ -1,2 +1,2 @@
+ name=app
+-port=80
++port=8080
+```
+
+The destination is downloaded only once the checksums differ, so `--diff` costs nothing on a
+file that is already in place. Instead of a diff, a one-line note says why none is shown for:
+
+- **Binary content** — anything that is not UTF-8 text, or contains a NUL byte.
+- **Files over 256 KiB**, on either side. The size is checked before downloading.
+- **Content holding a [secret](/concepts/secrets/#redaction)**: `diff hidden (content contains a secret)`.
+  Redaction would not be enough here — the old side can hold the value a rotated secret
+  replaced, and a diff's `+`/`-` prefixes split a multi-line secret so it no longer matches.
+- **A file other users cannot read**, on the host or under the plan's `mode` (`600`, `640`,
+  or any symbolic mode such as `u=rw,go=`, which glidesh does not evaluate):
+  `diff hidden (not readable by other users)`. Matching secrets cannot catch a value the plan
+  no longer uses — it is not registered, yet the host's copy still holds it — so a file kept
+  private is treated as sensitive whatever it contains.
+- **A task written with `diff=#false`**: `diff off for this task (diff=#false)`.
+
+That leaves one case glidesh cannot catch: a world-readable file whose host copy still holds
+a secret the plan no longer uses. glidesh keeps no state between runs, so it cannot know that
+text was ever a secret. Anyone on the host can already read such a file, but a diff would
+copy the value into the run log and CI output. Mark tasks like that with `diff=#false`:
+
+```kdl
+file "/etc/app/legacy.conf" src="legacy.conf" diff=#false
+```
+
+A change to `owner`, `group`, or `mode` alone has no diff: the pending line already names
+each attribute, as `Fix attrs on /etc/app.conf: mode: 644 -> 600`. Fetch mode has none either.
 
 ## Example
 

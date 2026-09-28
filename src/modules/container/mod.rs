@@ -46,6 +46,9 @@ fn desired_state(params: &ModuleParams) -> &str {
 
 const KNOWN_STATES: &[&str] = &["running", "run-once", "stopped", "absent"];
 
+/// The `--diff` detail for a drifted container that carries no field-hashes label.
+const NO_FIELD_HASHES: &str = "created without per-parameter hashes (by an older glidesh or by hand); recreating it records them";
+
 /// Which runtime to drive, and whether it is already on the host.
 ///
 /// Kept separate from installing it so `check` can stay read-only: a check that
@@ -202,11 +205,16 @@ impl ContainerModule {
         };
 
         let desired_hash = run_args::spec_hash(runtime, params)?;
-        if inspect_spec_hash(ctx, runtime, name).await? != desired_hash {
-            return Ok(ModuleStatus::pending(format!(
-                "Recreate container {} (configuration changed)",
-                name
-            )));
+        if inspect_label(ctx, runtime, name, run_args::PARAM_HASH_LABEL).await? != desired_hash {
+            let plan = format!("Recreate container {} (configuration changed)", name);
+            if !ctx.diff {
+                return Ok(ModuleStatus::pending(plan));
+            }
+            let recorded = inspect_label(ctx, runtime, name, run_args::FIELD_HASHES_LABEL).await?;
+            let desired = run_args::desired_field_hashes(runtime, params)?;
+            let diff = run_args::describe_field_changes(&desired, &recorded)
+                .unwrap_or_else(|| NO_FIELD_HASHES.to_string());
+            return Ok(ModuleStatus::pending_with_diff(plan, diff));
         }
 
         match start_action(&state) {
@@ -435,7 +443,7 @@ impl ContainerModule {
         };
 
         let spec_matches = state.is_some()
-            && inspect_spec_hash(ctx, runtime, name).await?
+            && inspect_label(ctx, runtime, name, run_args::PARAM_HASH_LABEL).await?
                 == run_args::spec_hash(runtime, params)?;
 
         let (changed, output) = if spec_matches && action != StartAction::Recreate {
@@ -683,17 +691,18 @@ pub(super) async fn inspect_state(
     }
 }
 
-/// The spec hash recorded on a live container, or an empty string if it carries none.
-async fn inspect_spec_hash(
+/// A label on a live container, or an empty string if it carries none.
+async fn inspect_label(
     ctx: &ModuleContext<'_>,
     runtime: &str,
     name: &str,
+    label: &str,
 ) -> Result<String, GlideshError> {
     let out = ctx
         .exec(&format!(
             "{} container inspect --format '{{{{index .Config.Labels \"{}\"}}}}' {} 2>/dev/null",
             runtime,
-            run_args::PARAM_HASH_LABEL,
+            label,
             shell_escape(name)
         ))
         .await?;

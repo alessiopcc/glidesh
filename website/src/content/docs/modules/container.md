@@ -59,7 +59,7 @@ Unknown parameters are rejected at check time, so a typo (`privledged`) fails lo
 | `ports` | list | Port mappings (`host:container`) |
 | `environment` | map | Environment variables |
 | `volumes` | list | Volume mounts (`host:container`) |
-| `labels` | map | Container labels |
+| `labels` | map | Container labels. Keys starting with `sh.glide.` are reserved for the labels glidesh writes, and are rejected here and anywhere in `extra-args` |
 | `network` | string | `"host"`, `"bridge"`, `"none"`, `"container:<name>"`, or a custom network name (auto-created if it doesn't exist) |
 | `network-alias` | list | Extra DNS names on the attached network |
 | `dns` | list | DNS servers |
@@ -92,7 +92,7 @@ Unknown parameters are rejected at check time, so a typo (`privledged`) fails lo
 | `cpus` | string | CPU limit |
 | `ulimits` | map | ulimits, as `name` → `soft[:hard]` |
 | `sysctls` | map | Kernel parameters |
-| `extra-args` | list | Raw flags passed to `run` verbatim, unquoted. The escape hatch for anything without a first-class parameter |
+| `extra-args` | list | Raw flags passed to `run` verbatim, unquoted. The escape hatch for anything without a first-class parameter. A token mentioning `sh.glide.` is rejected, so glidesh's own labels cannot be overwritten |
 
 Shared-memory workloads (CUDA IPC in particular) need the host IPC namespace — without it, a client mapping another process's GPU buffers fails with `cudaErrorMapBufferObjectFailed`:
 
@@ -211,6 +211,22 @@ Lists whose order the runtime ignores — `ports`, `volumes`, `devices`, `dns`, 
 Removal is verified: if the existing container cannot be removed, the task fails with that reason rather than letting the follow-up `run` fail with the runtime's opaque "name is already in use".
 
 Readiness parameters (`wait`, `wait-timeout`, `wait-interval`, `ready-cmd`) are glidesh-side and deliberately excluded from the hash — changing a probe must not recreate a healthy container.
+
+## `--diff`
+
+With [`--diff`](/cli/#previewing-a-run), a container about to be recreated because its
+configuration changed says which parameters differ:
+
+```
+Recreate container api (configuration changed)
+changed: image, ports; added: environment; removed: volumes
+```
+
+Names only, never values: an `environment` entry may be a secret. To tell, glidesh records a
+short hash per parameter in a second label, `sh.glide.field-hashes`, next to
+`sh.glide.param-hash`. A container created before that label existed reports
+`created without per-parameter hashes` instead; the next recreate records them. Adding the
+label changed nothing in `sh.glide.param-hash`, so upgrading glidesh recreates no container.
 
 ## Custom Networks
 

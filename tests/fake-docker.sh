@@ -11,6 +11,7 @@
 # State lives under /var/lib/fakedocker:
 #   c/<name>/status       one of running|exited|paused|dead
 #   c/<name>/hash         the sh.glide.param-hash label
+#   c/<name>/fields       the sh.glide.field-hashes label, when the run set one
 #   c/<name>/argv         the full `run` argument list
 #   c/<name>/generation   bumped on every `run`, so tests can prove a container
 #                         was reused rather than recreated
@@ -60,6 +61,9 @@ container)
     *param-hash*)
         cat "$d/hash" 2>/dev/null || true
         ;;
+    *field-hashes*)
+        cat "$d/fields" 2>/dev/null || true
+        ;;
     *State.Status*)
         cat "$d/status"
         ;;
@@ -75,6 +79,7 @@ run)
     autorm=no
     name=""
     hash=""
+    fields=""
     health=no
     exitcode=0
     while [ $# -gt 0 ]; do
@@ -94,6 +99,7 @@ run)
         --label)
             case "$2" in
             sh.glide.param-hash=*) hash="${2#sh.glide.param-hash=}" ;;
+            sh.glide.field-hashes=*) fields="${2#sh.glide.field-hashes=}" ;;
             esac
             shift 2
             ;;
@@ -134,6 +140,7 @@ run)
 
     mkdir -p "$d"
     printf '%s' "$hash" >"$d/hash"
+    if [ -n "$fields" ]; then printf '%s' "$fields" >"$d/fields"; else rm -f "$d/fields"; fi
     printf '%s\n' "$argv" >"$d/argv"
     echo "$gen" >"$d/generation"
     echo "boot line one for $name" >"$d/logs"

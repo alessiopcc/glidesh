@@ -1,6 +1,7 @@
 use crate::config::template::{TemplateData, defined_references, render};
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
+use crate::modules::file_diff;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -229,7 +230,22 @@ impl Module for FileModule {
 
                 Ok(ModuleStatus::Satisfied)
             }
-            _ => Ok(ModuleStatus::pending(format!("Upload {} -> {}", src, dest))),
+            remote_hash => {
+                let plan = format!("Upload {} -> {}", src, dest);
+                if !ctx.diff {
+                    return Ok(ModuleStatus::pending(plan));
+                }
+                if Self::diff_opted_out(params)? {
+                    return Ok(ModuleStatus::pending_with_diff(
+                        plan,
+                        file_diff::opted_out(dest),
+                    ));
+                }
+                let diff =
+                    Self::diff_against_remote(ctx, params, dest, remote_hash.is_some(), &content)
+                        .await?;
+                Ok(ModuleStatus::pending_with_diff(plan, diff))
+            }
         }
     }
 
@@ -421,6 +437,9 @@ impl FileModule {
             desired_owner.is_some() || desired_group.is_some() || desired_mode.is_some();
         let mut content_changed = 0usize;
         let mut attrs_changed = 0usize;
+        let mut diffs = Vec::new();
+        let opted_out = Self::diff_opted_out(params)?;
+        let show_diffs = ctx.diff && !opted_out;
 
         for rel_path in &local_files {
             let local_path = resolved_src.join(rel_path);
@@ -464,7 +483,21 @@ impl FileModule {
                         }
                     }
                 }
-                _ => content_changed += 1,
+                remote_hash => {
+                    content_changed += 1;
+                    if show_diffs {
+                        diffs.push(
+                            Self::diff_against_remote(
+                                ctx,
+                                params,
+                                &remote_path,
+                                remote_hash.is_some(),
+                                &content,
+                            )
+                            .await?,
+                        );
+                    }
+                }
             }
         }
 
@@ -478,14 +511,67 @@ impl FileModule {
             if attrs_changed > 0 {
                 parts.push(format!("{} attrs", attrs_changed));
             }
-            Ok(ModuleStatus::pending(format!(
+            let plan = format!(
                 "Upload dir {} -> {} (changed: {} of {} files)",
                 src,
                 dest,
                 parts.join(", "),
                 local_files.len()
-            )))
+            );
+            if ctx.diff && opted_out && content_changed > 0 {
+                Ok(ModuleStatus::pending_with_diff(
+                    plan,
+                    file_diff::opted_out(dest),
+                ))
+            } else if diffs.is_empty() {
+                Ok(ModuleStatus::pending(plan))
+            } else {
+                let diff = file_diff::truncate_lines(&diffs.join("\n"), file_diff::MAX_DIFF_LINES);
+                Ok(ModuleStatus::pending_with_diff(plan, diff))
+            }
         }
+    }
+
+    /// `diff=#false` keeps a task out of `--diff`, for content glidesh cannot tell is
+    /// sensitive — such as a world-readable file still holding a secret the plan dropped.
+    fn diff_opted_out(params: &ModuleParams) -> Result<bool, GlideshError> {
+        match params.args.get("diff") {
+            None => Ok(false),
+            Some(value) => value
+                .as_bool()
+                .map(|show| !show)
+                .ok_or_else(|| GlideshError::Module {
+                    module: "file".to_string(),
+                    message: "'diff' must be #true or #false".to_string(),
+                }),
+        }
+    }
+
+    /// Only called once the hashes differ, so the download is spent on a real change.
+    async fn diff_against_remote(
+        ctx: &ModuleContext<'_>,
+        params: &ModuleParams,
+        dest: &str,
+        exists: bool,
+        content: &[u8],
+    ) -> Result<String, GlideshError> {
+        let private =
+            file_diff::mode_may_be_private(params.args.get("mode").and_then(|v| v.as_str()));
+        if let Some(note) = file_diff::local_note(dest, content, private) {
+            return Ok(note);
+        }
+        let remote = if exists {
+            file_diff::fetch_remote(ctx, dest).await?
+        } else {
+            file_diff::Remote::Missing
+        };
+        Ok(file_diff::content_diff(
+            dest,
+            &remote,
+            content,
+            private,
+            ctx.secrets.as_deref(),
+        ))
     }
 
     async fn apply_recurse(
@@ -751,5 +837,21 @@ mod tests {
             args,
         };
         assert!(FileModule::is_recurse(&params));
+    }
+
+    #[test]
+    fn diff_false_opts_a_task_out_and_anything_else_is_rejected() {
+        use crate::config::types::ParamValue;
+        let with = |value: Option<ParamValue>| ModuleParams {
+            resource_name: "/etc/app".to_string(),
+            args: value.into_iter().map(|v| ("diff".to_string(), v)).collect(),
+        };
+        assert!(!FileModule::diff_opted_out(&with(None)).unwrap());
+        assert!(!FileModule::diff_opted_out(&with(Some(ParamValue::Bool(true)))).unwrap());
+        assert!(FileModule::diff_opted_out(&with(Some(ParamValue::Bool(false)))).unwrap());
+        let err = FileModule::diff_opted_out(&with(Some(ParamValue::String("no".into()))))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'diff' must be #true or #false"), "{err}");
     }
 }
