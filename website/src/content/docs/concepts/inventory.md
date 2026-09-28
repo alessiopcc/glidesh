@@ -124,6 +124,7 @@ Once a plan is loaded, all paths *inside* the plan (`include`, `vars-file`, file
 
 :::note
 When `--plan` is provided on the CLI, it overrides all `plan=` attributes in the inventory.
+`glidesh validate -i inventory.kdl` checks every linked plan without connecting to any host.
 :::
 
 ## Variables

@@ -269,7 +269,7 @@ glidesh validate [OPTIONS]
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--plan <PATH>` | `-p` | Validate a plan file |
-| `--inventory <PATH>` | `-i` | Validate an inventory file |
+| `--inventory <PATH>` | `-i` | Validate an inventory file; without `-p`, also the plans it names with `plan=` |
 
 ```bash
 glidesh validate -p plan.kdl
@@ -293,8 +293,11 @@ without contacting a host:
 
 Every problem is listed, not only the first, and the command exits non-zero if there is any.
 
-With `-i` alone, the inventory and its secrets file are parsed, but the plans its hosts name
-with `plan=` are not checked; pass each one with `-p`.
+With `-i` alone, each plan the inventory names with [`plan=`](#inventory-linked-plans) is
+checked as well: once per file, however many groups and hosts name it, resolved from the
+inventory's directory as `run -i` resolves it. Only the variables of the hosts that use a plan
+count as defined for it. With `-p`, the inventory's `plan=` files are not checked, since a run
+with `-p` does not use them.
 
 It also **warns**, without failing, when a `file` upload without `template #true` contains
 `${name}` for a variable a run would define — a plan variable, any host's inventory variable
