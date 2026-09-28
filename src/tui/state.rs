@@ -48,6 +48,8 @@ impl NodeState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeStatus {
+    /// Not started yet: waiting for a concurrency slot, or for an earlier batch.
+    Queued,
     Connecting,
     Running,
     Done,
@@ -57,6 +59,7 @@ pub enum NodeStatus {
 impl std::fmt::Display for NodeStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NodeStatus::Queued => write!(f, "QUEUED"),
             NodeStatus::Connecting => write!(f, "CONNECTING"),
             NodeStatus::Running => write!(f, "RUNNING"),
             NodeStatus::Done => write!(f, "OK"),
@@ -112,7 +115,7 @@ impl TuiState {
                 host: host.clone(),
                 group_name: group.clone(),
                 plan_name: host_plan.clone(),
-                status: NodeStatus::Connecting,
+                status: NodeStatus::Queued,
                 current_step: "--".to_string(),
                 step_index: 0,
                 total_steps: 0,
@@ -515,6 +518,17 @@ mod tests {
             "the reason must reach the log: {:?}",
             s.nodes[0].log_lines
         );
+    }
+
+    /// A host waiting for a slot or an earlier batch is not connecting yet.
+    #[test]
+    fn a_host_is_queued_until_it_starts_connecting() {
+        let mut s = state();
+        assert_eq!(s.nodes[0].status, NodeStatus::Queued);
+        s.handle_event(&ExecutorEvent::NodeConnecting {
+            host: "web-1".to_string(),
+        });
+        assert_eq!(s.nodes[0].status, NodeStatus::Connecting);
     }
 
     #[test]

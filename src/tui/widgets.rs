@@ -135,6 +135,7 @@ fn render_node_table(frame: &mut Frame, area: Rect, state: &TuiState) {
         .map(|(i, node)| {
             let icon = status_icon(&node.status, state.spinner_tick);
             let icon_color = match node.status {
+                NodeStatus::Queued => Color::DarkGray,
                 NodeStatus::Connecting | NodeStatus::Running => Color::Cyan,
                 NodeStatus::Done => Color::Green,
                 NodeStatus::Failed => Color::Red,
@@ -426,6 +427,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
 
 fn status_icon(status: &NodeStatus, tick: usize) -> char {
     match status {
+        NodeStatus::Queued => '\u{00b7}', // ·
         NodeStatus::Connecting | NodeStatus::Running => {
             // Animate every 4 ticks (~64ms per frame at 16ms poll)
             SPINNER_FRAMES[(tick / 4) % SPINNER_FRAMES.len()]
@@ -437,6 +439,7 @@ fn status_icon(status: &NodeStatus, tick: usize) -> char {
 
 fn status_color(status: &NodeStatus) -> Color {
     match status {
+        NodeStatus::Queued => Color::DarkGray,
         NodeStatus::Connecting => Color::Yellow,
         NodeStatus::Running => Color::Cyan,
         NodeStatus::Done => Color::Green,
