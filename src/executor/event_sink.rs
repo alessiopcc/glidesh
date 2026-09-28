@@ -95,6 +95,23 @@ impl EventSink {
                 tasks,
                 reason: scrub(reason),
             },
+            ExecutorEvent::StepWaiting {
+                host,
+                step,
+                command,
+                elapsed_secs,
+                timeout_secs,
+                first,
+                preview,
+            } => ExecutorEvent::StepWaiting {
+                host,
+                step,
+                command: scrub(command),
+                elapsed_secs,
+                timeout_secs,
+                first,
+                preview,
+            },
             ExecutorEvent::TaskSkipped {
                 host,
                 module,
@@ -160,6 +177,29 @@ mod tests {
         match rx.try_recv().unwrap() {
             ExecutorEvent::ModuleResult { stdout, .. } => {
                 assert_eq!(stdout, "the password is *** ok");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// The command is plan text, but a secret may have been pasted into the plan itself.
+    #[test]
+    fn redacts_a_waiting_command() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = EventSink::new(tx, registry_with("hunter2"));
+        sink.send(ExecutorEvent::StepWaiting {
+            host: "h".into(),
+            step: "s".into(),
+            command: "curl -u admin:hunter2 localhost".into(),
+            elapsed_secs: 0,
+            timeout_secs: 300,
+            first: true,
+            preview: false,
+        })
+        .unwrap();
+        match rx.try_recv().unwrap() {
+            ExecutorEvent::StepWaiting { command, .. } => {
+                assert_eq!(command, "curl -u admin:*** localhost");
             }
             other => panic!("unexpected event: {other:?}"),
         }

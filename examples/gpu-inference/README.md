@@ -10,6 +10,8 @@ Deploy a GPU inference server, with a one-shot weight download and a readiness g
    `--privileged`, `--gpus all`, a large `/dev/shm`, and unlimited locked memory
 3. Declares a healthcheck and blocks on `wait "healthy"`, so the next step only runs
    once the API is genuinely serving
+4. Holds the run with an [`until=`](https://glidesh.netlify.app/advanced/until/) gate until
+   the API lists the model — checked on every run, and never reported as a change
 
 ## Why `ipc "host"`
 

@@ -44,6 +44,10 @@ Use sync mode when cross-host ordering matters. It has costs:
 If a host fails, the others carry on without it: a failed host stops, and the rest are no
 longer held for it.
 
+To hold the fleet until something outside glidesh is ready, give a step an
+[`until=`](/advanced/until/) gate: no host goes past that step until every host's gate has
+opened.
+
 ## Async Mode
 
 Each host runs the entire plan independently at its own pace. Hosts never wait for each

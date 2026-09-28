@@ -94,6 +94,7 @@ A step accepts these attributes:
 | `loop` | Repeat the step for each value — see [Loops & Register](/advanced/loops-register/#step-loops) |
 | `subscribe` | Run the step when an earlier step changed — see [Subscribe](/advanced/subscribe/) |
 | `tags` | Names that `--tags` / `--skip-tags` select the step by — see [Tags](/advanced/tags/) |
+| `until`, `until-timeout`, `until-interval` | Wait for a command on the host to succeed before the step's tasks — see [Waiting (until)](/advanced/until/) |
 | `run-as`, `run-as-method` | Escalate privileges for every task in the step — see [Privilege Escalation](/advanced/run-as/) |
 
 Any other attribute on a step is an error, so a misspelling such as `wehn=` is caught when the plan is parsed instead of being silently ignored.

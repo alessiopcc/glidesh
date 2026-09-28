@@ -1,6 +1,6 @@
 pub mod storage;
 
-use crate::executor::result::ExecutorEvent;
+use crate::executor::result::{ExecutorEvent, waiting_text};
 use chrono::Utc;
 use glidesh::error::GlideshError;
 use std::collections::HashMap;
@@ -256,6 +256,24 @@ impl RunLogger {
                 if let Some(summary) = self.node_summaries.get_mut(host) {
                     summary.skipped += tasks;
                 }
+            }
+            ExecutorEvent::StepWaiting {
+                host,
+                step,
+                command,
+                elapsed_secs,
+                timeout_secs,
+                first,
+                preview,
+            } => {
+                self.log_line(
+                    host,
+                    &format!(
+                        "[WAITING] [step: {}] {}",
+                        step,
+                        waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
+                    ),
+                );
             }
             ExecutorEvent::TaskSkipped {
                 host,
@@ -526,6 +544,28 @@ mod tests {
         assert!(log.contains("changed=0 skipped=3"), "{log}");
         let saved = storage::read_summary(logger.run_dir()).unwrap();
         assert_eq!(saved.nodes["web-1"].skipped, 3);
+    }
+
+    #[test]
+    fn a_wait_is_logged_without_counting_as_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&ExecutorEvent::StepWaiting {
+            host: "web-1".to_string(),
+            step: "Wait".to_string(),
+            command: "test -e /ready".to_string(),
+            elapsed_secs: 30,
+            timeout_secs: 300,
+            first: false,
+            preview: false,
+        });
+        let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
+        assert!(
+            log.contains(
+                "[WAITING] [step: Wait] still waiting (30s of 300s) until: test -e /ready"
+            ),
+            "{log}"
+        );
     }
 
     /// Log parsers see no new key unless the plan actually skipped something.

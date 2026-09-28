@@ -1,6 +1,7 @@
 use crate::config::condition::Condition;
 use crate::config::types::{
     Amount, ExecutionMode, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step, TaskDef,
+    UntilGate,
 };
 use crate::error::GlideshError;
 use std::collections::{HashMap, HashSet};
@@ -485,6 +486,8 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
 
     reject_unknown_step_attrs(node, &name)?;
 
+    let until = parse_until(node, &name)?;
+
     let tags = match node.get("tags") {
         Some(value) => {
             let list = value.as_string().ok_or_else(|| GlideshError::ConfigParse {
@@ -526,6 +529,7 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         run_as,
         when,
         tags,
+        until,
         source_dir: None,
     })
 }
@@ -535,6 +539,9 @@ const STEP_ATTRS: &[&str] = &[
     "subscribe",
     "when",
     "tags",
+    "until",
+    "until-timeout",
+    "until-interval",
     "run-as",
     "run-as-method",
 ];
@@ -572,6 +579,53 @@ fn parse_when(node: &kdl::KdlNode) -> Result<Option<Condition>, GlideshError> {
             message: "when= must be a string, e.g. when=\"${@os.family} == debian\"".into(),
         })?;
     Condition::parse(source).map(Some)
+}
+
+fn parse_until(node: &kdl::KdlNode, step: &str) -> Result<Option<UntilGate>, GlideshError> {
+    let err = |message: String| GlideshError::ConfigParse {
+        message: format!("step '{step}': {message}"),
+    };
+    let seconds = |key: &str, default: u64| -> Result<u64, GlideshError> {
+        match node.get(key) {
+            None => Ok(default),
+            Some(value) => value
+                .as_integer()
+                .and_then(|n| u64::try_from(n).ok())
+                .filter(|n| (1..=UntilGate::MAX_SECONDS).contains(n))
+                .ok_or_else(|| {
+                    err(format!(
+                        "{key}= must be a number of seconds from 1 to {} (7 days)",
+                        UntilGate::MAX_SECONDS
+                    ))
+                }),
+        }
+    };
+    let timeout = seconds("until-timeout", UntilGate::DEFAULT_TIMEOUT)?;
+    let interval = seconds("until-interval", UntilGate::DEFAULT_INTERVAL)?;
+    let Some(value) = node.get("until") else {
+        if node.get("until-timeout").is_some() || node.get("until-interval").is_some() {
+            return Err(err(
+                "until-timeout= and until-interval= need an until= command".into(),
+            ));
+        }
+        return Ok(None);
+    };
+    let command = value
+        .as_string()
+        .filter(|c| !c.trim().is_empty())
+        .ok_or_else(|| {
+            err("until= must be a command, like until=\"curl -sf localhost:8080/health\"".into())
+        })?;
+    if command.contains("${@item") {
+        return Err(err(
+            "until= cannot use ${@item}: the gate runs once, before the step's loop".into(),
+        ));
+    }
+    Ok(Some(UntilGate {
+        command: command.to_string(),
+        timeout,
+        interval,
+    }))
 }
 
 fn is_item_var(name: &str) -> bool {
@@ -1794,6 +1848,62 @@ plan "test" {
     }
 
     #[test]
+    fn until_has_defaults_and_takes_its_timings_as_attributes() {
+        let step = one_step(r#"step "s" until="curl -sf localhost" { shell "echo" }"#);
+        assert_eq!(
+            step.until,
+            Some(UntilGate {
+                command: "curl -sf localhost".into(),
+                timeout: UntilGate::DEFAULT_TIMEOUT,
+                interval: UntilGate::DEFAULT_INTERVAL,
+            })
+        );
+        let step = one_step(r#"step "s" until="true" until-timeout=600 until-interval=5 {}"#);
+        let gate = step.until.unwrap();
+        assert_eq!((gate.timeout, gate.interval), (600, 5));
+    }
+
+    /// A gate with no tasks is a pure barrier.
+    #[test]
+    fn a_step_may_be_only_a_gate() {
+        let step = one_step(r#"step "Wait" until="test -e /tmp/ready""#);
+        assert!(step.until.is_some() && step.tasks.is_empty());
+    }
+
+    #[test]
+    fn malformed_until_settings_fail_to_parse() {
+        for (attrs, expect) in [
+            (r#"until="""#, "must be a command"),
+            (r#"until=#true"#, "must be a command"),
+            (
+                r#"until="x" until-timeout=0"#,
+                "until-timeout= must be a number",
+            ),
+            (
+                r#"until="x" until-interval=-1"#,
+                "until-interval= must be a number",
+            ),
+            (
+                r#"until="x" until-timeout="60""#,
+                "until-timeout= must be a number",
+            ),
+            (r#"until="x" until-timeout=604801"#, "from 1 to 604800"),
+            (
+                r#"until="x" until-interval=18446744073709551615"#,
+                "from 1 to 604800",
+            ),
+            (r#"until-timeout=60"#, "need an until= command"),
+            (
+                r#"loop="${xs}" until="test ${@item}""#,
+                "cannot use ${@item}",
+            ),
+        ] {
+            let err = plan_err(&format!(r#"step "s" {attrs} {{ shell "echo" }}"#));
+            assert!(err.contains(expect), "{attrs}: {err}");
+        }
+    }
+
+    #[test]
     fn tags_are_a_comma_list_on_the_step() {
         let step = one_step(r#"step "s" tags="web, deploy" { shell "echo" }"#);
         assert_eq!(step.tags, ["web", "deploy"]);
@@ -1830,7 +1940,7 @@ plan "test" {
     fn every_documented_step_attribute_is_accepted() {
         one_step(
             r#"step "a" { shell "echo" }
-            step "s" loop="${xs}" subscribe="a" when="${x}" tags="t" run-as="root" run-as-method="sudo" {
+            step "s" loop="${xs}" subscribe="a" when="${x}" tags="t" until="true" until-timeout=5 until-interval=1 run-as="root" run-as-method="sudo" {
                 shell "echo"
             }"#,
         );

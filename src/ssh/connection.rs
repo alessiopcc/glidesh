@@ -30,6 +30,29 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
+/// Exit code reported for a command that did not exit with a status of its own, as the
+/// OpenSSH client does.
+pub const NO_EXIT_STATUS: u32 = 255;
+
+/// The exit code of a finished command, and why it is not the command's own when it is not.
+///
+/// An exit status is optional in SSH: a command killed by a signal sends `exit-signal`
+/// instead, and a dropped channel sends nothing. Neither is success, so neither may read as
+/// exit 0 — a `check=` guard or an `until=` gate would pass on it.
+fn exit_outcome(status: Option<u32>, signal: Option<&str>) -> (u32, Option<String>) {
+    match (status, signal) {
+        (Some(code), _) => (code, None),
+        (None, Some(signal)) => (
+            NO_EXIT_STATUS,
+            Some(format!("command killed by signal {signal}")),
+        ),
+        (None, None) => (
+            NO_EXIT_STATUS,
+            Some("connection closed before the command reported an exit status".into()),
+        ),
+    }
+}
+
 /// Optional controls for [`SshSession::exec_with`]: feed bytes on stdin (e.g. a
 /// `sudo -S` password) and/or allocate a PTY (required by `su`).
 #[derive(Default)]
@@ -362,7 +385,8 @@ impl SshSession {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut exit_code: u32 = 0;
+        let mut status: Option<u32> = None;
+        let mut signal: Option<String> = None;
         let mut exited = false;
 
         loop {
@@ -392,17 +416,29 @@ impl SshSession {
                     stderr.extend_from_slice(data);
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = exit_status;
+                    status = Some(exit_status);
+                    exited = true;
+                }
+                russh::ChannelMsg::ExitSignal { signal_name, .. } => {
+                    signal = Some(format!("{signal_name:?}"));
                     exited = true;
                 }
                 _ => {}
             }
         }
 
+        let (exit_code, why) = exit_outcome(status, signal.as_deref());
+        let mut stderr = String::from_utf8_lossy(&stderr).to_string();
+        if let Some(why) = why {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&why);
+        }
         Ok(CommandOutput {
             exit_code,
             stdout: String::from_utf8_lossy(&stdout).to_string(),
-            stderr: String::from_utf8_lossy(&stderr).to_string(),
+            stderr,
         })
     }
 
@@ -1066,5 +1102,33 @@ fn f_key_escape(n: u8) -> Vec<u8> {
         11 => b"\x1b[23~".to_vec(),
         12 => b"\x1b[24~".to_vec(),
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_exit_status_is_the_commands_own() {
+        assert_eq!(exit_outcome(Some(0), None), (0, None));
+        assert_eq!(exit_outcome(Some(3), None), (3, None));
+    }
+
+    #[test]
+    fn a_command_killed_by_a_signal_did_not_succeed() {
+        let (code, why) = exit_outcome(None, Some("KILL"));
+        assert_eq!(code, NO_EXIT_STATUS);
+        assert_eq!(why.as_deref(), Some("command killed by signal KILL"));
+    }
+
+    #[test]
+    fn a_channel_closed_without_a_status_did_not_succeed() {
+        let (code, why) = exit_outcome(None, None);
+        assert_eq!(code, NO_EXIT_STATUS);
+        assert!(
+            why.unwrap()
+                .contains("before the command reported an exit status")
+        );
     }
 }

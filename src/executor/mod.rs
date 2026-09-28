@@ -7,4 +7,4 @@ pub mod result;
 pub mod rollout;
 
 pub use engine::{GroupPlan, run};
-pub use result::{aborted_suffix, changed_label, skipped_suffix};
+pub use result::{aborted_suffix, changed_label, skipped_suffix, waiting_text};

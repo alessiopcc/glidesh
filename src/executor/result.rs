@@ -42,6 +42,23 @@ pub fn skipped_suffix(skipped: usize) -> String {
     }
 }
 
+/// How a `StepWaiting` event reads, in the plain output, the TUI and the run log alike.
+pub fn waiting_text(
+    command: &str,
+    elapsed_secs: u64,
+    timeout_secs: u64,
+    first: bool,
+    preview: bool,
+) -> String {
+    if preview {
+        format!("until not met yet: {command} (a run would wait up to {timeout_secs}s)")
+    } else if first {
+        format!("waiting until: {command} (up to {timeout_secs}s)")
+    } else {
+        format!("still waiting ({elapsed_secs}s of {timeout_secs}s) until: {command}")
+    }
+}
+
 /// The aborted count as a summary suffix — empty unless a rolling run was stopped.
 pub fn aborted_suffix(aborted: usize) -> String {
     if aborted == 0 {
@@ -107,6 +124,21 @@ pub enum ExecutorEvent {
         tasks: usize,
         reason: String,
     },
+    /// A step's `until=` gate has not opened yet. Sent when the first attempt fails (or is
+    /// still running after `WAIT_REPORT_EVERY`) and then every `WAIT_REPORT_EVERY`, so a
+    /// long wait shows progress without flooding.
+    StepWaiting {
+        host: String,
+        step: String,
+        /// As written in the plan, like `TaskSkipped::resource`.
+        command: String,
+        elapsed_secs: u64,
+        timeout_secs: u64,
+        /// The wait's first report, which opens it; later ones say it is still going on.
+        first: bool,
+        /// A preview checks the gate once and never waits; this reports it closed.
+        preview: bool,
+    },
     /// A task's `when=` did not hold.
     TaskSkipped {
         host: String,
@@ -144,7 +176,23 @@ pub enum ExecutorEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{changed_label, skipped_suffix};
+    use super::{changed_label, skipped_suffix, waiting_text};
+
+    #[test]
+    fn waiting_says_how_long_and_a_preview_that_it_would_wait() {
+        assert_eq!(
+            waiting_text("test -e /r", 4, 300, true, false),
+            "waiting until: test -e /r (up to 300s)"
+        );
+        assert_eq!(
+            waiting_text("test -e /r", 60, 300, false, false),
+            "still waiting (60s of 300s) until: test -e /r"
+        );
+        assert_eq!(
+            waiting_text("test -e /r", 0, 300, true, true),
+            "until not met yet: test -e /r (a run would wait up to 300s)"
+        );
+    }
 
     #[test]
     fn nothing_skipped_reads_as_before() {

@@ -1,4 +1,4 @@
-use crate::executor::result::ExecutorEvent;
+use crate::executor::result::{ExecutorEvent, waiting_text};
 use glidesh::config::types::ResolvedJumpHost;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -259,6 +259,23 @@ impl TuiState {
             } => {
                 self.push_node_log(host, format!("  SKIPPED step: {}", reason));
                 self.total_skipped += tasks;
+            }
+            ExecutorEvent::StepWaiting {
+                host,
+                command,
+                elapsed_secs,
+                timeout_secs,
+                first,
+                preview,
+                ..
+            } => {
+                self.push_node_log(
+                    host,
+                    format!(
+                        "  WAITING {}",
+                        waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
+                    ),
+                );
             }
             ExecutorEvent::TaskSkipped {
                 host,
@@ -654,6 +671,25 @@ mod tests {
             s.nodes[0].log_lines[1],
             "  SKIPPED shell 'uptime': when: ${y}"
         );
+    }
+
+    #[test]
+    fn a_wait_is_shown_in_the_host_log_and_counted_nowhere() {
+        let mut s = state();
+        s.handle_event(&ExecutorEvent::StepWaiting {
+            host: "web-1".to_string(),
+            step: "Wait".to_string(),
+            command: "test -e /ready".to_string(),
+            elapsed_secs: 0,
+            timeout_secs: 60,
+            first: true,
+            preview: true,
+        });
+        assert_eq!(
+            s.nodes[0].log_lines[0],
+            "  WAITING until not met yet: test -e /ready (a run would wait up to 60s)"
+        );
+        assert_eq!((s.total_changed, s.total_skipped), (0, 0));
     }
 
     #[test]

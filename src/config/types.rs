@@ -365,9 +365,30 @@ pub struct Step {
     pub when: Option<Condition>,
     /// Selects the step with `--tags` / `--skip-tags`; see `config::tags`.
     pub tags: Vec<String>,
+    /// A command polled on the host before the step's tasks, until it exits 0.
+    pub until: Option<UntilGate>,
     /// Directory of the included plan this step came from, set by `resolve_includes`;
     /// `None` for the top-level plan's own steps. Relative `file` sources resolve from here.
     pub source_dir: Option<std::path::PathBuf>,
+}
+
+/// A step's `until=` gate. Waiting is not work: the gate never counts as a change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntilGate {
+    /// As written in the plan; interpolated per host when the gate runs.
+    pub command: String,
+    /// Seconds before the step fails.
+    pub timeout: u64,
+    /// Seconds between attempts.
+    pub interval: u64,
+}
+
+impl UntilGate {
+    pub const DEFAULT_TIMEOUT: u64 = 300;
+    pub const DEFAULT_INTERVAL: u64 = 3;
+    /// A week. Longer is certainly a mistake, and an unbounded value would overflow the
+    /// deadline computed from it.
+    pub const MAX_SECONDS: u64 = 7 * 24 * 60 * 60;
 }
 
 impl Step {

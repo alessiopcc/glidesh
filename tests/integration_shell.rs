@@ -268,3 +268,24 @@ async fn test_shell_backgrounded_child_does_not_hang() {
         result.output
     );
 }
+
+/// A command killed by a signal sends no exit status. It must not read as exit 0, or a
+/// `check=` guard or an `until=` gate would pass on it.
+#[tokio::test]
+async fn a_command_killed_by_a_signal_does_not_succeed() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+
+    let out = ssh.exec("kill -9 $$").await.unwrap();
+    assert_eq!(out.exit_code, glidesh::ssh::connection::NO_EXIT_STATUS);
+    assert!(
+        out.stderr.contains("killed by signal KILL"),
+        "stderr: {}",
+        out.stderr
+    );
+
+    let guard = ssh.exec("true").await.unwrap();
+    assert_eq!(guard.exit_code, 0, "the session must still work afterwards");
+}

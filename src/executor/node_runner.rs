@@ -5,18 +5,22 @@ use crate::executor::result::{ExecutorEvent, NodeResult};
 use glidesh::config::condition::{Condition, Outcome, Scope};
 use glidesh::config::tags::TagFilter;
 use glidesh::config::template::{TemplateData, interpolate_args};
-use glidesh::config::types::{LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef};
+use glidesh::config::types::{
+    LoopSource, ParamValue, Plan, ResolvedHost, Step, TaskDef, UntilGate,
+};
 use glidesh::error::GlideshError;
 use glidesh::modules::context::{ModuleContext, Trigger};
 use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
+use glidesh::ssh::connection::CommandOutput;
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// One iteration of a step `loop`. A flat item binds `${@item}`; a structured
@@ -139,6 +143,63 @@ pub struct NodeRunner {
 pub struct SyncSlot {
     pub seat: Seat,
     pub permits: Arc<Semaphore>,
+}
+
+/// How often a long `until=` wait reports that it is still waiting.
+const WAIT_REPORT_EVERY: Duration = Duration::from_secs(30);
+
+/// When an `until=` gate last said it was waiting.
+struct WaitReports {
+    started: Instant,
+    last: Option<Instant>,
+}
+
+impl WaitReports {
+    /// The first report comes as soon as an attempt fails, or this long into a slow first
+    /// attempt; later ones this long after the previous.
+    fn next_due(&self) -> Instant {
+        self.last.unwrap_or(self.started) + WAIT_REPORT_EVERY
+    }
+}
+
+/// Lines of the gate command's last output kept in a timeout error.
+const GATE_OUTPUT_LINES: usize = 20;
+
+/// The failure of a gate that never opened, with the output of the last attempt that
+/// finished — it is nearly always where the real answer is. `still_running` when the final
+/// attempt was cut off at the deadline, so it has no exit code and its output never arrived;
+/// `last` is then the attempt before it, if any.
+fn gate_timeout_error(
+    gate: &UntilGate,
+    last: Option<&CommandOutput>,
+    still_running: bool,
+) -> String {
+    let mut message = format!(
+        "until= did not succeed within {}s: `{}`",
+        gate.timeout, gate.command
+    );
+    if still_running {
+        message.push_str(" was still running at the deadline");
+    }
+    let Some(last) = last else {
+        return message;
+    };
+    message.push_str(&if still_running {
+        format!("; the attempt before exited {}", last.exit_code)
+    } else {
+        format!(" last exited {}", last.exit_code)
+    });
+    let output: Vec<&str> = last
+        .stdout
+        .lines()
+        .chain(last.stderr.lines())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let tail = &output[output.len().saturating_sub(GATE_OUTPUT_LINES)..];
+    if !tail.is_empty() {
+        message.push_str(&format!("; last output:\n{}", tail.join("\n")));
+    }
+    message
 }
 
 /// Whether a task counts toward the run's changed total.
@@ -495,6 +556,14 @@ impl NodeRunner {
                 }
             }
 
+            if let Some(gate) = &step.until {
+                if let Err(error) = self.wait_for_gate(step, gate, &vars, &session).await {
+                    self.emit_step_error(&step.name, &error);
+                    let _ = session.close().await;
+                    return Ok(self.finish(false, &progress));
+                }
+            }
+
             match &step.loop_source {
                 None => {
                     match self
@@ -577,6 +646,133 @@ impl NodeRunner {
             module: module.to_string(),
             resource: resource.to_string(),
             error: error.to_string(),
+        });
+    }
+
+    /// Poll a step's `until=` gate until its command exits 0, or fail once it has not
+    /// within the timeout. A preview checks once and never waits. The gate is never a change.
+    async fn wait_for_gate(
+        &self,
+        step: &Step,
+        gate: &UntilGate,
+        vars: &HashMap<String, String>,
+        session: &SshSession,
+    ) -> Result<(), String> {
+        let mut command = glidesh::config::template::interpolate(&gate.command, vars)
+            .map_err(|e| format!("until=: {e}"))?;
+        if token::contains_secret_token(&command) {
+            command = self
+                .secrets
+                .decrypt_inline(&command)
+                .map_err(|e| format!("until=: {e}"))?;
+        }
+        let run_as = step
+            .run_as
+            .clone()
+            .merge_over(&self.plan.run_as)
+            .merge_over(&self.host.run_as)
+            .resolve(glidesh::modules::escalation::password());
+
+        let started = Instant::now();
+        // The parser caps the timeout, but a deadline past what `Instant` can hold must not
+        // panic; it just never comes.
+        let deadline = started.checked_add(Duration::from_secs(gate.timeout));
+        let left =
+            |now: Instant| deadline.map_or(Duration::MAX, |d| d.saturating_duration_since(now));
+        let mut reports = WaitReports {
+            started,
+            last: None,
+        };
+        let mut finished: Option<CommandOutput> = None;
+        loop {
+            // Each attempt is bounded by what is left of the timeout: a command that never
+            // exits would otherwise hold the step forever, and one that exits 0 after the
+            // deadline must not open the gate late.
+            let remaining = left(Instant::now());
+            let attempt =
+                tokio::time::timeout(remaining, session.exec_as(&command, run_as.as_ref()));
+            let result = if self.dry_run {
+                attempt.await
+            } else {
+                self.reporting(step, gate, &mut reports, attempt).await
+            };
+            let out = match result {
+                Ok(result) => result.map_err(|e| format!("until=: {e}"))?,
+                Err(_) if self.dry_run => {
+                    self.report_preview(step, gate);
+                    return Ok(());
+                }
+                Err(_) => return Err(gate_timeout_error(gate, finished.as_ref(), true)),
+            };
+            if out.exit_code == 0 {
+                return Ok(());
+            }
+            if self.dry_run {
+                self.report_preview(step, gate);
+                return Ok(());
+            }
+            if left(Instant::now()) < Duration::from_secs(gate.interval) {
+                return Err(gate_timeout_error(gate, Some(&out), false));
+            }
+            finished = Some(out);
+            if reports.last.is_none() {
+                self.report_waiting(step, gate, &mut reports);
+            }
+            let pause = tokio::time::sleep(Duration::from_secs(gate.interval));
+            self.reporting(step, gate, &mut reports, pause).await;
+        }
+    }
+
+    /// Await `work`, reporting that the gate is still waiting whenever a report falls due —
+    /// so neither a slow attempt nor a long `until-interval` goes quiet.
+    async fn reporting<F: std::future::Future>(
+        &self,
+        step: &Step,
+        gate: &UntilGate,
+        reports: &mut WaitReports,
+        work: F,
+    ) -> F::Output {
+        tokio::pin!(work);
+        loop {
+            let due = tokio::time::Instant::from_std(reports.next_due());
+            tokio::select! {
+                out = &mut work => return out,
+                _ = tokio::time::sleep_until(due) => self.report_waiting(step, gate, reports),
+            }
+        }
+    }
+
+    fn report_waiting(&self, step: &Step, gate: &UntilGate, reports: &mut WaitReports) {
+        self.send_waiting(
+            step,
+            gate,
+            reports.started.elapsed(),
+            reports.last.is_none(),
+            false,
+        );
+        reports.last = Some(Instant::now());
+    }
+
+    fn report_preview(&self, step: &Step, gate: &UntilGate) {
+        self.send_waiting(step, gate, Duration::ZERO, true, true);
+    }
+
+    fn send_waiting(
+        &self,
+        step: &Step,
+        gate: &UntilGate,
+        elapsed: Duration,
+        first: bool,
+        preview: bool,
+    ) {
+        let _ = self.event_tx.send(ExecutorEvent::StepWaiting {
+            host: self.host.name.clone(),
+            step: step.name.clone(),
+            command: gate.command.clone(),
+            elapsed_secs: elapsed.as_secs(),
+            timeout_secs: gate.timeout,
+            first,
+            preview,
         });
     }
 
@@ -932,6 +1128,99 @@ impl NodeRunner {
 mod tests {
     use super::*;
     use glidesh::modules::detect::{ContainerRuntime, InitSystem, OsFamily, PkgManager};
+
+    fn until_gate() -> UntilGate {
+        UntilGate {
+            command: "curl -sf ${url}".into(),
+            timeout: 60,
+            interval: 3,
+        }
+    }
+
+    /// The command as written, not interpolated: the error goes to logs and the terminal.
+    #[test]
+    fn a_gate_timeout_names_the_command_its_exit_and_its_last_output() {
+        let out = CommandOutput {
+            exit_code: 7,
+            stdout: "partial\n".into(),
+            stderr: "connection refused\n".into(),
+        };
+        let err = gate_timeout_error(&until_gate(), Some(&out), false);
+        assert!(
+            err.starts_with("until= did not succeed within 60s: `curl -sf ${url}` last exited 7"),
+            "{err}"
+        );
+        assert!(
+            err.ends_with("last output:\npartial\nconnection refused"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_gate_timeout_keeps_only_the_tail_of_long_output() {
+        let stdout: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        let out = CommandOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+        let err = gate_timeout_error(&until_gate(), Some(&out), false);
+        assert!(
+            err.contains("line 31\n") && !err.contains("line 30\n"),
+            "{err}"
+        );
+        assert!(err.ends_with("line 50"), "{err}");
+    }
+
+    /// A slow first attempt still opens the wait on time; afterwards reports keep a steady
+    /// pace from the previous one.
+    #[test]
+    fn wait_reports_fall_due_from_the_start_then_from_the_last_report() {
+        let started = Instant::now();
+        let mut reports = WaitReports {
+            started,
+            last: None,
+        };
+        assert_eq!(reports.next_due(), started + WAIT_REPORT_EVERY);
+        let at = started + Duration::from_secs(5);
+        reports.last = Some(at);
+        assert_eq!(reports.next_due(), at + WAIT_REPORT_EVERY);
+    }
+
+    #[test]
+    fn a_gate_still_running_at_the_deadline_says_so() {
+        assert_eq!(
+            gate_timeout_error(&until_gate(), None, true),
+            "until= did not succeed within 60s: `curl -sf ${url}` was still running at the deadline"
+        );
+    }
+
+    /// A final attempt cut off at the deadline has nothing to show, but the one before it
+    /// finished, and its exit and output are still the best clue.
+    #[test]
+    fn a_hung_last_attempt_keeps_the_previous_attempts_output() {
+        let out = CommandOutput {
+            exit_code: 7,
+            stdout: String::new(),
+            stderr: "connection refused\n".into(),
+        };
+        let err = gate_timeout_error(&until_gate(), Some(&out), true);
+        assert_eq!(
+            err,
+            "until= did not succeed within 60s: `curl -sf ${url}` was still running at the \
+             deadline; the attempt before exited 7; last output:\nconnection refused"
+        );
+    }
+
+    #[test]
+    fn a_silent_gate_timeout_has_no_output_section() {
+        let out = CommandOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: " \n".into(),
+        };
+        assert!(!gate_timeout_error(&until_gate(), Some(&out), false).contains("last output"));
+    }
 
     fn collection(rows: Vec<Vec<(&str, &str)>>) -> Vec<HashMap<String, String>> {
         rows.into_iter()

@@ -61,6 +61,7 @@ export default defineConfig({
 						{ label: 'Loops & Register', slug: 'advanced/loops-register' },
 						{ label: 'Subscribe', slug: 'advanced/subscribe' },
 						{ label: 'Tags', slug: 'advanced/tags' },
+						{ label: 'Waiting (until)', slug: 'advanced/until' },
 						{ label: 'Plan Includes', slug: 'advanced/plan-includes' },
 						{ label: 'Writing Plugins', slug: 'advanced/writing-plugins' },
 					],
