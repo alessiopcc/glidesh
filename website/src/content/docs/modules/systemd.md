@@ -61,7 +61,7 @@ systemd "my-script" {
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | *(positional)* | string | Unit name |
-| `state` | string | `"started"` (default), `"stopped"`, or `"restarted"` |
+| `state` | string | `"started"` (default), `"stopped"`, or `"restarted"` — see [Restarting](#restarting) |
 | `enabled` | boolean | `#true` or `#false` — controls boot-time start; unchanged when omitted |
 
 ### Service creation parameters
@@ -87,7 +87,25 @@ For existing services, the module checks `systemctl is-active` and `systemctl is
 
 For service creation, the module computes a SHA256 hash of the generated unit file and compares it with the remote file. The unit file is only uploaded when the content differs. After uploading, `systemctl daemon-reload` runs automatically.
 
-The `restarted` state always triggers a restart regardless of current state.
+### Restarting
+
+`state="restarted"` depends on its step:
+
+- In a step without `subscribe`, it restarts the service on every run.
+- In a step with [`subscribe`](/advanced/subscribe/), it is a handler: it restarts only when a
+  step it subscribes to changed something, and otherwise just keeps the service running.
+
+A triggered `state="started"` task restarts the service too, so a changed configuration file is
+loaded. A `stopped` task ignores the trigger.
+
+```kdl
+step "Deploy config" {
+    file "/etc/nginx/nginx.conf" src="nginx.conf"
+}
+step "Restart nginx" subscribe="Deploy config" {
+    systemd "nginx" state="restarted"
+}
+```
 
 Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
 

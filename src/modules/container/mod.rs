@@ -2,7 +2,7 @@ mod health;
 mod run_args;
 
 use crate::error::GlideshError;
-use crate::modules::context::ModuleContext;
+use crate::modules::context::{ModuleContext, Trigger};
 use crate::modules::detect::ContainerRuntime;
 use crate::modules::detect::PkgManager;
 use crate::modules::shell::{
@@ -217,6 +217,13 @@ impl ContainerModule {
             return Ok(ModuleStatus::pending_with_diff(plan, diff));
         }
 
+        if ctx.trigger == Trigger::Fired {
+            return Ok(ModuleStatus::pending(format!(
+                "Recreate container {} (triggered)",
+                name
+            )));
+        }
+
         match start_action(&state) {
             StartAction::None => {}
             StartAction::Recreate => {
@@ -271,6 +278,13 @@ impl ContainerModule {
         let Some(gate) = params.args.get("check").and_then(|v| v.as_str()) else {
             return Ok(pending);
         };
+        // The guard says the work is done; a triggered subscriber is asked to redo it.
+        if ctx.trigger == Trigger::Fired {
+            return Ok(ModuleStatus::pending(format!(
+                "Run container {} to completion (triggered)",
+                params.resource_name
+            )));
+        }
 
         // A timed-out guard counts as "not satisfied" so the job still runs.
         match exec_timed(ctx, gate, parse_timeout(params)?).await? {
@@ -446,7 +460,8 @@ impl ContainerModule {
             && inspect_label(ctx, runtime, name, run_args::PARAM_HASH_LABEL).await?
                 == run_args::spec_hash(runtime, params)?;
 
-        let (changed, output) = if spec_matches && action != StartAction::Recreate {
+        let keep = spec_matches && action != StartAction::Recreate && ctx.trigger != Trigger::Fired;
+        let (changed, output) = if keep {
             match action {
                 StartAction::None => (false, String::new()),
                 StartAction::Start => (true, Self::lifecycle(ctx, runtime, "start", name).await?),

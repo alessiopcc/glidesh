@@ -42,6 +42,11 @@ pub struct ModuleRequest<'a> {
     /// sees no `diff` key must read it as false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub diff: bool,
+    /// The task's step subscribes to a step that changed. A plugin whose work can be redone
+    /// (a reload, a rerun) should answer `check` with `pending` when this is set; one that
+    /// answers `satisfied` is not applied. Skipped when false, like `diff`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub triggered: bool,
 }
 
 #[derive(Serialize)]

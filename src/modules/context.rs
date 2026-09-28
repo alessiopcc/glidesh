@@ -26,6 +26,21 @@ pub struct ModuleContext<'a> {
     /// glidesh consult it to decide what may cross that boundary — see the external
     /// plugin runner. `None` in contexts built without an executor (unit tests).
     pub secrets: Option<Arc<SecretRegistry>>,
+    /// Where the task's step stands with `subscribe`. A module whose work can be redone —
+    /// a restart, a recreate, a rerun — reports it pending from `check` when `Fired`.
+    pub trigger: Trigger,
+}
+
+/// A step's `subscribe` state for this run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Trigger {
+    /// The step subscribes to nothing.
+    #[default]
+    None,
+    /// The step subscribes, but nothing it subscribes to changed.
+    Idle,
+    /// A step it subscribes to changed.
+    Fired,
 }
 
 /// Escalation-aware wrappers. Modules call these instead of `ctx.ssh.*` so that the

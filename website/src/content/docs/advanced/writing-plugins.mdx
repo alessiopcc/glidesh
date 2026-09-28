@@ -108,6 +108,18 @@ a missing `diff` as false.
 {"status":"pending","plan":"will update /etc/motd","diff":"-old line\n+new line"}
 ```
 
+### Triggered tasks
+
+When the task's step [subscribes](/advanced/subscribe/) to a step that changed something, the
+check and apply requests carry `"triggered": true`. It means "redo your work": a plugin that
+manages something that can be reloaded, restarted or rerun should answer `check` with
+`pending` when it is set, even though its state is in place, and do the work in `apply`. A
+plugin with nothing to redo answers as usual; a `satisfied` answer is reported `ok` and
+`apply` is not called.
+
+Like `diff`, the field is omitted when false, so a plugin that predates it receives unchanged
+requests. Read a missing `triggered` as false.
+
 ### Apply Response
 
 ```json

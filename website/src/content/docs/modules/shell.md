@@ -76,6 +76,8 @@ step "Install package" {
 
 `check` asks the host whether the work is already done. To decide whether a task applies to a host at all — by OS, inventory variable, or feature flag, without running anything — use [`when=`](/advanced/conditionals/); see [`when` or `check`?](/advanced/conditionals/#when-or-check).
 
+In a step [triggered by `subscribe`](/advanced/subscribe/#what-a-triggered-task-does), the gate is skipped and the command runs: being triggered means the work must be done again. `check="true"` therefore makes a command that runs only when triggered.
+
 ## Reporting changes with `changed-when`
 
 A shell command that runs counts as a change — glidesh cannot tell what it did. `changed-when` says otherwise.

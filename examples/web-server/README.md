@@ -7,7 +7,8 @@ Deploy nginx with a templated configuration file.
 1. Installs nginx via the system package manager
 2. Deploys a templated `nginx.conf` with variable interpolation (`${server-name}`, `${doc-root}`)
 3. Starts and enables the nginx service
-4. Runs a health check with retries
+4. Restarts nginx only when its configuration changed (`subscribe`)
+5. Runs a health check with retries
 
 ## Usage
 
@@ -20,7 +21,7 @@ glidesh run -i examples/web-server/inventory.kdl -p examples/web-server/plan.kdl
 Each step is tagged (`packages`, `config`, `service`, `check`), so a run can pick steps:
 
 ```bash
-# Push a config change: deploy it, then run the health check
+# Push a config change: deploy it, restart nginx if it changed, run the health check
 glidesh run -i examples/web-server/inventory.kdl -p examples/web-server/plan.kdl --tags config
 
 # Everything except package installation
