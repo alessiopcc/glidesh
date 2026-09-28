@@ -299,10 +299,24 @@ pub enum ExecutionMode {
     Async,
 }
 
+/// A number of hosts, given directly or as a share of the hosts a plan runs on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Amount {
+    Count(usize),
+    /// 0–100.
+    Percent(u8),
+}
+
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub name: String,
     pub mode: ExecutionMode,
+    /// Batch sizes for a rolling run, used in order with the last repeating. Empty runs every
+    /// host in one batch.
+    pub serial: Vec<Amount>,
+    /// How many hosts may fail before no further batch starts. `None` stops only when a whole
+    /// batch fails.
+    pub max_fail: Option<Amount>,
     pub vars: HashMap<String, String>,
     /// Structured vars for template loops: each key maps to a list of named-field maps.
     pub structured_vars: HashMap<String, Vec<HashMap<String, String>>>,

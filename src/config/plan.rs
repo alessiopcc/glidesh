@@ -1,6 +1,6 @@
 use crate::config::condition::Condition;
 use crate::config::types::{
-    ExecutionMode, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step, TaskDef,
+    Amount, ExecutionMode, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step, TaskDef,
 };
 use crate::error::GlideshError;
 use std::collections::{HashMap, HashSet};
@@ -39,6 +39,8 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         })?;
 
     let mut mode = ExecutionMode::default();
+    let mut serial = Vec::new();
+    let mut max_fail = None;
     let mut vars = HashMap::new();
     let mut structured_vars: HashMap<String, Vec<HashMap<String, String>>> = HashMap::new();
     let mut vars_files = Vec::new();
@@ -65,6 +67,32 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                         });
                     }
                 };
+            }
+            "serial" => {
+                serial = node
+                    .entries()
+                    .iter()
+                    .filter(|e| e.name().is_none())
+                    .map(|e| parse_amount(e.value(), "serial", 1))
+                    .collect::<Result<_, _>>()?;
+                if serial.is_empty() {
+                    return Err(GlideshError::ConfigParse {
+                        message: "serial needs at least one batch size, e.g. serial 2 or \
+                                  serial 1 \"25%\""
+                            .to_string(),
+                    });
+                }
+            }
+            "max-fail" => {
+                let mut values = node.entries().iter().filter(|e| e.name().is_none());
+                let (Some(value), None) = (values.next(), values.next()) else {
+                    return Err(GlideshError::ConfigParse {
+                        message: "max-fail takes one value, e.g. max-fail 2 or \
+                                  max-fail \"10%\""
+                            .to_string(),
+                    });
+                };
+                max_fail = Some(parse_amount(value.value(), "max-fail", 0)?);
             }
             "vars" => {
                 if let Some(vc) = node.children() {
@@ -141,12 +169,52 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
     Ok(Plan {
         name,
         mode,
+        serial,
+        max_fail,
         vars,
         structured_vars,
         vars_files,
         run_as,
         items,
     })
+}
+
+/// A host count (`2`) or a percentage (`"25%"`), at least `min`. A count may also be written
+/// as a string (`"2"`).
+fn parse_amount(value: &kdl::KdlValue, setting: &str, min: usize) -> Result<Amount, GlideshError> {
+    let fail = |got: String| GlideshError::ConfigParse {
+        message: format!(
+            "{setting} must be a host count of at least {min} or a percentage of \
+             {min}–100%, got {got}"
+        ),
+    };
+    if let Some(n) = value.as_integer() {
+        return usize::try_from(n)
+            .ok()
+            .filter(|n| *n >= min)
+            .map(Amount::Count)
+            .ok_or_else(|| fail(n.to_string()));
+    }
+    let Some(text) = value.as_string() else {
+        return Err(fail(value.to_string()));
+    };
+    let shown = format!("\"{text}\"");
+    match text.trim().strip_suffix('%') {
+        Some(pct) => pct
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|p| *p <= 100 && usize::from(*p) >= min)
+            .map(Amount::Percent)
+            .ok_or_else(|| fail(shown)),
+        None => text
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= min)
+            .map(Amount::Count)
+            .ok_or_else(|| fail(shown)),
+    }
 }
 
 /// Recursively resolve all `include` items in a plan by loading referenced plan files
@@ -844,6 +912,24 @@ plan "main" {
         assert_eq!(fp.items.len(), 3);
         assert_eq!(fp.steps().len(), 2);
         matches!(&fp.items[1], PlanItem::Include(p) if p == "common/security.kdl");
+    }
+
+    /// Like `mode`, these belong to whichever plan is run: a plan written to work both on its
+    /// own and included elsewhere must not impose its rollout on the plan including it.
+    #[test]
+    fn an_included_plans_rollout_settings_do_not_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("child.kdl"),
+            "plan \"child\" {\n    serial 5\n    max-fail 0\n    step \"c\" { shell \"true\" }\n}",
+        )
+        .unwrap();
+        let mut plan =
+            parse_plan("plan \"parent\" {\n    serial 2\n    include \"child.kdl\"\n}").unwrap();
+        resolve_includes(&mut plan, dir.path()).unwrap();
+        assert_eq!(plan.serial, [Amount::Count(2)]);
+        assert_eq!(plan.max_fail, None);
+        assert_eq!(plan.steps().len(), 1);
     }
 
     #[test]
@@ -1549,6 +1635,60 @@ plan "test" {
                 shell "echo"
             }"#,
         );
+    }
+
+    fn rollout(body: &str) -> Result<Plan, String> {
+        parse_plan(&format!("plan \"p\" {{\n{body}\n}}")).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn serial_takes_counts_and_percentages_in_order() {
+        let p = rollout(r#"serial 1 "25%" "3""#).unwrap();
+        assert_eq!(
+            p.serial,
+            [Amount::Count(1), Amount::Percent(25), Amount::Count(3)]
+        );
+    }
+
+    #[test]
+    fn without_serial_or_max_fail_nothing_is_set() {
+        let p = rollout(r#"step "s" { shell "true" }"#).unwrap();
+        assert!(p.serial.is_empty() && p.max_fail.is_none());
+    }
+
+    #[test]
+    fn max_fail_takes_one_count_or_percentage() {
+        assert_eq!(
+            rollout("max-fail 0").unwrap().max_fail,
+            Some(Amount::Count(0))
+        );
+        assert_eq!(
+            rollout(r#"max-fail "10%""#).unwrap().max_fail,
+            Some(Amount::Percent(10))
+        );
+        assert_eq!(
+            rollout(r#"max-fail "0%""#).unwrap().max_fail,
+            Some(Amount::Percent(0))
+        );
+    }
+
+    #[test]
+    fn bad_rollout_values_are_rejected() {
+        for (body, expect) in [
+            ("serial", "at least one batch size"),
+            ("serial 0", "at least 1"),
+            ("serial -2", "at least 1"),
+            (r#"serial "0%""#, "at least 1"),
+            (r#"serial "150%""#, "100%"),
+            (r#"serial "half""#, "\"half\""),
+            ("max-fail -1", "at least 0"),
+            (r#"max-fail "101%""#, "100%"),
+            ("max-fail", "one value"),
+            ("max-fail 1 2", "one value"),
+        ] {
+            let err = rollout(body).unwrap_err();
+            assert!(err.contains(expect), "{body}: {err}");
+        }
     }
 
     #[test]
