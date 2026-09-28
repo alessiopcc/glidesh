@@ -47,7 +47,7 @@ The title bar shows the selection count when runs are selected. Pressing `d` wit
 
 ### Run Detail
 
-Shows the run header (plan, run ID, timestamps) and a table of nodes with status, changed count, skipped count, and error messages. A host a [rolling run](/concepts/execution-modes/#rolling-deploys) never reached has the status `aborted`, with the reason the rollout stopped as its error; each host's log also records which batch it ran in.
+Shows the run header (plan, run ID, timestamps) and a table of nodes with status, changed count, skipped count, and error messages. When a [rolling run](/concepts/execution-modes/#rolling-deploys) is stopped, each host it never reached has the status `aborted`, with the reason the rollout stopped as its error. The run list counts these hosts too. In a rolling run with more than one batch, each host's log also records which batch it ran in.
 
 | Key | Action |
 |-----|--------|
