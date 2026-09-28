@@ -84,6 +84,43 @@ fn a_problem_in_an_included_plan_is_found() {
 }
 
 #[test]
+fn a_rollout_plan_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" {
+            mode "sync"
+            serial 1 "25%"
+            max-fail "10%"
+            step "s" { shell "true" }
+        }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(ok, "{out}");
+}
+
+#[test]
+fn bad_rollout_or_mode_values_fail() {
+    for (setting, expect) in [
+        ("serial 0", "serial must be"),
+        (r#"serial "150%""#, "serial must be"),
+        (r#"max-fail "abc""#, "max-fail must be"),
+        (r#"mode "asinc""#, r#""sync" or "async""#),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "plan.kdl",
+            &format!("plan \"p\" {{\n    {setting}\n    step \"s\" {{ shell \"true\" }}\n}}"),
+        );
+        let (ok, out) = validate(dir.path());
+        assert!(!ok, "{setting} must fail:\n{out}");
+        assert!(out.contains(expect), "{setting}:\n{out}");
+    }
+}
+
+#[test]
 fn a_missing_include_fails() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "plan.kdl", r#"plan "p" { include "nope.kdl" }"#);

@@ -502,6 +502,21 @@ mod tests {
         assert!(!raw.contains("skipped"), "{raw}");
     }
 
+    #[test]
+    fn each_host_log_records_its_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = RunLogger::new_in(tmp.path(), "deploy").unwrap();
+        logger.handle_event(&ExecutorEvent::BatchStarted {
+            index: 1,
+            total: 3,
+            hosts: vec!["web-2".to_string(), "web-3".to_string()],
+        });
+        for host in ["web-2", "web-3"] {
+            let log = storage::read_node_log(logger.run_dir(), host).unwrap();
+            assert!(log.contains("[BATCH] 2/3"), "{host}: {log}");
+        }
+    }
+
     /// An aborted host never connected, so nothing else would give it a summary entry.
     #[test]
     fn an_aborted_host_is_recorded_with_its_reason() {

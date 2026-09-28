@@ -550,6 +550,17 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_is_announced_in_the_combined_log() {
+        let mut s = state();
+        s.handle_event(&ExecutorEvent::BatchStarted {
+            index: 0,
+            total: 2,
+            hosts: vec!["web-1".to_string()],
+        });
+        assert_eq!(s.combined_log, ["── Batch 1/2: web-1 ──"]);
+    }
+
+    #[test]
     fn aborted_hosts_are_marked_and_counted_as_done() {
         let mut s = state();
         s.handle_event(&ExecutorEvent::HostsAborted {
