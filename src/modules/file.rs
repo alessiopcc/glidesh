@@ -513,13 +513,7 @@ impl FileModule {
             if diffs.is_empty() {
                 Ok(ModuleStatus::pending(plan))
             } else {
-                let diff = file_diff::truncate_lines(
-                    &diffs.join(
-                        "
-",
-                    ),
-                    file_diff::MAX_DIFF_LINES,
-                );
+                let diff = file_diff::truncate_lines(&diffs.join("\n"), file_diff::MAX_DIFF_LINES);
                 Ok(ModuleStatus::pending_with_diff(plan, diff))
             }
         }
