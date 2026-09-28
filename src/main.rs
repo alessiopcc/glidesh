@@ -119,21 +119,30 @@ fn run_failure(summary: &executor::result::RunSummary) -> Option<GlideshError> {
     Some(GlideshError::Executor { message })
 }
 
-/// `--serial` and `--max-fail`, when given, override the plan's own settings — so one plan
-/// can be tried on a single host with `--serial 1` before being rolled out as written.
+/// `--serial` and `--max-fail`, when given, override the plan's own settings — so one plan can
+/// be rolled out more cautiously, say `--serial 1 --max-fail 0`, without editing it.
+///
+/// A bad value is a command-line error, not a plan one, so it is reported without the
+/// plan-parse wording.
 fn apply_rollout_override(
     plan: &mut glidesh::config::types::Plan,
     serial: Option<&str>,
     max_fail: Option<&str>,
 ) -> Result<(), GlideshError> {
+    let as_flag_error = |e: GlideshError| match e {
+        GlideshError::ConfigParse { message } => GlideshError::Other(message),
+        other => other,
+    };
     if let Some(sizes) = serial {
         plan.serial = sizes
             .split(',')
             .map(|s| config::plan::parse_amount_text(s, "--serial", 1))
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .map_err(as_flag_error)?;
     }
     if let Some(limit) = max_fail {
-        plan.max_fail = Some(config::plan::parse_amount_text(limit, "--max-fail", 0)?);
+        plan.max_fail =
+            Some(config::plan::parse_amount_text(limit, "--max-fail", 0).map_err(as_flag_error)?);
     }
     Ok(())
 }
@@ -2070,8 +2079,17 @@ mod tests {
     #[test]
     fn a_bad_rollout_flag_is_rejected_like_the_plan_setting() {
         let mut plan = config::parse_plan("plan \"p\" { }").unwrap();
-        let err = apply_rollout_override(&mut plan, Some("0"), None).unwrap_err();
-        assert!(err.to_string().contains("--serial must be"), "{err}");
+        for sizes in ["0", "", ",", "1,,2"] {
+            let err = apply_rollout_override(&mut plan, Some(sizes), None).unwrap_err();
+            assert!(
+                err.to_string().contains("--serial must be"),
+                "{sizes:?}: {err}"
+            );
+            assert!(
+                !matches!(err, GlideshError::ConfigParse { .. }),
+                "a flag is not a plan file: {err}"
+            );
+        }
         let err = apply_rollout_override(&mut plan, None, Some("150%")).unwrap_err();
         assert!(err.to_string().contains("--max-fail must be"), "{err}");
     }
