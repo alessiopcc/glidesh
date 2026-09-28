@@ -260,3 +260,63 @@ group "app" {
         "from-host-global-hello-host-val-group-val"
     );
 }
+
+/// An included plan carries its own files and vars: its `src` and `vars-file` resolve from
+/// its directory, and its variables reach its templates.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_included_plan_uploads_from_its_own_directory_with_its_own_vars() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = container.write_key_file(dir.path());
+    let role = dir.path().join("roles").join("web");
+    std::fs::create_dir_all(&role).unwrap();
+
+    std::fs::write(dir.path().join("app.conf"), "top-level copy\n").unwrap();
+    std::fs::write(role.join("app.conf"), "port=${port} name=${name}\n").unwrap();
+    std::fs::write(role.join("defaults.kdl"), "port \"8080\"\n").unwrap();
+    std::fs::write(
+        role.join("plan.kdl"),
+        r#"
+plan "web" {
+    vars-file "defaults.kdl"
+    vars {
+        name "web"
+    }
+    step "Config" {
+        file "/root/include-app.conf" src="app.conf" template=#true
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        "plan \"main\" {\n    include \"roles/web/plan.kdl\"\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        format!(
+            "host \"target\" \"127.0.0.1\" user=\"root\" port={} {{\n    vars {{\n        ssh-key {:?}\n    }}\n}}\n",
+            container.port,
+            key.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    assert_cmd::Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("HOME", home.path())
+        .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl"])
+        .args(["--no-tui", "--no-host-key-check"])
+        .assert()
+        .success();
+
+    let uploaded = ssh.exec("cat /root/include-app.conf").await.unwrap().stdout;
+    assert_eq!(uploaded, "port=8080 name=web\n");
+}

@@ -169,3 +169,43 @@ async fn test_user_idempotent() {
         "existing user with no changes should be Satisfied"
     );
 }
+
+/// The documented `groups "a" "b"` form, parsed from a plan, adds every group and then
+/// reports the user as in place.
+#[tokio::test]
+async fn test_user_groups_as_written_in_a_plan() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    let _ = ssh.exec("groupadd plangrp1; groupadd plangrp2").await;
+
+    let plan = glidesh::config::parse_plan(
+        r#"plan "p" {
+            step "Users" {
+                user "planuser" {
+                    groups "plangrp1" "plangrp2"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    let params = ModuleParams {
+        resource_name: "planuser".to_string(),
+        args: plan.steps()[0].tasks[0].args.clone(),
+    };
+
+    UserModule.apply(&ctx, &params).await.unwrap();
+    let groups = ssh.exec("id -nG planuser").await.unwrap().stdout;
+    assert!(
+        groups.contains("plangrp1") && groups.contains("plangrp2"),
+        "got: {groups}"
+    );
+    assert!(matches!(
+        UserModule.check(&ctx, &params).await.unwrap(),
+        ModuleStatus::Satisfied
+    ));
+}

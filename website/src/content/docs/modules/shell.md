@@ -169,6 +169,8 @@ See also the [nix module](/modules/nix/) for higher-level package/shell/build op
 
 Without a `check` parameter, the shell module always reports `Pending` — it has no way to know if the command needs to run. Use `check` to make shell steps idempotent, or use the module for commands that are safe to repeat.
 
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
+
 ## Examples
 
 ### Simple command

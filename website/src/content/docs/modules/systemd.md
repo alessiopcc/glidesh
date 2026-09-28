@@ -61,8 +61,8 @@ systemd "my-script" {
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | *(positional)* | string | Unit name |
-| `state` | string | `"started"`, `"stopped"`, or `"restarted"` |
-| `enabled` | boolean | `true` or `false` — controls boot-time start |
+| `state` | string | `"started"` (default), `"stopped"`, or `"restarted"` |
+| `enabled` | boolean | `#true` or `#false` — controls boot-time start; unchanged when omitted |
 
 ### Service creation parameters
 
@@ -88,6 +88,8 @@ For existing services, the module checks `systemctl is-active` and `systemctl is
 For service creation, the module computes a SHA256 hash of the generated unit file and compares it with the remote file. The unit file is only uploaded when the content differs. After uploading, `systemctl daemon-reload` runs automatically.
 
 The `restarted` state always triggers a restart regardless of current state.
+
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
 
 ## Examples
 

@@ -1,3 +1,5 @@
+mod help;
+
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -5,7 +7,10 @@ use std::path::PathBuf;
 #[command(
     name = "glidesh",
     version,
-    about = "Fast, stateless, SSH-only infrastructure automation"
+    about = "Fast, stateless, SSH-only infrastructure automation",
+    after_help = "An overview with example files and a workflow: glidesh --help. Plan syntax \
+                  and every module: glidesh run --help.",
+    after_long_help = help::TOP_LEVEL
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -18,16 +23,16 @@ pub struct Cli {
 // so the size spread cannot be boxed away.
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
-    /// Execute a plan against target hosts
+    /// Apply a plan to the hosts of an inventory, or run one command on a host
     Run(RunArgs),
 
-    /// View logs from past runs
+    /// Browse past runs and their per-host logs
     Logs(LogsArgs),
 
-    /// Validate configuration files
+    /// Check a plan, an inventory and its secrets file without connecting to any host
     Validate(ValidateArgs),
 
-    /// Connection console: TUI when no target/command, otherwise shell or one-shot exec
+    /// Browse hosts in a TUI, open a shell on some, or run one command across them
     Console(ConsoleArgs),
 
     /// Manage encrypted secrets (create, read, edit)
@@ -41,9 +46,8 @@ pub struct SecretArgs {
 
     /// SSH private key that unlocks an age-wrapped secrets file
     /// (defaults to $GLIDESH_SECRET_IDENTITY, then ~/.ssh/id_ed25519)
-    ///
-    /// Global so it may be given before or after the subcommand: every `secret` command
-    /// that touches an age-wrapped file needs the same key, and `run` spells it the same way.
+    // Global so it may be given before or after the subcommand: every `secret` command
+    // that touches an age-wrapped file needs the same key, and `run` spells it the same way.
     #[arg(long, value_name = "PATH", global = true)]
     pub secret_identity: Option<PathBuf>,
 }
@@ -67,7 +71,7 @@ pub enum SecretCommand {
 
     /// Delete a value from a secrets file
     #[command(alias = "remove")]
-    Rm(SecretKeyArgs),
+    Rm(SecretRmArgs),
 
     /// Read plaintext on stdin and print a `secret:v1:…` token for pasting inline
     Encrypt(SecretFileArgs),
@@ -196,33 +200,45 @@ pub struct SecretKeyArgs {
     pub file: PathBuf,
 }
 
+#[derive(Parser, Debug)]
+pub struct SecretRmArgs {
+    /// Variable name of the value to delete
+    pub key: String,
+
+    /// Path to the secrets file
+    #[arg(short, long, default_value = "secrets.kdl")]
+    pub file: PathBuf,
+}
+
 #[derive(Parser, Debug, Default)]
 pub struct ConsoleArgs {
     /// Path to the inventory file (defaults to ./inventory.kdl)
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
 
-    /// Target filter: group name, host name, or group:hostname
+    /// A group, a host, or group:host; comma-separate several. One host opens a shell,
+    /// several a broadcast shell
     #[arg(short, long)]
     pub target: Option<String>,
 
-    /// Command to run (if set, skips TUI and executes on resolved targets)
+    /// Run this command on every target and print each host's output, instead of a shell
     #[arg(short, long)]
     pub command: Option<String>,
 
-    /// SSH private key path
+    /// SSH private key [default: the inventory's `ssh-key` variable, else ~/.ssh/id_ed25519]
     #[arg(short, long)]
     pub key: Option<PathBuf>,
 
-    /// Max concurrent hosts when running a command (minimum 1)
+    /// Hosts running --command at once (minimum 1)
     #[arg(long, default_value = "10", value_parser = parse_concurrency)]
     pub concurrency: usize,
 
-    /// Skip SSH host key verification
+    /// Do not verify host keys against ~/.ssh/known_hosts
     #[arg(long)]
     pub no_host_key_check: bool,
 
-    /// Accept and save new host keys to known_hosts
+    /// Trust and save the key of a host not yet in ~/.ssh/known_hosts (a changed key still
+    /// fails)
     #[arg(long)]
     pub accept_new_host_key: bool,
 
@@ -237,37 +253,43 @@ pub struct ConsoleArgs {
 }
 
 #[derive(Parser, Debug)]
+#[command(
+    after_help = "Plan syntax, variables, conditions and every module's parameters: \
+                  glidesh run --help",
+    after_long_help = help::RUN
+)]
 pub struct RunArgs {
-    /// Path to the plan file
+    /// Plan to apply. Without it, each host runs the `plan=` its inventory entry or group names
     #[arg(short, long)]
     pub plan: Option<PathBuf>,
 
-    /// Path to the inventory file
+    /// Inventory listing the hosts to run on
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
 
-    /// Target filter: group name, host name, or group:hostname
+    /// Limit the run to a group, a host, or group:host; comma-separate several
     #[arg(short, long)]
     pub target: Option<String>,
 
-    /// Single host to connect to (ad-hoc mode)
+    /// Run on this one address instead of an inventory, with --plan or --command
     #[arg(long)]
     pub host: Option<String>,
 
-    /// SSH user
+    /// SSH user for --host (inventory hosts set their own) [default: root]
     #[arg(short, long)]
     pub user: Option<String>,
 
-    /// SSH port
+    /// SSH port for --host (inventory hosts set their own)
     #[arg(short = 'P', long, default_value = "22")]
     pub port: u16,
 
-    /// SSH private key path
+    /// SSH private key [default: the inventory's `ssh-key` variable, else ~/.ssh/id_ed25519]
     #[arg(short, long)]
     pub key: Option<PathBuf>,
 
-    /// Ad-hoc command to run
-    #[arg(short, long)]
+    /// Run this one command on --host instead of a plan. For inventory hosts, use
+    /// `glidesh console -t <target> -c <command>`
+    #[arg(short, long, requires = "host", conflicts_with = "plan")]
     pub command: Option<String>,
 
     /// Execution mode, overriding the plan's `mode`: sync (hosts move through the steps
@@ -285,7 +307,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "N|N%")]
     pub max_fail: Option<String>,
 
-    /// Max concurrent hosts (minimum 1)
+    /// Hosts worked on at once (minimum 1)
     #[arg(long, default_value = "10", value_parser = parse_concurrency)]
     pub concurrency: usize,
 
@@ -295,28 +317,30 @@ pub struct RunArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Show the detail behind each pending change, where the module can describe it.
-    /// Works with or without --dry-run; may cost extra round trips.
+    /// Show the detail behind each pending change: a content diff for `file`, the drifted
+    /// parameters for `container`. Works with or without --dry-run; on a real run the detail
+    /// goes to the run log. May cost extra round trips.
     #[arg(long)]
     pub diff: bool,
 
-    /// Disable TUI and use plain text output
+    /// Plain text output instead of the TUI (automatic when output is not a terminal)
     #[arg(short = 'T', long)]
     pub no_tui: bool,
 
-    /// Skip SSH host key verification
+    /// Do not verify host keys against ~/.ssh/known_hosts
     #[arg(long)]
     pub no_host_key_check: bool,
 
-    /// Accept and save new host keys to known_hosts
+    /// Trust and save the key of a host not yet in ~/.ssh/known_hosts (a changed key still
+    /// fails)
     #[arg(long)]
     pub accept_new_host_key: bool,
 
-    /// Default escalation target user (e.g. root). Inventory/plan can override.
+    /// Run tasks as this user, e.g. root. A `run-as` in the inventory or plan overrides it
     #[arg(long)]
     pub run_as: Option<String>,
 
-    /// Default escalation method: sudo (default), doas, or su
+    /// How to become the --run-as user: sudo (default), doas, or su
     #[arg(long)]
     pub run_as_method: Option<String>,
 
@@ -331,7 +355,8 @@ pub struct RunArgs {
 /// Where the secrets file is and how to unlock it. Shared by `run` and `console`.
 #[derive(Args, Debug, Default)]
 pub struct SecretSourceArgs {
-    /// Path to the secrets file (defaults to secrets.kdl next to the inventory)
+    /// Secrets file [default: $GLIDESH_SECRETS, else secrets.kdl next to the inventory, else in
+    /// the current directory]
     #[arg(long)]
     pub secrets: Option<PathBuf>,
 
@@ -349,27 +374,38 @@ pub struct SecretSourceArgs {
 }
 
 #[derive(Parser, Debug)]
+#[command(
+    after_help = "Without --last or --run, opens a browser on a terminal and lists recent runs \
+                  otherwise. Runs are kept in ~/.glidesh/runs/."
+)]
 pub struct LogsArgs {
-    /// Show the last run
+    /// Print the most recent run
     #[arg(long)]
     pub last: bool,
 
-    /// Filter by node name
-    #[arg(long)]
+    /// Print only this host's log
+    #[arg(long, value_name = "HOST")]
     pub node: Option<String>,
 
-    /// Specific run directory
-    #[arg(long)]
+    /// Print the run whose directory name contains this text, such as a timestamp or plan name
+    #[arg(long, value_name = "TEXT")]
     pub run: Option<String>,
 }
 
 #[derive(Parser, Debug)]
+#[command(
+    after_help = "Reports every problem found, not only the first, and exits non-zero if any. \
+                  To check a plan against real hosts without changing them, use \
+                  `glidesh run --dry-run`.\n\n\
+                  Docs: https://glidesh.netlify.app/cli/#glidesh-validate"
+)]
 pub struct ValidateArgs {
-    /// Path to the plan file
+    /// Plan to check: syntax, includes, modules, `file` sources and unexpanded `${var}`s
     #[arg(short, long)]
     pub plan: Option<PathBuf>,
 
-    /// Path to the inventory file
+    /// Inventory to check, with the secrets file beside it. With --plan, its variables
+    /// count as defined
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
 }
@@ -380,4 +416,99 @@ fn parse_concurrency(s: &str) -> Result<usize, String> {
         return Err("concurrency must be at least 1".to_string());
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn long_help(path: &[&str]) -> String {
+        let mut cmd = Cli::command();
+        let mut sub = &mut cmd;
+        for name in path {
+            sub = sub.find_subcommand_mut(name).unwrap();
+        }
+        sub.render_long_help().to_string()
+    }
+
+    #[test]
+    fn the_cli_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    /// A user reading `--help` asked for drift detection, `creates`/`unless` and retries,
+    /// all of which already existed. Keep them named where that user looked.
+    #[test]
+    fn run_help_names_the_features_users_could_not_find() {
+        let help = long_help(&["run"]);
+        for needle in [
+            "sh.glide.param-hash",
+            "check=",
+            "retries",
+            "timeout",
+            "success_codes",
+            "changed-when",
+            "--diff",
+            "serial",
+            "PLAN SYNTAX",
+            "CONDITIONS",
+            "${@os.family}",
+        ] {
+            assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
+        }
+    }
+
+    /// `--help` must stand alone: agents read it and never open the docs site.
+    #[test]
+    fn top_level_help_explains_the_files_and_the_workflow() {
+        let help = Cli::command().render_long_help().to_string();
+        for needle in [
+            "inventory.kdl:",
+            "plan.kdl:",
+            "--dry-run --diff",
+            "--accept-new-host-key",
+            "GLIDESH_SECRET_PASS",
+            "exits non-zero",
+            "glidesh run --help",
+        ] {
+            assert!(
+                help.contains(needle),
+                "glidesh --help lacks {needle}:\n{help}"
+            );
+        }
+    }
+
+    /// Every built-in module is named in `run --help`, so none can be added without it.
+    #[test]
+    fn run_help_names_every_module() {
+        let help = long_help(&["run"]);
+        let registry = glidesh::modules::ModuleRegistry::new();
+        for module in registry.builtin_names().chain(["host"]) {
+            assert!(
+                help.contains(&format!("  {module} \"")),
+                "run --help lacks {module}"
+            );
+        }
+    }
+
+    /// Doc comments become help text, so an implementation note must not be one.
+    #[test]
+    fn secret_help_carries_no_implementation_notes() {
+        assert!(!long_help(&["secret"]).contains("Global so"));
+    }
+
+    #[test]
+    fn secret_rm_does_not_offer_to_decrypt() {
+        assert!(!long_help(&["secret", "rm"]).contains("decrypt"));
+    }
+
+    /// `-c` used to be silently ignored without `--host`, and silently won over `--plan`.
+    #[test]
+    fn an_adhoc_command_needs_a_host_and_no_plan() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["glidesh", "run"], args].concat());
+        assert!(parse(&["-i", "inv.kdl", "-c", "uptime"]).is_err());
+        assert!(parse(&["--host", "h", "-p", "plan.kdl", "-c", "uptime"]).is_err());
+        assert!(parse(&["--host", "h", "-c", "uptime"]).is_ok());
+    }
 }

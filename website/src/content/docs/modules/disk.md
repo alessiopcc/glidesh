@@ -53,6 +53,8 @@ The module checks:
 
 Only formats when the filesystem type doesn't match. fstab entries use UUID for reliability across device name changes.
 
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
+
 ## Example
 
 See the [disk-management example](/examples/#disk-management) for a complete disk setup with register and loop.

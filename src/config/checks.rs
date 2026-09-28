@@ -48,7 +48,9 @@ pub fn literal_reference_warnings(
     for step in plan.steps() {
         for task in &step.tasks {
             let templated = matches!(task.args.get("template"), Some(ParamValue::Bool(true)));
-            let Some((src, resolved)) = local_source(task, plan_dir).filter(|_| !templated) else {
+            let Some((src, resolved)) =
+                local_source(task, step.base_dir(plan_dir)).filter(|_| !templated)
+            else {
                 continue;
             };
             let mut files = Vec::new();
@@ -90,8 +92,8 @@ pub fn literal_reference_warnings(
 /// `file` sources that are not given, or given but not found locally, one message each.
 ///
 /// Every `file` mode needs a string `src`, so a task without one would fail at run time.
-/// Local sources are resolved against `plan_dir` — the top-level plan's directory — exactly
-/// as the `file` module resolves them, included steps too.
+/// Local sources are resolved exactly as the `file` module resolves them: from the directory
+/// of the plan the step was written in, which is `plan_dir` for the top-level plan.
 pub fn missing_file_sources(plan: &Plan, plan_dir: &Path) -> Vec<String> {
     let mut missing = Vec::new();
     for step in plan.steps() {
@@ -104,18 +106,32 @@ pub fn missing_file_sources(plan: &Plan, plan_dir: &Path) -> Vec<String> {
                 ));
                 continue;
             }
-            let Some((src, resolved)) = local_source(task, plan_dir) else {
+            let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) else {
                 continue;
             };
-            if !resolved.exists() {
-                missing.push(format!(
-                    "step '{}': file '{}': src '{}' not found (looked for {})",
-                    step.name,
-                    task.resource,
-                    src,
-                    resolved.display()
-                ));
+            if resolved.exists() {
+                continue;
             }
+            let mut message = format!(
+                "step '{}': file '{}': src '{}' not found (looked for {})",
+                step.name,
+                task.resource,
+                src,
+                resolved.display()
+            );
+            // Included plans used to resolve from the top-level plan's directory, so a plan
+            // written against that finds its file there.
+            if step.source_dir.is_some() {
+                let old = plan_dir.join(&src);
+                if old.exists() {
+                    message.push_str(&format!(
+                        "; {} exists, but an included plan's sources resolve from its own \
+                         directory",
+                        old.display()
+                    ));
+                }
+            }
+            missing.push(message);
         }
     }
     missing
@@ -245,5 +261,56 @@ mod tests {
             }"#,
         );
         assert!(missing_file_sources(&p, dir.path()).is_empty());
+    }
+
+    /// `main.kdl` includes `roles/web/plan.kdl`, whose step uploads `src="app.conf"`.
+    fn included_upload(dir: &Path) -> Plan {
+        std::fs::create_dir_all(dir.join("roles/web")).unwrap();
+        std::fs::write(
+            dir.join("roles/web/plan.kdl"),
+            r#"plan "web" { step "Web" { file "/etc/app.conf" src="app.conf" } }"#,
+        )
+        .unwrap();
+        let mut p = parse_plan(r#"plan "main" { include "roles/web/plan.kdl" }"#).unwrap();
+        crate::config::resolve_includes(&mut p, dir).unwrap();
+        p
+    }
+
+    #[test]
+    fn an_included_plan_finds_its_sources_in_its_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = included_upload(dir.path());
+        std::fs::write(dir.path().join("roles/web/app.conf"), "x").unwrap();
+        assert!(missing_file_sources(&p, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_source_only_beside_the_top_level_plan_names_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = included_upload(dir.path());
+        std::fs::write(dir.path().join("app.conf"), "x").unwrap();
+        let missing = missing_file_sources(&p, dir.path());
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(
+            missing[0].contains("roles") && missing[0].contains("resolve from its own directory"),
+            "{}",
+            missing[0]
+        );
+    }
+
+    #[test]
+    fn a_top_level_missing_source_has_no_include_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = plan(r#"step "Deploy" { file "/etc/app.conf" src="app.conf" }"#);
+        let missing = missing_file_sources(&p, dir.path());
+        assert!(!missing[0].contains("own directory"), "{}", missing[0]);
+    }
+
+    #[test]
+    fn an_included_plan_warns_about_its_own_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = included_upload(dir.path());
+        std::fs::write(dir.path().join("roles/web/app.conf"), "port=${port}").unwrap();
+        assert_eq!(warnings_for(&p, dir.path(), &["port"]).len(), 1);
     }
 }

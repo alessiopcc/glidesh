@@ -8,6 +8,9 @@ on:
       - 'tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'examples/**'
+      - 'website/src/content/docs/**'
+      - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +18,9 @@ on:
       - 'tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'examples/**'
+      - 'website/src/content/docs/**'
+      - '.github/workflows/ci.yml'
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,6 +47,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+
+  examples:
+    name: Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - name: Validate every example
+        run: |
+          status=0
+          for dir in examples/*/; do
+            [ -f "$dir/plan.kdl" ] || continue
+            echo "::group::$dir"
+            out=$(./target/debug/glidesh validate -p "$dir/plan.kdl" -i "$dir/inventory.kdl" 2>&1) || status=1
+            echo "$out"
+            # A warning in an example is a mistake a user would copy.
+            if echo "$out" | grep -q "warning:"; then status=1; fi
+            echo "::endgroup::"
+          done
+          exit $status
 
   integration-tests:
     name: Integration Tests

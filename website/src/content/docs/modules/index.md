@@ -22,7 +22,7 @@ There is one exception. A step with [`subscribe`](/advanced/subscribe/) whose ta
 
 ## Idempotency
 
-Because modules check before acting, plans are safe to run repeatedly. If a package is already installed, the package module reports `Satisfied` and skips it. If a service is already running, systemd reports `Satisfied`. Only the delta is applied.
+Because modules check before acting, plans are safe to run repeatedly. If a package is already installed, the package module reports `Satisfied` and skips it. If a service is already running, systemd reports `Satisfied`. Only the delta is applied. [Idempotency & Drift](/concepts/idempotency/) lists what each module compares, and how to preview a run with `--dry-run` and `--diff`.
 
 ## Available Modules
 

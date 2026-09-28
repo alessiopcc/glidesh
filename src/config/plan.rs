@@ -227,7 +227,8 @@ pub fn parse_amount_text(text: &str, setting: &str, min: usize) -> Result<Amount
 }
 
 /// Recursively resolve all `include` items in a plan by loading referenced plan files
-/// and inlining their steps. The included plan's vars are merged (parent wins on conflict).
+/// and inlining their steps. Each included plan's vars, inline and from its own
+/// `vars-file`s, are merged into the plan's (the including plan wins on conflict).
 /// Also resolves `vars-file` directives by loading external KDL var files.
 /// Detects circular includes.
 pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshError> {
@@ -246,8 +247,9 @@ pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshE
     // Included plans contribute their plan-level run-as to their own steps below.
     let resolved = resolve_items(
         &plan.items,
-        &plan.vars,
-        &plan.structured_vars,
+        &mut plan.vars,
+        &mut plan.structured_vars,
+        None,
         base_dir,
         &mut seen,
         &RunAsSpec::default(),
@@ -355,10 +357,14 @@ fn resolve_vars_files(
     Ok(())
 }
 
+/// `vars` and `structured` accumulate every plan's variables, the including plan's
+/// inserted before its includes' so it wins. `source_dir` is `None` for the top-level plan,
+/// whose steps resolve relative paths from the run's plan directory.
 fn resolve_items(
     items: &[PlanItem],
-    parent_vars: &HashMap<String, String>,
-    parent_structured: &HashMap<String, Vec<HashMap<String, String>>>,
+    vars: &mut HashMap<String, String>,
+    structured: &mut HashMap<String, Vec<HashMap<String, String>>>,
+    source_dir: Option<&Path>,
     base_dir: &Path,
     seen: &mut HashSet<String>,
     inherited_run_as: &RunAsSpec,
@@ -373,6 +379,7 @@ fn resolve_items(
                 // at the plan level of an included file would be lost.
                 let mut s = s.clone();
                 s.run_as = s.run_as.clone().merge_over(inherited_run_as);
+                s.source_dir = source_dir.map(Path::to_path_buf);
                 result.push(PlanItem::Step(s));
             }
             PlanItem::Include(path) => {
@@ -397,25 +404,32 @@ fn resolve_items(
                         ),
                     });
                 }
-                // Merge vars: included plan vars, then parent vars override
-                let mut merged_vars = included.vars.clone();
-                merged_vars.extend(parent_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
-
-                let mut merged_structured = included.structured_vars.clone();
-                merged_structured.extend(
-                    parent_structured
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone())),
-                );
+                let child_base = resolved_path.parent().unwrap_or(base_dir);
+                let mut own_vars = included.vars;
+                let mut own_structured = included.structured_vars;
+                resolve_vars_files(
+                    &included.vars_files,
+                    &mut own_vars,
+                    &mut own_structured,
+                    child_base,
+                )?;
+                for (k, v) in own_vars {
+                    vars.entry(k).or_insert(v);
+                }
+                for (k, v) in own_structured {
+                    structured.entry(k).or_insert(v);
+                }
 
                 // The included plan's plan-level run-as governs its own steps,
                 // layered under anything inherited from the including plan(s).
                 let child_run_as = included.run_as.clone().merge_over(inherited_run_as);
-                let child_base = resolved_path.parent().unwrap_or(base_dir);
+                let child_dir =
+                    std::fs::canonicalize(child_base).unwrap_or_else(|_| child_base.to_path_buf());
                 let child_items = resolve_items(
                     &included.items,
-                    &merged_vars,
-                    &merged_structured,
+                    vars,
+                    structured,
+                    Some(&child_dir),
                     child_base,
                     seen,
                     &child_run_as,
@@ -501,6 +515,7 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         subscribe,
         run_as,
         when,
+        source_dir: None,
     })
 }
 
@@ -639,12 +654,22 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
                 }
                 args.insert(key, ParamValue::Map(map));
             } else {
-                let value = child
+                let positional: Vec<_> = child
                     .entries()
                     .iter()
-                    .find(|e| e.name().is_none())
-                    .map(|e| kdl_value_to_param(e.value()))
-                    .unwrap_or(ParamValue::String(String::new()));
+                    .filter(|e| e.name().is_none())
+                    .collect();
+                // Several values are a list (`groups "docker" "sudo"`): keeping only the
+                // first would silently drop the rest.
+                let value = match positional.as_slice() {
+                    [] => ParamValue::String(String::new()),
+                    [one] => kdl_value_to_param(one.value()),
+                    many => ParamValue::List(
+                        many.iter()
+                            .map(|e| super::kdl_value_to_string(e.value()))
+                            .collect(),
+                    ),
+                };
                 args.insert(key, value);
             }
         }
@@ -1191,13 +1216,113 @@ plan "parent" {
         assert_eq!(plan.vars.get("shared").unwrap(), "parent-version");
 
         resolve_includes(&mut plan, &dir).unwrap();
-        // After resolution, plan.vars is still the parent's vars
         assert_eq!(plan.vars.get("shared").unwrap(), "parent-version");
-        // The child's unique var isn't merged into parent.vars
-        // (vars merge happens at runtime in node_runner, not in resolve_includes)
-        assert!(!plan.vars.contains_key("from-child"));
+        assert_eq!(plan.vars.get("from-child").unwrap(), "child-value");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writes `files` (relative path, content) under a fresh directory and resolves
+    /// `main.kdl` there.
+    fn resolve_tree(files: &[(&str, &str)]) -> (tempfile::TempDir, Plan) {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, content) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+        let main = std::fs::read_to_string(dir.path().join("main.kdl")).unwrap();
+        let mut plan = parse_plan(&main).unwrap();
+        resolve_includes(&mut plan, dir.path()).unwrap();
+        (dir, plan)
+    }
+
+    #[test]
+    fn included_vars_files_load_from_their_own_directory_and_the_includer_wins() {
+        let (_dir, plan) = resolve_tree(&[
+            (
+                "main.kdl",
+                r#"plan "main" {
+                    vars { shared "main" }
+                    include "roles/web/plan.kdl"
+                }"#,
+            ),
+            (
+                "roles/web/plan.kdl",
+                r#"plan "web" {
+                    vars-file "defaults.kdl"
+                    vars { inline "web" }
+                    include "nested/plan.kdl"
+                    step "Web" { shell "true" }
+                }"#,
+            ),
+            (
+                "roles/web/defaults.kdl",
+                "shared \"web-file\"\nfrom-file \"web-file\"\ninline \"web-file\"\n",
+            ),
+            (
+                "roles/web/nested/plan.kdl",
+                r#"plan "nested" {
+                    vars { from-file "nested"; only-nested "nested"; }
+                    step "Nested" { shell "true" }
+                }"#,
+            ),
+        ]);
+        assert_eq!(plan.vars["shared"], "main");
+        assert_eq!(plan.vars["inline"], "web");
+        assert_eq!(plan.vars["from-file"], "web-file");
+        assert_eq!(plan.vars["only-nested"], "nested");
+    }
+
+    #[test]
+    fn a_child_node_with_several_values_is_a_list() {
+        let plan = parse_plan(
+            r#"plan "p" {
+                step "Users" {
+                    user "deploy" {
+                        groups "docker" "sudo"
+                        shell "/bin/bash"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let args = &plan.steps()[0].tasks[0].args;
+        assert_eq!(
+            args["groups"].as_list(),
+            Some(&["docker".to_string(), "sudo".to_string()][..])
+        );
+        assert_eq!(args["shell"].as_str(), Some("/bin/bash"));
+    }
+
+    #[test]
+    fn included_steps_remember_the_directory_of_their_own_plan() {
+        let (dir, plan) = resolve_tree(&[
+            (
+                "main.kdl",
+                r#"plan "main" {
+                    step "Top" { shell "true" }
+                    include "roles/web/plan.kdl"
+                }"#,
+            ),
+            (
+                "roles/web/plan.kdl",
+                r#"plan "web" {
+                    step "Web" { shell "true" }
+                    include "../db/plan.kdl"
+                }"#,
+            ),
+            (
+                "roles/db/plan.kdl",
+                r#"plan "db" { step "Db" { shell "true" } }"#,
+            ),
+        ]);
+        let canon = |p: &str| std::fs::canonicalize(dir.path().join(p)).unwrap();
+        let steps = plan.steps();
+        assert_eq!(steps[0].source_dir, None);
+        assert_eq!(steps[0].base_dir(dir.path()), dir.path());
+        assert_eq!(steps[1].source_dir, Some(canon("roles/web")));
+        assert_eq!(steps[2].source_dir, Some(canon("roles/db")));
     }
 
     #[test]

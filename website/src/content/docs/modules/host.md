@@ -58,6 +58,8 @@ step "Write the same token everywhere" {
   command therefore reflects a single, arbitrary host — use `shell` when the
   command should differ per host.
 
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
+
 ## Controller vs. target
 
 ```kdl

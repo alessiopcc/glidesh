@@ -1,9 +1,28 @@
+use crate::config::types::ParamValue;
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 
 pub struct UserModule;
+
+/// `groups` as a list (`groups "docker" "sudo"`, or a `-` block), a single name, or a
+/// comma-separated attribute (`groups="docker,sudo"`).
+fn desired_groups(params: &ModuleParams) -> Option<Vec<String>> {
+    match params.args.get("groups")? {
+        ParamValue::List(groups) => Some(groups.clone()),
+        ParamValue::String(groups) => Some(
+            groups
+                .split(',')
+                .map(str::trim)
+                .filter(|g| !g.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ),
+        _ => None,
+    }
+    .filter(|groups| !groups.is_empty())
+}
 
 #[async_trait]
 impl Module for UserModule {
@@ -99,7 +118,7 @@ impl UserModule {
             }
         }
 
-        if let Some(desired_groups) = params.args.get("groups").and_then(|v| v.as_list()) {
+        if let Some(desired_groups) = desired_groups(params) {
             let output = ctx.exec(&format!("id -nG {}", username)).await?;
             let current_groups: Vec<&str> = output.stdout.split_whitespace().collect();
             for g in desired_groups {
@@ -149,7 +168,7 @@ impl UserModule {
             cmd_parts.push(format!("-s {}", shell));
         }
 
-        if let Some(groups) = params.args.get("groups").and_then(|v| v.as_list()) {
+        if let Some(groups) = desired_groups(params) {
             cmd_parts.push(format!("-G {}", groups.join(",")));
         }
 
@@ -211,5 +230,33 @@ impl UserModule {
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn groups_of(value: ParamValue) -> Option<Vec<String>> {
+        desired_groups(&ModuleParams {
+            resource_name: "deploy".to_string(),
+            args: HashMap::from([("groups".to_string(), value)]),
+        })
+    }
+
+    #[test]
+    fn groups_are_read_from_a_list_a_name_or_a_comma_list() {
+        let both = Some(vec!["docker".to_string(), "sudo".to_string()]);
+        assert_eq!(
+            groups_of(ParamValue::List(vec!["docker".into(), "sudo".into()])),
+            both
+        );
+        assert_eq!(groups_of(ParamValue::String("docker, sudo".into())), both);
+        assert_eq!(
+            groups_of(ParamValue::String("docker".into())),
+            Some(vec!["docker".to_string()])
+        );
+        assert_eq!(groups_of(ParamValue::String(String::new())), None);
     }
 }

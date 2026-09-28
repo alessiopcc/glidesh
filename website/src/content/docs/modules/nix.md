@@ -123,7 +123,7 @@ nix "old-channel" {
 | *(positional)* | string | Channel name |
 | `url` | string | Channel URL (required for `state="present"`) |
 | `state` | string | `"present"` (default) or `"absent"` |
-| `update` | boolean | Run `nix-channel --update` after (default: `true`) |
+| `update` | boolean | Run `nix-channel --update` after (default: `#true` when adding a channel, `#false` when removing one) |
 | `install` | boolean | Auto-install Nix runtime if missing |
 
 ### flake-update
@@ -237,6 +237,8 @@ Per-user Nix profiles (under `$HOME/.nix-profile`) are only visible to that user
 - **channel:** Checks if the channel already exists.
 - **flake-update:** Always runs.
 - **gc:** Always runs.
+
+Every module's rules side by side: [Idempotency & Drift](/concepts/idempotency/).
 
 ## Example
 
