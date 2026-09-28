@@ -165,16 +165,30 @@ impl WaitReports {
 /// Lines of the gate command's last output kept in a timeout error.
 const GATE_OUTPUT_LINES: usize = 20;
 
-/// The failure of a gate that never opened, with the last attempt's output — it is nearly
-/// always where the real answer is. `None` when that attempt was still running at the
-/// deadline, so it has no exit code and its output never arrived.
-fn gate_timeout_error(gate: &UntilGate, last: Option<&CommandOutput>) -> String {
+/// The failure of a gate that never opened, with the output of the last attempt that
+/// finished — it is nearly always where the real answer is. `still_running` when the final
+/// attempt was cut off at the deadline, so it has no exit code and its output never arrived;
+/// `last` is then the attempt before it, if any.
+fn gate_timeout_error(
+    gate: &UntilGate,
+    last: Option<&CommandOutput>,
+    still_running: bool,
+) -> String {
+    let mut message = format!(
+        "until= did not succeed within {}s: `{}`",
+        gate.timeout, gate.command
+    );
+    if still_running {
+        message.push_str(" was still running at the deadline");
+    }
     let Some(last) = last else {
-        return format!(
-            "until= did not succeed within {}s: `{}` was still running at the deadline",
-            gate.timeout, gate.command
-        );
+        return message;
     };
+    message.push_str(&if still_running {
+        format!("; the attempt before exited {}", last.exit_code)
+    } else {
+        format!(" last exited {}", last.exit_code)
+    });
     let output: Vec<&str> = last
         .stdout
         .lines()
@@ -182,10 +196,6 @@ fn gate_timeout_error(gate: &UntilGate, last: Option<&CommandOutput>) -> String 
         .filter(|l| !l.trim().is_empty())
         .collect();
     let tail = &output[output.len().saturating_sub(GATE_OUTPUT_LINES)..];
-    let mut message = format!(
-        "until= did not succeed within {}s: `{}` last exited {}",
-        gate.timeout, gate.command, last.exit_code
-    );
     if !tail.is_empty() {
         message.push_str(&format!("; last output:\n{}", tail.join("\n")));
     }
@@ -673,6 +683,7 @@ impl NodeRunner {
             started,
             last: None,
         };
+        let mut finished: Option<CommandOutput> = None;
         loop {
             // Each attempt is bounded by what is left of the timeout: a command that never
             // exits would otherwise hold the step forever, and one that exits 0 after the
@@ -691,7 +702,7 @@ impl NodeRunner {
                     self.report_preview(step, gate);
                     return Ok(());
                 }
-                Err(_) => return Err(gate_timeout_error(gate, None)),
+                Err(_) => return Err(gate_timeout_error(gate, finished.as_ref(), true)),
             };
             if out.exit_code == 0 {
                 return Ok(());
@@ -701,8 +712,9 @@ impl NodeRunner {
                 return Ok(());
             }
             if left(Instant::now()) < Duration::from_secs(gate.interval) {
-                return Err(gate_timeout_error(gate, Some(&out)));
+                return Err(gate_timeout_error(gate, Some(&out), false));
             }
+            finished = Some(out);
             if reports.last.is_none() {
                 self.report_waiting(step, gate, &mut reports);
             }
@@ -1133,7 +1145,7 @@ mod tests {
             stdout: "partial\n".into(),
             stderr: "connection refused\n".into(),
         };
-        let err = gate_timeout_error(&until_gate(), Some(&out));
+        let err = gate_timeout_error(&until_gate(), Some(&out), false);
         assert!(
             err.starts_with("until= did not succeed within 60s: `curl -sf ${url}` last exited 7"),
             "{err}"
@@ -1152,7 +1164,7 @@ mod tests {
             stdout,
             stderr: String::new(),
         };
-        let err = gate_timeout_error(&until_gate(), Some(&out));
+        let err = gate_timeout_error(&until_gate(), Some(&out), false);
         assert!(
             err.contains("line 31\n") && !err.contains("line 30\n"),
             "{err}"
@@ -1178,8 +1190,25 @@ mod tests {
     #[test]
     fn a_gate_still_running_at_the_deadline_says_so() {
         assert_eq!(
-            gate_timeout_error(&until_gate(), None),
+            gate_timeout_error(&until_gate(), None, true),
             "until= did not succeed within 60s: `curl -sf ${url}` was still running at the deadline"
+        );
+    }
+
+    /// A final attempt cut off at the deadline has nothing to show, but the one before it
+    /// finished, and its exit and output are still the best clue.
+    #[test]
+    fn a_hung_last_attempt_keeps_the_previous_attempts_output() {
+        let out = CommandOutput {
+            exit_code: 7,
+            stdout: String::new(),
+            stderr: "connection refused\n".into(),
+        };
+        let err = gate_timeout_error(&until_gate(), Some(&out), true);
+        assert_eq!(
+            err,
+            "until= did not succeed within 60s: `curl -sf ${url}` was still running at the \
+             deadline; the attempt before exited 7; last output:\nconnection refused"
         );
     }
 
@@ -1190,7 +1219,7 @@ mod tests {
             stdout: String::new(),
             stderr: " \n".into(),
         };
-        assert!(!gate_timeout_error(&until_gate(), Some(&out)).contains("last output"));
+        assert!(!gate_timeout_error(&until_gate(), Some(&out), false).contains("last output"));
     }
 
     fn collection(rows: Vec<Vec<(&str, &str)>>) -> Vec<HashMap<String, String>> {
