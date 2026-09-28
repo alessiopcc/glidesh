@@ -72,8 +72,8 @@ plan "stack" {
 
 ## Rules
 
-- **Step names must be unique** within a plan (including steps from [included plans](/advanced/plan-includes/)). Duplicate names are rejected at parse time.
-- Referenced steps must appear **before** the subscribing step in the plan. Forward references are rejected at parse time.
+- **Step names must be unique** within a plan (including steps from [included plans](/advanced/plan-includes/)). Duplicate names are rejected when the plan is loaded, by `glidesh validate` as well as `run`.
+- Referenced steps must appear **before** the subscribing step in the plan. Forward references and names that match no step are rejected the same way.
 - Step names must match exactly (case-sensitive).
 - A force-applied step always propagates as changed to its own subscribers, enabling reliable chaining.
 - Under `--dry-run` a force-applied step is reported as `would change` even when its own module reports `Satisfied`, and it counts toward the summary — the real run would have run it, so a preview that omitted it would report fewer changes than the run it previews.

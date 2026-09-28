@@ -1,3 +1,4 @@
+use crate::executor::barrier::Seat;
 use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
 use crate::executor::result::{ExecutorEvent, NodeResult};
@@ -15,6 +16,7 @@ use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// One iteration of a step `loop`. A flat item binds `${@item}`; a structured
 /// item (a row from a `vars` collection) binds `${@item.<field>}` for each field.
@@ -54,7 +56,7 @@ fn resolve_loop_items(
 
 /// Built-in per-host variables, exposed under the reserved `@host.*` namespace. Only these
 /// `@`-prefixed names are injected — the legacy bare `host.*` forms were removed.
-fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
+pub(crate) fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
     [
         ("@host.name".to_string(), host.name.clone()),
         ("@host.address".to_string(), host.address.clone()),
@@ -121,6 +123,20 @@ pub struct NodeRunner {
     pub coordinator: Arc<HostCoordinator>,
     pub all_targets: Arc<Vec<ResolvedHost>>,
     pub secrets: Arc<Secrets>,
+    /// Set in `mode "sync"`; `None` runs the plan free, as `async` does.
+    pub sync: Option<SyncSlot>,
+}
+
+/// A host's part in a sync run.
+///
+/// `--concurrency` bounds how many hosts connect or run a step at once, not how many are in
+/// the run: a host holds a permit only while connecting and while running a step, and none
+/// while it waits at the barrier. Holding one for the whole run, as async does, would
+/// deadlock as soon as there are more hosts than permits — the hosts at the barrier would
+/// wait for hosts that can never start.
+pub struct SyncSlot {
+    pub seat: Seat,
+    pub permits: Arc<Semaphore>,
 }
 
 /// Whether a task counts toward the run's changed total.
@@ -144,6 +160,14 @@ fn resolve_changed(
         applied_changed
     };
     would_act || force_apply
+}
+
+/// `changed-when=#false` declares a task never changes anything. It is read here as well as
+/// in the module because a preview's count comes from `check`, which knows only that the
+/// task is pending — so without this the preview would say "would change" for a task the
+/// real run reports as `ok`. It also keeps such a task from triggering subscribers.
+fn never_changes(task: &TaskDef) -> bool {
+    matches!(task.args.get("changed-when"), Some(ParamValue::Bool(false)))
 }
 
 /// What a task reports, given what `check` found and what the run asked to see.
@@ -318,7 +342,17 @@ impl NodeRunner {
         }
     }
 
+    /// In a sync run, a permit for one phase of work; in async the engine already holds one
+    /// for the whole run.
+    async fn sync_permit(&self) -> Option<OwnedSemaphorePermit> {
+        match &self.sync {
+            Some(sync) => sync.permits.clone().acquire_owned().await.ok(),
+            None => None,
+        }
+    }
+
     async fn run_inner(&self) -> Result<NodeResult, GlideshError> {
+        let connect_permit = self.sync_permit().await;
         let _ = self.event_tx.send(ExecutorEvent::NodeConnecting {
             host: self.host.name.clone(),
         });
@@ -401,8 +435,16 @@ impl NodeRunner {
         let total_steps = steps.len();
         let mut progress = Progress::default();
         let mut step_changed: HashMap<String, bool> = HashMap::new();
+        drop(connect_permit);
 
         for (step_idx, step) in steps.iter().enumerate() {
+            // At the top of the loop so a skipped step, which `continue`s, still arrives.
+            // Waiting holds no permit — see `SyncSlot`.
+            if let Some(sync) = &self.sync {
+                sync.seat.arrive().await;
+            }
+            let _step_permit = self.sync_permit().await;
+
             let _ = self.event_tx.send(ExecutorEvent::StepStarted {
                 host: self.host.name.clone(),
                 step: step.name.clone(),
@@ -723,7 +765,7 @@ impl NodeRunner {
                             pending_plan.is_some(),
                             result.changed,
                             force_apply,
-                        );
+                        ) && !never_changes(task);
                         if changed {
                             progress.changed += 1;
                             any_changed = true;
@@ -936,6 +978,31 @@ mod tests {
         assert!(resolve_changed(false, true, true, false));
         assert!(!resolve_changed(false, true, false, false));
         assert!(resolve_changed(false, false, false, true));
+    }
+
+    fn shell_task(changed_when: Option<ParamValue>) -> TaskDef {
+        TaskDef {
+            module: "shell".into(),
+            resource: "lsblk".into(),
+            args: changed_when
+                .into_iter()
+                .map(|v| ("changed-when".to_string(), v))
+                .collect(),
+            register: None,
+            run_as: Default::default(),
+            when: None,
+        }
+    }
+
+    /// Only `#false` is decided here; the command form is the module's to answer.
+    #[test]
+    fn only_changed_when_false_is_read_by_the_executor() {
+        assert!(never_changes(&shell_task(Some(ParamValue::Bool(false)))));
+        assert!(!never_changes(&shell_task(Some(ParamValue::Bool(true)))));
+        assert!(!never_changes(&shell_task(Some(ParamValue::String(
+            "true".into()
+        )))));
+        assert!(!never_changes(&shell_task(None)));
     }
 
     #[test]

@@ -1,0 +1,71 @@
+//! Every plan shown in the documentation must parse.
+//!
+//! Examples are the first plans a new user copies. Five of them once used a `target` node
+//! the parser has never accepted — the Getting Started plan among them — and nothing
+//! caught it, because nothing ran them.
+
+use std::path::{Path, PathBuf};
+
+fn doc_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            doc_files(&path, out);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("md" | "mdx")
+        ) {
+            out.push(path);
+        }
+    }
+}
+
+/// The ```kdl blocks of a page that are whole plans. Inventories, `vars` files and
+/// fragments are other blocks; only a block whose first node is `plan` is a plan.
+fn plan_blocks(page: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut rest = page;
+    while let Some(start) = rest.find("```kdl") {
+        let body = &rest[start + "```kdl".len()..];
+        let Some(end) = body.find("```") else { break };
+        let block = &body[..end];
+        let first = block
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("//"));
+        if first.is_some_and(|l| l.starts_with("plan \"")) {
+            blocks.push(block.to_string());
+        }
+        rest = &body[end + 3..];
+    }
+    blocks
+}
+
+#[test]
+fn every_plan_in_the_docs_parses() {
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("website/src/content/docs");
+    let mut files = Vec::new();
+    doc_files(&docs, &mut files);
+
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for file in &files {
+        let page = std::fs::read_to_string(file).unwrap();
+        for block in plan_blocks(&page) {
+            checked += 1;
+            if let Err(e) = glidesh::config::parse_plan(&block) {
+                let rel = file.strip_prefix(&docs).unwrap_or(file);
+                failures.push(format!("{}: {e}", rel.display()));
+            }
+        }
+    }
+
+    // Guards the extraction itself: a change that found no plans would pass vacuously.
+    assert!(checked >= 20, "only {checked} plan examples found");
+    assert!(
+        failures.is_empty(),
+        "{} of {checked} documented plans do not parse:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

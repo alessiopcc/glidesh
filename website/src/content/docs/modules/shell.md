@@ -28,6 +28,7 @@ shell "curl -sf http://localhost:8080/health" {
 | `timeout` | integer | Abort the command after this many seconds and treat the attempt as failed (feeds `retries`). Default: no limit |
 | `success_codes` | string / integer / list | Exit codes treated as success (e.g. `"0,2"`). Default: only `0` |
 | `login` | boolean | Run the command (and `check` gate) inside a POSIX login shell so `/etc/profile` and `~/.profile` are sourced |
+| `changed-when` | boolean / string | Whether a successful run counts as a change: `#false` never, `#true` always (the default), or a command run afterwards whose exit 0 means it did — see [Reporting changes](#reporting-changes-with-changed-when) |
 
 ## Exit codes (`success_codes`)
 
@@ -74,6 +75,32 @@ step "Install package" {
 ```
 
 `check` asks the host whether the work is already done. To decide whether a task applies to a host at all — by OS, inventory variable, or feature flag, without running anything — use [`when=`](/advanced/conditionals/); see [`when` or `check`?](/advanced/conditionals/#when-or-check).
+
+## Reporting changes with `changed-when`
+
+A shell command that runs counts as a change — glidesh cannot tell what it did. `changed-when` says otherwise.
+
+**Read-only commands** that only gather information should never count. Otherwise a plan that runs `lsblk` or a status query reports a change on every run, and a step that [subscribes](/advanced/subscribe/) to it fires every time:
+
+```kdl
+step "List disks" {
+    shell "lsblk -dn -o NAME" register="disks" changed-when=#false
+}
+```
+
+**Commands whose effect varies** can be followed by a probe that decides: exit `0` means the run changed something, any other exit means it did not.
+
+```kdl
+step "Upgrade packages" {
+    shell "apt-get upgrade -y" changed-when="test -f /var/run/reboot-required"
+}
+```
+
+- The probe runs only after the command succeeds, with the same `login` and `timeout` settings. A probe that times out counts as a change, since it could not show that nothing changed.
+- A task that does not count as a change reports `ok` and does not trigger subscribers.
+- Under `--dry-run`, `changed-when=#false` is honoured — the task is not counted. A probe cannot run in a preview, so a task with one is reported as `would change` whenever its `check` says it would run.
+
+`check` and `changed-when` combine: `check` decides whether the command runs at all, `changed-when` whether running it changed anything.
 
 ## Using `cmd` instead of positional
 

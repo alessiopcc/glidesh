@@ -1,3 +1,4 @@
+pub mod barrier;
 pub mod engine;
 pub mod event_sink;
 pub mod host_coordinator;

@@ -1,4 +1,4 @@
-use crate::config::template::{TemplateData, render};
+use crate::config::template::{TemplateData, defined_references, render};
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
@@ -254,6 +254,27 @@ impl Module for FileModule {
 }
 
 impl FileModule {
+    /// A warning when an upload without `template #true` contains `${name}` references to
+    /// variables this host defines — they would ship verbatim, which is almost never meant.
+    fn literal_reference_warning(
+        ctx: &ModuleContext<'_>,
+        label: &str,
+        content: &[u8],
+    ) -> Option<String> {
+        let names = defined_references(content, |n| {
+            ctx.vars.contains_key(n) || ctx.template_data.extra_vars.contains_key(n)
+        });
+        if names.is_empty() {
+            return None;
+        }
+        let refs: Vec<String> = names.iter().map(|n| format!("${{{n}}}")).collect();
+        Some(format!(
+            "warning: {label} contains {} but is uploaded as-is, because `template` is not set; \
+             add `template #true` to substitute",
+            refs.join(", ")
+        ))
+    }
+
     async fn apply_upload(
         &self,
         ctx: &ModuleContext<'_>,
@@ -261,28 +282,32 @@ impl FileModule {
         src: &str,
         dest: &str,
     ) -> Result<ModuleResult, GlideshError> {
-        let mode_str = if Self::is_template(params) {
-            "template"
+        let template = Self::is_template(params);
+        let mode_str = if template { "template" } else { "copy" };
+
+        let content = Self::read_local_content(
+            src,
+            template,
+            ctx.vars,
+            ctx.template_data,
+            ctx.plan_base_dir,
+        )?;
+        // Before the dry-run return: a preview is the best moment to catch it.
+        let warning = if template {
+            String::new()
         } else {
-            "copy"
+            Self::literal_reference_warning(ctx, src, &content).unwrap_or_default()
         };
 
         if ctx.dry_run {
             return Ok(ModuleResult {
                 changed: false,
                 output: format!("[dry-run] Would {} {} -> {}", mode_str, src, dest),
-                stderr: String::new(),
+                stderr: warning,
                 exit_code: 0,
             });
         }
 
-        let content = Self::read_local_content(
-            src,
-            Self::is_template(params),
-            ctx.vars,
-            ctx.template_data,
-            ctx.plan_base_dir,
-        )?;
         let local_hash = Self::sha256_hex(&content);
 
         let needs_upload = match ctx.checksum_remote(dest).await? {
@@ -317,7 +342,7 @@ impl FileModule {
         Ok(ModuleResult {
             changed: true,
             output: output_msg,
-            stderr: String::new(),
+            stderr: warning,
             exit_code: 0,
         })
     }
@@ -482,6 +507,25 @@ impl FileModule {
         }
 
         let local_files = Self::walk_dir(&resolved_src)?;
+        let template = Self::is_template(params);
+
+        let mut warnings = Vec::new();
+        if !template {
+            for rel_path in &local_files {
+                let local_path = resolved_src.join(rel_path);
+                let content = std::fs::read(&local_path).map_err(|e| GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("Failed to read '{}': {}", local_path.display(), e),
+                })?;
+                let label = format!(
+                    "{}/{}",
+                    src.trim_end_matches('/'),
+                    rel_path.to_string_lossy().replace('\\', "/")
+                );
+                warnings.extend(Self::literal_reference_warning(ctx, &label, &content));
+            }
+        }
+        let warnings = warnings.join("\n");
 
         if ctx.dry_run {
             return Ok(ModuleResult {
@@ -492,12 +536,11 @@ impl FileModule {
                     dest,
                     local_files.len()
                 ),
-                stderr: String::new(),
+                stderr: warnings,
                 exit_code: 0,
             });
         }
 
-        let template = Self::is_template(params);
         let dest_trimmed = dest.trim_end_matches('/');
         let mut uploaded = 0usize;
 
@@ -580,7 +623,7 @@ impl FileModule {
                 uploaded,
                 local_files.len()
             ),
-            stderr: String::new(),
+            stderr: warnings,
             exit_code: 0,
         })
     }

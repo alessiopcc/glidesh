@@ -9,8 +9,6 @@ Plans can include other plan files using the `include` directive, enabling modul
 
 ```kdl
 plan "full-setup" {
-    target "web"
-
     step "Base packages" {
         package "curl" state="present"
         package "vim" state="present"

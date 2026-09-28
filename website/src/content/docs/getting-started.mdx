@@ -77,8 +77,6 @@ Create a `plan.kdl` describing the desired state:
 
 ```kdl
 plan "setup-web" {
-    target "web"
-
     step "Install nginx" {
         package "nginx" state="present"
     }
@@ -94,12 +92,15 @@ plan "setup-web" {
 
 ### 3. Run it
 
+A plan says *what* to do; the command line says *where*. `-t web` runs it on the `web`
+group:
+
 ```bash
-glidesh run -i inventory.kdl -p plan.kdl
+glidesh run -i inventory.kdl -p plan.kdl -t web
 ```
 
 Add `--dry-run` to preview changes without applying them:
 
 ```bash
-glidesh run -i inventory.kdl -p plan.kdl --dry-run
+glidesh run -i inventory.kdl -p plan.kdl -t web --dry-run
 ```

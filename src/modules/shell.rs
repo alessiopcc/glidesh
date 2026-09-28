@@ -1,3 +1,4 @@
+use crate::config::types::ParamValue;
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
@@ -163,6 +164,31 @@ pub(crate) fn describe_success_codes(success_codes: &Option<HashSet<i32>>) -> St
     }
 }
 
+/// How `changed-when` decides whether a successful run changed anything.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ChangedWhen {
+    /// The default: running the command is a change.
+    Always,
+    /// `changed-when=#false`, for read-only commands.
+    Never,
+    /// Run this after the command succeeds; exit 0 means it changed something.
+    Command(String),
+}
+
+pub(crate) fn parse_changed_when(params: &ModuleParams) -> Result<ChangedWhen, GlideshError> {
+    match params.args.get("changed-when") {
+        None | Some(ParamValue::Bool(true)) => Ok(ChangedWhen::Always),
+        Some(ParamValue::Bool(false)) => Ok(ChangedWhen::Never),
+        Some(ParamValue::String(cmd)) if !cmd.trim().is_empty() => {
+            Ok(ChangedWhen::Command(cmd.clone()))
+        }
+        Some(_) => Err(GlideshError::Module {
+            module: "shell".to_string(),
+            message: "changed-when must be #false, #true, or a command".to_string(),
+        }),
+    }
+}
+
 impl ShellModule {
     fn resolve_command(params: &ModuleParams) -> Result<String, GlideshError> {
         resolve_cmd_from_params(params, "shell")
@@ -221,6 +247,8 @@ impl Module for ShellModule {
         } else {
             raw
         };
+        // Parsed before the dry-run return so a malformed value fails a preview too.
+        let changed_when = parse_changed_when(params)?;
 
         if ctx.dry_run {
             return Ok(ModuleResult {
@@ -252,8 +280,25 @@ impl Module for ShellModule {
             match exec_timed(ctx, &command, timeout).await? {
                 Some(output) => {
                     if accepted(output.exit_code as i32, &success_codes) {
+                        let changed = match &changed_when {
+                            ChangedWhen::Always => true,
+                            ChangedWhen::Never => false,
+                            ChangedWhen::Command(probe) => {
+                                let probe = if Self::login_enabled(params) {
+                                    Self::wrap_login(probe)
+                                } else {
+                                    probe.clone()
+                                };
+                                // A probe that times out cannot prove nothing changed, so
+                                // the run is reported as a change.
+                                match exec_timed(ctx, &probe, timeout).await? {
+                                    Some(out) => out.exit_code == 0,
+                                    None => true,
+                                }
+                            }
+                        };
                         return Ok(ModuleResult {
-                            changed: true,
+                            changed,
                             output: output.stdout,
                             stderr: output.stderr,
                             exit_code: output.exit_code as i32,
@@ -357,6 +402,41 @@ mod tests {
         assert_eq!(parse_timeout(&p).unwrap(), None);
         let p = params_with(&[("timeout", ParamValue::Integer(-5))]);
         assert_eq!(parse_timeout(&p).unwrap(), None);
+    }
+
+    #[test]
+    fn changed_when_defaults_to_always() {
+        assert_eq!(
+            parse_changed_when(&params_with(&[])).unwrap(),
+            ChangedWhen::Always
+        );
+        assert_eq!(
+            parse_changed_when(&params_with(&[("changed-when", ParamValue::Bool(true))])).unwrap(),
+            ChangedWhen::Always
+        );
+    }
+
+    #[test]
+    fn changed_when_false_never_changes() {
+        let p = params_with(&[("changed-when", ParamValue::Bool(false))]);
+        assert_eq!(parse_changed_when(&p).unwrap(), ChangedWhen::Never);
+    }
+
+    #[test]
+    fn changed_when_a_string_is_a_probe_command() {
+        let p = params_with(&[("changed-when", ParamValue::String("test -f /tmp/x".into()))]);
+        assert_eq!(
+            parse_changed_when(&p).unwrap(),
+            ChangedWhen::Command("test -f /tmp/x".into())
+        );
+    }
+
+    #[test]
+    fn changed_when_rejects_anything_else() {
+        for bad in [ParamValue::Integer(1), ParamValue::String("  ".into())] {
+            let p = params_with(&[("changed-when", bad)]);
+            assert!(parse_changed_when(&p).is_err());
+        }
     }
 
     #[test]

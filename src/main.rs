@@ -106,10 +106,75 @@ fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, Glidesh
     Ok(None)
 }
 
+/// `--mode`, when given, overrides the plan's own `mode` in either direction.
+fn apply_mode_override(plan: &mut glidesh::config::types::Plan, mode: Option<&str>) {
+    match mode {
+        Some("async") => plan.mode = ExecutionMode::Async,
+        Some("sync") => plan.mode = ExecutionMode::Sync,
+        _ => {}
+    }
+}
+
+/// The secrets file a command loads, opened for decryption.
+struct LoadedSecrets {
+    secrets: Arc<glidesh::secrets::Secrets>,
+    vars: HashMap<String, String>,
+    structured: HashMap<String, Vec<HashMap<String, String>>>,
+}
+
+/// Discover, parse and open the secrets file, for `run` and `console` alike. With no file,
+/// the result is empty and locked, and nothing is prompted for.
+fn load_secrets(
+    flags: &cli::SecretSourceArgs,
+    key: Option<&std::path::Path>,
+    inv_base_dir: &std::path::Path,
+) -> Result<LoadedSecrets, GlideshError> {
+    let secrets_arg = flags.secrets.as_ref().map(|p| expand_tilde(p));
+    let secrets_path =
+        glidesh::secrets::config::discover_secrets_path(secrets_arg.as_deref(), Some(inv_base_dir));
+    let mut vars = HashMap::new();
+    let mut structured = HashMap::new();
+    let mut config = None;
+    if let Some(ref sp) = secrets_path {
+        let content = glidesh::secrets::store::read(sp)?;
+        let sf = glidesh::secrets::config::parse_secrets_file(&content)?;
+        config = sf.config;
+        vars = sf.vars;
+        structured = sf.structured;
+    }
+    // Which credential to look for depends on how the file was wrapped, so this happens
+    // after the config is parsed rather than from the flags alone. Without a provider block
+    // there is no key to unwrap, so nothing is prompted for or read.
+    let identity = match config.as_ref().map(|c| &c.provider) {
+        None => None,
+        Some(glidesh::secrets::config::Provider::Age) => Some(glidesh::secrets::Identity::SshKey(
+            secret_identity_path(flags.secret_identity.as_deref(), key),
+        )),
+        Some(_) => source_secret_pass(flags)?.map(glidesh::secrets::Identity::Passphrase),
+    };
+    glidesh::secrets::set_identity(identity);
+    let secrets = glidesh::secrets::Secrets::open(config.as_ref(), glidesh::secrets::identity())?;
+    Ok(LoadedSecrets {
+        secrets,
+        vars,
+        structured,
+    })
+}
+
+/// Secret-file scalars sit under the inventory-global vars: an inline global var wins.
+fn add_secret_vars(inventory: &mut Inventory, secret_vars: &HashMap<String, String>) {
+    for (k, v) in secret_vars {
+        inventory
+            .global_vars
+            .entry(k.clone())
+            .or_insert_with(|| v.clone());
+    }
+}
+
 /// Source the secrets passphrase, most explicit first: `--secret-pass-file`, then
 /// `GLIDESH_SECRET_PASS`, then `GLIDESH_SECRET_PASS_FILE`, then `--ask-secret-pass`.
 /// A flag the operator typed for this run outranks whatever the environment carries.
-fn source_secret_pass(args: &cli::RunArgs) -> Result<Option<String>, GlideshError> {
+fn source_secret_pass(args: &cli::SecretSourceArgs) -> Result<Option<String>, GlideshError> {
     if let Some(path) = &args.secret_pass_file {
         return Ok(Some(read_pass_file(&expand_tilde(path))?));
     }
@@ -210,40 +275,13 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         .and_then(|p| p.parent())
         .unwrap_or_else(|| std::path::Path::new("."));
 
-    // Discover and load secrets.kdl: its provider block configures decryption, and its
-    // variable nodes merge in at the inventory-global tier (lowest, overridable).
-    let secrets_arg = args.secrets.as_ref().map(|p| expand_tilde(p));
-    let secrets_path =
-        glidesh::secrets::config::discover_secrets_path(secrets_arg.as_deref(), Some(inv_base_dir));
-    let mut secret_vars: HashMap<String, String> = HashMap::new();
-    let mut secret_structured: HashMap<String, Vec<HashMap<String, String>>> = HashMap::new();
-    let mut secrets_config = None;
-    if let Some(ref sp) = secrets_path {
-        let content = glidesh::secrets::store::read(sp)?;
-        let sf = glidesh::secrets::config::parse_secrets_file(&content)?;
-        secrets_config = sf.config;
-        secret_vars = sf.vars;
-        secret_structured = sf.structured;
-    }
-    // Which credential to look for depends on how the file was wrapped, so this happens
-    // after the config is parsed rather than from the flags alone.
-    let identity = match secrets_config.as_ref().map(|c| &c.provider) {
-        Some(glidesh::secrets::config::Provider::Age) => Some(glidesh::secrets::Identity::SshKey(
-            secret_identity_path(args.secret_identity.as_deref(), args.key.as_deref()),
-        )),
-        _ => source_secret_pass(&args)?.map(glidesh::secrets::Identity::Passphrase),
-    };
-    glidesh::secrets::set_identity(identity);
-    let secrets =
-        glidesh::secrets::Secrets::open(secrets_config.as_ref(), glidesh::secrets::identity())?;
-
-    // Secret-file scalars sit under the inventory-global vars (inline global wins).
+    let LoadedSecrets {
+        secrets,
+        vars: secret_vars,
+        structured: secret_structured,
+    } = load_secrets(&args.secrets, args.key.as_deref(), inv_base_dir)?;
     let inventory = inventory.map(|mut inv| {
-        for (k, v) in &secret_vars {
-            inv.global_vars
-                .entry(k.clone())
-                .or_insert_with(|| v.clone());
-        }
+        add_secret_vars(&mut inv, &secret_vars);
         inv
     });
 
@@ -273,9 +311,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         config::resolve_includes(&mut plan, plan_base_dir)?;
         merge_secret_structured(&mut plan, &secret_structured);
 
-        if args.mode == "async" {
-            plan.mode = ExecutionMode::Async;
-        }
+        apply_mode_override(&mut plan, args.mode.as_deref());
 
         let targets = if let Some(ref host) = args.host {
             let user = args.user.as_deref().unwrap_or("root").to_string();
@@ -408,9 +444,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             config::resolve_includes(&mut plan, include_base)?;
             merge_secret_structured(&mut plan, &secret_structured);
 
-            if args.mode == "async" {
-                plan.mode = ExecutionMode::Async;
-            }
+            apply_mode_override(&mut plan, args.mode.as_deref());
 
             let pn = plan.name.clone();
             let gn = group_name.clone();
@@ -808,25 +842,112 @@ fn provider_detail(cfg: &secrets_config::SecretsConfig) -> String {
     }
 }
 
+/// What `validate` found in a plan. `problems` fail validation; `warnings` do not.
+#[derive(Default)]
+struct PlanCheck {
+    steps: usize,
+    problems: Vec<String>,
+    warnings: Vec<String>,
+}
+
+/// Load a plan the way `run` does and check everything that can be known without contacting
+/// a host.
+///
+/// Includes and `vars-file` are resolved from the plan's directory, which is also where step
+/// names and `subscribe` references are checked. External modules are discovered next to the
+/// inventory when one is given, else in the current directory — again as `run` does.
+/// `known_vars` are the names a run could define outside the plan itself, for the
+/// literal-reference warning.
+fn validate_plan_file(
+    plan_path: &std::path::Path,
+    inv_dir: Option<&std::path::Path>,
+    known_vars: &std::collections::HashSet<String>,
+) -> PlanCheck {
+    let fatal = |e: String| PlanCheck {
+        problems: vec![e],
+        ..PlanCheck::default()
+    };
+    let content = match std::fs::read_to_string(plan_path) {
+        Ok(c) => c,
+        Err(e) => return fatal(e.to_string()),
+    };
+    let mut plan = match config::parse_plan(&content) {
+        Ok(p) => p,
+        Err(e) => return fatal(e.to_string()),
+    };
+    let plan_dir = plan_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if let Err(e) = config::resolve_includes(&mut plan, plan_dir) {
+        return fatal(e.to_string());
+    }
+
+    let mut check = PlanCheck {
+        steps: plan.steps().len(),
+        ..PlanCheck::default()
+    };
+    let registry =
+        ModuleRegistry::with_external(Some(inv_dir.unwrap_or_else(|| std::path::Path::new("."))));
+    if let Err(e) = registry.validate_plan(&plan) {
+        check.problems.push(e.to_string());
+    }
+    check
+        .problems
+        .extend(config::checks::missing_file_sources(&plan, plan_dir));
+    check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, |name| {
+        plan.vars.contains_key(name) || known_vars.contains(name) || is_builtin_var(name)
+    });
+    check
+}
+
+/// A name in a namespace glidesh injects at run time, whatever the host.
+fn is_builtin_var(name: &str) -> bool {
+    ["@host.", "@os.", "@inventory.", "@item."]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || name == "@item"
+}
+
 fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     let mut valid = true;
 
+    // Names a run could define outside the plan: any host's inventory variables and the
+    // secrets file's names. Read leniently — a broken file is reported by its own check.
+    let mut known_vars = std::collections::HashSet::new();
+    if let Some(inventory) = args
+        .inventory
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|c| config::parse_inventory(&c).ok())
+    {
+        for host in inventory.resolve_targets(None) {
+            known_vars.extend(host.vars.into_keys());
+        }
+    }
+    let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
+    if let Some(secrets) = secrets_config::discover_secrets_path(None, inv_dir)
+        .and_then(|p| secret_store::read(&p).ok())
+        .and_then(|c| secrets_config::parse_secrets_file(&c).ok())
+    {
+        known_vars.extend(secrets.vars.into_keys());
+    }
+
     if let Some(ref fp_path) = args.plan {
         print!("Validating plan '{}'... ", fp_path.display());
-        match std::fs::read_to_string(fp_path) {
-            Ok(content) => match config::parse_plan(&content) {
-                Ok(fp) => {
-                    println!("OK ({} steps)", fp.steps().len());
+        let check = validate_plan_file(fp_path, inv_dir, &known_vars);
+        match check.problems.as_slice() {
+            [] => println!("OK ({} steps)", check.steps),
+            [one] => println!("FAILED: {}", one),
+            many => {
+                println!("FAILED:");
+                for problem in many {
+                    println!("  - {}", problem);
                 }
-                Err(e) => {
-                    println!("FAILED: {}", e);
-                    valid = false;
-                }
-            },
-            Err(e) => {
-                println!("FAILED: {}", e);
-                valid = false;
             }
+        }
+        valid &= check.problems.is_empty();
+        for warning in &check.warnings {
+            println!("  warning: {}", warning);
         }
     }
 
@@ -986,7 +1107,20 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
             e
         ))
     })?;
-    let inventory = config::parse_inventory(&inv_content)?;
+    let mut inventory = config::parse_inventory(&inv_content)?;
+
+    // Only `--vars` needs the secrets file. Without it nothing is read or prompted for, and
+    // the redaction below is a pass-through.
+    let secrets = if args.vars {
+        let inv_dir = inv_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let loaded = load_secrets(&args.secrets, args.key.as_deref(), inv_dir)?;
+        add_secret_vars(&mut inventory, &loaded.vars);
+        loaded.secrets
+    } else {
+        glidesh::secrets::Secrets::locked()
+    };
 
     let host_key_policy = HostKeyPolicy {
         verify: !args.no_host_key_check,
@@ -1005,21 +1139,25 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
         match (hosts.len(), &args.command) {
             (1, Some(command)) => {
                 let host = &hosts[0];
+                let command = console_command(command, host, &secrets, args.vars)?;
+                let registry = secrets.registry();
                 let session = connect_host(host, &key, host_key_policy).await?;
-                let output = session.exec(command).await?;
-                if !output.stdout.is_empty() {
-                    print!("{}", output.stdout);
+                let output = session.exec(&command).await?;
+                let stdout = registry.redact(&output.stdout);
+                let stderr = registry.redact(&output.stderr);
+                if !stdout.is_empty() {
+                    print!("{}", stdout);
                 }
-                if !output.stderr.is_empty() {
-                    eprint!("{}", output.stderr);
+                if !stderr.is_empty() {
+                    eprint!("{}", stderr);
                 }
                 let exit_code = output.exit_code;
                 session.close().await?;
                 if exit_code != 0 {
                     return Err(GlideshError::SshCommand {
                         exit_code,
-                        stdout: output.stdout,
-                        stderr: output.stderr,
+                        stdout,
+                        stderr,
                     });
                 }
             }
@@ -1037,8 +1175,22 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
                 }
             }
             (_, Some(command)) => {
-                run_command_on_hosts(&hosts, command, &key, host_key_policy, args.concurrency)
-                    .await?;
+                let jobs = hosts
+                    .iter()
+                    .map(|host| {
+                        let command = console_command(command, host, &secrets, args.vars)
+                            .map_err(|e| e.to_string());
+                        (host.clone(), command)
+                    })
+                    .collect();
+                run_command_on_hosts(
+                    jobs,
+                    &key,
+                    host_key_policy,
+                    args.concurrency,
+                    secrets.registry(),
+                )
+                .await?;
             }
             (_, None) => {
                 tui::run_shell_tui(&hosts, &key, host_key_policy, args.concurrency).await?;
@@ -1065,6 +1217,33 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
         .await
         .map_err(|e| GlideshError::Other(format!("Console TUI error: {}", e)))?;
     Ok(())
+}
+
+/// The command `console -c` runs on `host`.
+///
+/// Without `--vars` it is the command as typed, so a shell's own `${VAR}` reaches the host
+/// untouched. With it, `${name}` references are filled from the host's merged inventory
+/// variables (the secrets file's included) and `@host.*`, then any secret token — from a
+/// variable or written inline — is decrypted. An undefined name fails that host rather than
+/// sending a half-substituted command.
+fn console_command(
+    command: &str,
+    host: &config::types::ResolvedHost,
+    secrets: &glidesh::secrets::Secrets,
+    interpolate: bool,
+) -> Result<String, GlideshError> {
+    if !interpolate {
+        return Ok(command.to_string());
+    }
+    let mut vars = host.vars.clone();
+    vars.extend(executor::node_runner::host_builtin_vars(host));
+    secrets.decrypt_vars(&mut vars)?;
+    let resolved = config::template::interpolate(command, &vars)?;
+    if glidesh::secrets::token::contains_secret_token(&resolved) {
+        secrets.decrypt_inline(&resolved)
+    } else {
+        Ok(resolved)
+    }
 }
 
 fn resolve_key_path(
@@ -1101,27 +1280,45 @@ async fn connect_host(
     }
 }
 
+/// Redacts the whole stream before splitting it, so a secret that itself contains a newline is
+/// still found.
+fn redacted_lines(output: &str, registry: &glidesh::secrets::SecretRegistry) -> Vec<String> {
+    registry
+        .redact(output)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Run each host's command concurrently and stream `[host]`-prefixed output. A host whose
+/// command could not be built is reported and counted as failed without connecting.
 async fn run_command_on_hosts(
-    hosts: &[config::types::ResolvedHost],
-    command: &str,
+    jobs: Vec<(config::types::ResolvedHost, Result<String, String>)>,
     key: &russh_keys::key::PrivateKeyWithHashAlg,
     policy: HostKeyPolicy,
     concurrency: usize,
+    registry: Arc<glidesh::secrets::SecretRegistry>,
 ) -> Result<(), GlideshError> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, bool)>();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
 
     let mut handles = Vec::new();
-    for host in hosts {
+    for (host, command) in jobs {
         let tx = tx.clone();
         let key = key.clone();
-        let host = host.clone();
-        let command = command.to_string();
         let sem = semaphore.clone();
+        let registry = registry.clone();
 
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await;
             let name = host.name.clone();
+            let command = match command {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send((name, e, true));
+                    return true;
+                }
+            };
+            let _permit = sem.acquire().await;
             let session = match connect_host(&host, &key, policy).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -1131,11 +1328,11 @@ async fn run_command_on_hosts(
             };
             let failed = match session.exec(&command).await {
                 Ok(output) => {
-                    for line in output.stdout.lines() {
-                        let _ = tx.send((name.clone(), line.to_string(), false));
+                    for line in redacted_lines(&output.stdout, &registry) {
+                        let _ = tx.send((name.clone(), line, false));
                     }
-                    for line in output.stderr.lines() {
-                        let _ = tx.send((name.clone(), line.to_string(), true));
+                    for line in redacted_lines(&output.stderr, &registry) {
+                        let _ = tx.send((name.clone(), line, true));
                     }
                     if output.exit_code != 0 {
                         let _ = tx.send((
@@ -1159,7 +1356,10 @@ async fn run_command_on_hosts(
     }
     drop(tx);
 
+    // Command output was redacted whole before it was split; this catches a secret quoted in
+    // an error message.
     while let Some((host, line, is_stderr)) = rx.recv().await {
+        let line = registry.redact(&line);
         if is_stderr {
             eprintln!("[{}] {}", host, line);
         } else {
@@ -1514,6 +1714,108 @@ mod tests {
         assert!(lines[1].ends_with("1 would change, 2 skipped"), "{lines:?}");
     }
 
+    fn console_host(vars: &[(&str, &str)]) -> config::types::ResolvedHost {
+        config::types::ResolvedHost {
+            name: "web-1".to_string(),
+            address: "10.0.0.1".to_string(),
+            user: "deploy".to_string(),
+            port: 22,
+            vars: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            jump: None,
+            run_as: Default::default(),
+        }
+    }
+
+    /// A `Secrets` unlocked by a passphrase, and a token encrypting `plaintext` under it.
+    fn unlocked_secrets(plaintext: &str) -> (Arc<glidesh::secrets::Secrets>, String) {
+        use glidesh::secrets::config::{Provider, SecretsConfig};
+        use glidesh::secrets::passphrase::{PassphraseProvider, generate_dek};
+        let dek = generate_dek();
+        let wrapped = PassphraseProvider::new("pw".into()).wrap_dek(&dek).unwrap();
+        let cfg = SecretsConfig {
+            provider: Provider::Passphrase,
+            encryptedkey: wrapped,
+            recipients: Vec::new(),
+        };
+        let secrets = glidesh::secrets::Secrets::open(
+            Some(&cfg),
+            Some(&glidesh::secrets::Identity::Passphrase("pw".into())),
+        )
+        .unwrap();
+        let token = glidesh::secrets::token::encrypt_value(&dek, plaintext.as_bytes()).unwrap();
+        (secrets, token)
+    }
+
+    /// Off by default: a shell's own `${VAR}` must reach the host untouched.
+    #[test]
+    fn a_console_command_is_sent_as_typed_without_vars() {
+        let host = console_host(&[("HOME", "not-this")]);
+        let locked = glidesh::secrets::Secrets::locked();
+        let cmd = console_command("echo ${HOME}", &host, &locked, false).unwrap();
+        assert_eq!(cmd, "echo ${HOME}");
+    }
+
+    #[test]
+    fn with_vars_a_console_command_uses_the_host_variables() {
+        let host = console_host(&[("app-dir", "/opt/app")]);
+        let locked = glidesh::secrets::Secrets::locked();
+        let cmd =
+            console_command("ls ${app-dir} # on ${@host.name}", &host, &locked, true).unwrap();
+        assert_eq!(cmd, "ls /opt/app # on web-1");
+    }
+
+    #[test]
+    fn with_vars_an_undefined_name_fails_rather_than_sending_half_a_command() {
+        let host = console_host(&[]);
+        let locked = glidesh::secrets::Secrets::locked();
+        let err = console_command("echo ${nope}", &host, &locked, true).unwrap_err();
+        assert!(err.to_string().contains("nope"), "{err}");
+    }
+
+    /// The field ask: use a secret in a one-off command. The value is decrypted into the
+    /// command, and — because decrypting registers it — scrubbed from anything printed.
+    #[test]
+    fn with_vars_a_secret_is_decrypted_into_the_command_and_redacted_from_output() {
+        let (secrets, token) = unlocked_secrets("hunter2-token");
+        let host = console_host(&[("api-token", token.as_str())]);
+        let cmd = console_command(
+            "curl -H 'Authorization: ${api-token}' https://x",
+            &host,
+            &secrets,
+            true,
+        )
+        .unwrap();
+        assert_eq!(cmd, "curl -H 'Authorization: hunter2-token' https://x");
+        assert_eq!(
+            secrets.registry().redact("echoed: hunter2-token"),
+            "echoed: ***"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_secret_is_redacted_before_output_is_split() {
+        let (secrets, token) = unlocked_secrets("first-half\nsecond-half");
+        let host = console_host(&[("pair", token.as_str())]);
+        console_command("echo ${pair}", &host, &secrets, true).unwrap();
+
+        let lines = redacted_lines(
+            "before\nfirst-half\nsecond-half\nafter\n",
+            &secrets.registry(),
+        );
+        assert_eq!(lines, ["before", "***", "after"]);
+    }
+
+    #[test]
+    fn with_vars_an_inline_token_is_decrypted_too() {
+        let (secrets, token) = unlocked_secrets("s3cret-value");
+        let host = console_host(&[]);
+        let cmd = console_command(&format!("echo {token}"), &host, &secrets, true).unwrap();
+        assert_eq!(cmd, "echo s3cret-value");
+    }
+
     #[test]
     fn failures_go_to_stderr() {
         let (stream, _) = event_lines(
@@ -1582,8 +1884,71 @@ mod tests {
                 .unwrap();
         // Holds whether or not GLIDESH_SECRET_PASS is set in this environment.
         assert_eq!(
-            source_secret_pass(&args).unwrap().as_deref(),
+            source_secret_pass(&args.secrets).unwrap().as_deref(),
             Some("from-file")
         );
+    }
+
+    /// The pass file does not exist, so reading it would fail the command.
+    #[test]
+    fn no_secrets_file_means_no_passphrase_is_sourced() {
+        let dir = tempfile::tempdir().unwrap();
+        let flags = cli::SecretSourceArgs {
+            secret_pass_file: Some(dir.path().join("does-not-exist")),
+            ..Default::default()
+        };
+        let loaded = load_secrets(&flags, None, dir.path()).unwrap();
+        assert!(loaded.vars.is_empty());
+    }
+
+    #[test]
+    fn the_mode_flag_overrides_the_plan_in_both_directions() {
+        let plan =
+            |mode: &str| config::parse_plan(&format!("plan \"p\" {{ mode \"{mode}\" }}")).unwrap();
+
+        let mut p = plan("async");
+        apply_mode_override(&mut p, Some("sync"));
+        assert_eq!(p.mode, ExecutionMode::Sync);
+
+        let mut p = plan("sync");
+        apply_mode_override(&mut p, Some("async"));
+        assert_eq!(p.mode, ExecutionMode::Async);
+
+        let mut p = plan("async");
+        apply_mode_override(&mut p, None);
+        assert_eq!(
+            p.mode,
+            ExecutionMode::Async,
+            "no flag keeps the plan's mode"
+        );
+    }
+
+    #[test]
+    fn an_unknown_mode_is_rejected() {
+        assert!(cli::RunArgs::try_parse_from(["run", "-m", "asinc"]).is_err());
+    }
+
+    /// `console` takes the same secrets flags as `run`, and `--vars` only with a command.
+    #[test]
+    fn console_accepts_the_secrets_flags_and_vars() {
+        let args = cli::ConsoleArgs::try_parse_from([
+            "console",
+            "-c",
+            "echo ${token}",
+            "--vars",
+            "--secrets",
+            "s.kdl",
+            "--secret-pass-file",
+            "p",
+            "--secret-identity",
+            "k",
+        ])
+        .unwrap();
+        assert!(args.vars);
+        assert_eq!(
+            args.secrets.secrets.as_deref(),
+            Some(std::path::Path::new("s.kdl"))
+        );
+        assert!(cli::ConsoleArgs::try_parse_from(["console", "--vars"]).is_err());
     }
 }

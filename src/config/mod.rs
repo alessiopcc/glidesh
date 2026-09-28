@@ -1,3 +1,4 @@
+pub mod checks;
 pub mod condition;
 pub mod inventory;
 pub mod plan;

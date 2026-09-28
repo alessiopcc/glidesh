@@ -565,6 +565,29 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
         }
     }
 
+    // Other modules would ignore it, or reject it only when the task runs.
+    if let Some(value) = args.get("changed-when") {
+        if module != "shell" {
+            return Err(GlideshError::ConfigParse {
+                message: format!(
+                    "{module} '{resource}': changed-when is only supported on shell tasks"
+                ),
+            });
+        }
+        let valid = match value {
+            ParamValue::Bool(_) => true,
+            ParamValue::String(cmd) => !cmd.trim().is_empty(),
+            _ => false,
+        };
+        if !valid {
+            return Err(GlideshError::ConfigParse {
+                message: format!(
+                    "shell '{resource}': changed-when must be #false, #true, or a command"
+                ),
+            });
+        }
+    }
+
     let run_as = super::parse_run_as_attrs(node)?;
     let when = parse_when(node)?;
 
@@ -1518,6 +1541,42 @@ plan "test" {
                 shell "echo"
             }"#,
         );
+    }
+
+    #[test]
+    fn changed_when_is_accepted_on_shell() {
+        let step = one_step(
+            r#"step "s" {
+                shell "lsblk" changed-when=#false
+                shell "apt-get upgrade -y" changed-when="test -f /var/run/reboot-required"
+            }"#,
+        );
+        assert_eq!(
+            step.tasks[0]
+                .args
+                .get("changed-when")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn changed_when_is_rejected_off_shell() {
+        let err = plan_err(r#"step "s" { package "nginx" changed-when=#false }"#);
+        assert!(err.contains("only supported on shell"), "{err}");
+    }
+
+    #[test]
+    fn changed_when_must_be_a_bool_or_a_command() {
+        for bad in ["1", r#""""#, r#""   ""#] {
+            let err = plan_err(&format!(
+                r#"step "s" {{ shell "true" changed-when={bad} }}"#
+            ));
+            assert!(
+                err.contains("must be #false, #true, or a command"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -31,6 +31,11 @@ glidesh console [OPTIONS]
 | `--concurrency <N>` | — | Max concurrent hosts when running a command (minimum 1) | `10` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys | `false` |
+| `--vars` | — | Substitute `${var}` references in `--command` from host variables and secrets (see [Variables and secrets](/cli/console/#variables-and-secrets---vars)) | `false` |
+| `--secrets <PATH>` | — | Path to the secrets file (used with `--vars`) | `secrets.kdl` next to the inventory |
+| `--ask-secret-pass` | — | Prompt for the secrets passphrase | `false` |
+| `--secret-pass-file <PATH>` | — | Read the secrets passphrase from the first line of a file | — |
+| `--secret-identity <PATH>` | — | SSH private key that unlocks an age-wrapped secrets file | `--key` |
 
 ### Mode selection
 
@@ -87,7 +92,7 @@ glidesh run [OPTIONS]
 | `--port <PORT>` | `-P` | SSH port | `22` |
 | `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
 | `--command <CMD>` | `-c` | Ad-hoc command to run | — |
-| `--mode <MODE>` | `-m` | Execution mode: `sync` or `async` | `sync` |
+| `--mode <MODE>` | `-m` | [Execution mode](/concepts/execution-modes/): `sync` or `async`, overriding the plan's `mode` | the plan's `mode`, else `sync` |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
 | `--dry-run` | — | Report what would change without applying it | `false` |
 | `--diff` | — | Show the detail behind each pending change, where the module can describe it | `false` |
@@ -236,6 +241,30 @@ glidesh validate -p plan.kdl
 glidesh validate -i inventory.kdl
 glidesh validate -p plan.kdl -i inventory.kdl
 ```
+
+A plan is loaded exactly as `run` loads it, then checked for everything that can be known
+without contacting a host:
+
+- **Syntax**, including [`when=`](/advanced/conditionals/) conditions and unknown step attributes.
+- **Includes and `vars-file`** are resolved, so a missing or broken included plan is reported.
+- **Step names** are unique across includes, and every `subscribe` names an earlier step.
+- **Modules exist.** A misspelled module name fails here. External modules are looked up next
+  to the inventory when `-i` is given, otherwise in `./modules/` and `~/.glidesh/modules/`.
+- **Every `file` task has a `src`, and local sources exist.** A `src` is resolved from the
+  plan's directory, as a run resolves it. Not checked: a `fetch` source, which is a path on the host, and a `src`
+  containing `${…}`, which only a run can resolve.
+
+Every problem is listed, not only the first.
+
+It also **warns**, without failing, when a `file` upload without `template #true` contains
+`${name}` for a variable a run would define — a plan variable, any host's inventory variable
+when `-i` is given, a secrets-file name, or a built-in such as `${@host.name}`. See
+[Forgetting `template`](/modules/file/#forgetting-template).
+
+`validate` never connects, so it cannot tell whether a plan's settings suit a particular host —
+whether a package exists in its repositories, a service is installed, or a container would be
+recreated. Use [`--dry-run`](#previewing-a-run) for that: it checks each task against the host
+without changing anything.
 
 A `secrets.kdl` discovered beside the inventory is parsed too, so a malformed provider block or an
 unknown provider is caught here rather than mid-run. Only the file is parsed — validation never
