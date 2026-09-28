@@ -129,11 +129,18 @@ A [`--dry-run`](/cli/#previewing-a-run) of a rolling plan runs in batches too, a
 same way. Nothing is changed in a preview, so only a failure in computing it — a check that
 errors, or an undefined variable — can count against `max-fail`.
 
-Try a plan on a single host before rolling it out, without editing it, by overriding both
-settings on the command line:
+Both settings can be overridden on the command line without editing the plan. The most
+cautious rollout goes one host at a time and stops at the first failure — every host is still
+reached if none fails:
 
 ```bash
 glidesh run -i inventory.kdl -p deploy.kdl --serial 1 --max-fail 0
+```
+
+To try a plan on one host only, target that host instead:
+
+```bash
+glidesh run -i inventory.kdl -p deploy.kdl -t web-1
 ```
 
 `serial` and `max-fail` belong to the plan being run. In an [included](/advanced/plan-includes/)
