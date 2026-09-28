@@ -591,8 +591,13 @@ fn parse_until(node: &kdl::KdlNode, step: &str) -> Result<Option<UntilGate>, Gli
             Some(value) => value
                 .as_integer()
                 .and_then(|n| u64::try_from(n).ok())
-                .filter(|n| *n > 0)
-                .ok_or_else(|| err(format!("{key}= must be a positive number of seconds"))),
+                .filter(|n| (1..=UntilGate::MAX_SECONDS).contains(n))
+                .ok_or_else(|| {
+                    err(format!(
+                        "{key}= must be a number of seconds from 1 to {} (7 days)",
+                        UntilGate::MAX_SECONDS
+                    ))
+                }),
         }
     };
     let timeout = seconds("until-timeout", UntilGate::DEFAULT_TIMEOUT)?;
@@ -1872,15 +1877,20 @@ plan "test" {
             (r#"until=#true"#, "must be a command"),
             (
                 r#"until="x" until-timeout=0"#,
-                "until-timeout= must be a positive",
+                "until-timeout= must be a number",
             ),
             (
                 r#"until="x" until-interval=-1"#,
-                "until-interval= must be a positive",
+                "until-interval= must be a number",
             ),
             (
                 r#"until="x" until-timeout="60""#,
-                "until-timeout= must be a positive",
+                "until-timeout= must be a number",
+            ),
+            (r#"until="x" until-timeout=604801"#, "from 1 to 604800"),
+            (
+                r#"until="x" until-interval=18446744073709551615"#,
+                "from 1 to 604800",
             ),
             (r#"until-timeout=60"#, "need an until= command"),
             (

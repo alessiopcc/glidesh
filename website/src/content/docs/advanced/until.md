@@ -32,6 +32,9 @@ step "Warm the cache" until="curl -sf http://localhost:8000/health" until-timeou
 | `until-timeout` | integer | `300` | Seconds to keep trying before the step fails |
 | `until-interval` | integer | `3` | Seconds between attempts |
 
+Both are whole seconds from 1 to 604800 (7 days); anything else is rejected when the plan is
+parsed, so `glidesh validate` catches it.
+
 ## Why not `shell` with `retries`?
 
 A polling `shell` task works, but it runs its command as work: every run reports it as a

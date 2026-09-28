@@ -386,6 +386,9 @@ pub struct UntilGate {
 impl UntilGate {
     pub const DEFAULT_TIMEOUT: u64 = 300;
     pub const DEFAULT_INTERVAL: u64 = 3;
+    /// A week. Longer is certainly a mistake, and an unbounded value would overflow the
+    /// deadline computed from it.
+    pub const MAX_SECONDS: u64 = 7 * 24 * 60 * 60;
 }
 
 impl Step {

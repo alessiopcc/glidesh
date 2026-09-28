@@ -650,13 +650,17 @@ impl NodeRunner {
             .resolve(glidesh::modules::escalation::password());
 
         let started = Instant::now();
-        let deadline = started + Duration::from_secs(gate.timeout);
+        // The parser caps the timeout, but a deadline past what `Instant` can hold must not
+        // panic; it just never comes.
+        let deadline = started.checked_add(Duration::from_secs(gate.timeout));
+        let left =
+            |now: Instant| deadline.map_or(Duration::MAX, |d| d.saturating_duration_since(now));
         let mut last_report: Option<Instant> = None;
         loop {
             // Each attempt is bounded by what is left of the timeout: a command that never
             // exits would otherwise hold the step forever, and one that exits 0 after the
             // deadline must not open the gate late.
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = left(Instant::now());
             let attempt =
                 tokio::time::timeout(remaining, session.exec_as(&command, run_as.as_ref()));
             let out = match attempt.await {
@@ -675,8 +679,7 @@ impl NodeRunner {
                 self.report_waiting(step, gate, elapsed, true);
                 return Ok(());
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining < Duration::from_secs(gate.interval) {
+            if left(Instant::now()) < Duration::from_secs(gate.interval) {
                 return Err(gate_timeout_error(gate, Some(&out)));
             }
             if last_report.is_none_or(|at| at.elapsed() >= WAIT_REPORT_EVERY) {
