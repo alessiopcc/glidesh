@@ -62,11 +62,9 @@ fn render_header(frame: &mut Frame, area: Rect, state: &TuiState) {
     };
 
     let elapsed = elapsed_str(state.elapsed());
-    let failed_count = state
-        .nodes
-        .iter()
-        .filter(|n| n.status == NodeStatus::Failed)
-        .count();
+    let count = |status: NodeStatus| state.nodes.iter().filter(|n| n.status == status).count();
+    let failed_count = count(NodeStatus::Failed);
+    let aborted_count = count(NodeStatus::Aborted);
 
     let counted = format!(
         "{}{}",
@@ -79,10 +77,16 @@ fn render_header(frame: &mut Frame, area: Rect, state: &TuiState) {
     );
 
     let label = if state.run_complete {
-        if failed_count > 0 {
+        if failed_count > 0 || aborted_count > 0 {
             format!(
-                " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} failed \u{2500}\u{2500} {} {} \u{2500}\u{2500} {} ",
-                state.completed, state.total, failed_count, state.total_changed, counted, elapsed
+                " glidesh \u{2500}\u{2500} {}/{} hosts \u{2500}\u{2500} {} failed{} \u{2500}\u{2500} {} {} \u{2500}\u{2500} {} ",
+                state.completed,
+                state.total,
+                failed_count,
+                crate::executor::aborted_suffix(aborted_count),
+                state.total_changed,
+                counted,
+                elapsed
             )
         } else {
             format!(

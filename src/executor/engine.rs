@@ -67,7 +67,7 @@ impl Engine {
             }
 
             let batch_results = self.run_batch(batch, &shared).await;
-            let batch_failed = size - batch_results.iter().filter(|r| r.success).count();
+            let batch_failed = batch_results.iter().filter(|r| !r.success).count();
             failed += batch_failed;
             results.extend(batch_results);
 
@@ -87,12 +87,10 @@ impl Engine {
             }
         }
 
-        let succeeded = results.iter().filter(|r| r.success).count();
         let summary = RunSummary {
             total_hosts: total,
-            succeeded,
-            // A host whose task panicked left no result; it still failed.
-            failed: total - aborted - succeeded,
+            succeeded: results.iter().filter(|r| r.success).count(),
+            failed: results.iter().filter(|r| !r.success).count(),
             total_changed: results.iter().map(|r| r.total_changed).sum(),
             total_skipped: results.iter().map(|r| r.total_skipped).sum(),
             aborted,
@@ -114,6 +112,7 @@ impl Engine {
 
         let mut handles = Vec::new();
         for host in batch {
+            let name = host.name.clone();
             let sync = barrier.as_ref().map(|b| SyncSlot {
                 seat: b.seat(),
                 permits: shared.semaphore.clone(),
@@ -157,15 +156,35 @@ impl Engine {
                 runner.run().await
             });
 
-            handles.push(handle);
+            handles.push((name, handle));
         }
 
         let mut results = Vec::new();
-        for handle in handles {
+        for (host, handle) in handles {
             match handle.await {
                 Ok(result) => results.push(result),
+                // The runner never reached its own completion, so report it here: otherwise the
+                // TUI leaves the host RUNNING and the run log never records it as failed.
                 Err(e) => {
-                    tracing::error!("Task panicked: {}", e);
+                    tracing::error!("Task for {} panicked: {}", host, e);
+                    let _ = shared.sink.send(ExecutorEvent::ModuleFailed {
+                        host: host.clone(),
+                        module: "glidesh".to_string(),
+                        resource: String::new(),
+                        error: format!("internal error: {e}"),
+                    });
+                    let _ = shared.sink.send(ExecutorEvent::NodeComplete {
+                        host,
+                        success: false,
+                        changed: 0,
+                        skipped: 0,
+                        dry_run: self.dry_run,
+                    });
+                    results.push(NodeResult {
+                        success: false,
+                        total_changed: 0,
+                        total_skipped: 0,
+                    });
                 }
             }
         }
