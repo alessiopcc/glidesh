@@ -19,7 +19,8 @@ pub(super) const PARAM_HASH_LABEL: &str = "sh.glide.param-hash";
 pub(super) const FIELD_HASHES_LABEL: &str = "sh.glide.field-hashes";
 
 /// Labels glidesh writes itself. The runtime keeps the last of two labels with one key,
-/// and a plan's `labels` come after glidesh's, so a plan could otherwise overwrite them.
+/// and a plan's `labels` and `extra-args` come after glidesh's, so a plan could otherwise
+/// overwrite them.
 const RESERVED_LABEL_PREFIX: &str = "sh.glide.";
 
 /// Flags emitted as `--flag=value`.
@@ -374,25 +375,7 @@ pub(super) fn build_run_args(
         }
     }
 
-    if let Some(labels) = params.args.get("labels").and_then(|v| v.as_map()) {
-        let mut reserved: Vec<&str> = labels
-            .keys()
-            .map(String::as_str)
-            .filter(|k| k.starts_with(RESERVED_LABEL_PREFIX))
-            .collect();
-        if !reserved.is_empty() {
-            reserved.sort_unstable();
-            return Err(GlideshError::Module {
-                module: "container".to_string(),
-                message: format!(
-                    "container '{}': label(s) {} use the reserved '{}' prefix",
-                    params.resource_name,
-                    reserved.join(", "),
-                    RESERVED_LABEL_PREFIX
-                ),
-            });
-        }
-    }
+    reject_reserved_labels(params)?;
 
     for (key, flag) in MAP_FLAGS {
         if let Some(map) = params.args.get(*key).and_then(|v| v.as_map()) {
@@ -429,6 +412,42 @@ pub(super) fn build_run_args(
     }
 
     Ok(args)
+}
+
+fn reject_reserved_labels(params: &ModuleParams) -> Result<(), GlideshError> {
+    let mut reserved: Vec<&str> = params
+        .args
+        .get("labels")
+        .and_then(|v| v.as_map())
+        .into_iter()
+        .flat_map(|labels| labels.keys().map(String::as_str))
+        .filter(|k| k.starts_with(RESERVED_LABEL_PREFIX))
+        .collect();
+    reserved.sort_unstable();
+    // Raw tokens can spell a label several ways (`--label k=v`, `--label=k=v`, `-l k=v`),
+    // so any mention of the prefix is refused rather than parsed.
+    reserved.extend(
+        params
+            .args
+            .get("extra-args")
+            .and_then(|v| v.as_list())
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|token| token.contains(RESERVED_LABEL_PREFIX)),
+    );
+    if reserved.is_empty() {
+        return Ok(());
+    }
+    Err(GlideshError::Module {
+        module: "container".to_string(),
+        message: format!(
+            "container '{}': {} use the reserved '{}' label prefix",
+            params.resource_name,
+            reserved.join(", "),
+            RESERVED_LABEL_PREFIX
+        ),
+    })
 }
 
 /// `--gpus` is Docker-only; Podman exposes the same devices through CDI.
@@ -1390,7 +1409,28 @@ plan "p" {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains(key), "{err}");
-            assert!(err.contains("reserved 'sh.glide.' prefix"), "{err}");
+            assert!(err.contains("reserved 'sh.glide.' label prefix"), "{err}");
+        }
+    }
+
+    #[test]
+    fn extra_args_cannot_set_the_labels_glidesh_writes_either() {
+        for extra in [
+            vec!["--label", "sh.glide.field-hashes=forged"],
+            vec!["--label=sh.glide.param-hash=forged"],
+            vec!["-l", "sh.glide.param-hash=forged"],
+        ] {
+            let params = make_params(vec![
+                ("image", ParamValue::String("x".into())),
+                (
+                    "extra-args",
+                    ParamValue::List(extra.iter().map(|t| t.to_string()).collect()),
+                ),
+            ]);
+            let err = build_run_command("docker", "web", &params)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("reserved 'sh.glide.' label prefix"), "{err}");
         }
     }
 }

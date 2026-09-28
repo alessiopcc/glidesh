@@ -59,7 +59,7 @@ Unknown parameters are rejected at check time, so a typo (`privledged`) fails lo
 | `ports` | list | Port mappings (`host:container`) |
 | `environment` | map | Environment variables |
 | `volumes` | list | Volume mounts (`host:container`) |
-| `labels` | map | Container labels. Keys starting with `sh.glide.` are reserved for the labels glidesh writes, and are rejected |
+| `labels` | map | Container labels. Keys starting with `sh.glide.` are reserved for the labels glidesh writes, and are rejected here and anywhere in `extra-args` |
 | `network` | string | `"host"`, `"bridge"`, `"none"`, `"container:<name>"`, or a custom network name (auto-created if it doesn't exist) |
 | `network-alias` | list | Extra DNS names on the attached network |
 | `dns` | list | DNS servers |
@@ -92,7 +92,7 @@ Unknown parameters are rejected at check time, so a typo (`privledged`) fails lo
 | `cpus` | string | CPU limit |
 | `ulimits` | map | ulimits, as `name` → `soft[:hard]` |
 | `sysctls` | map | Kernel parameters |
-| `extra-args` | list | Raw flags passed to `run` verbatim, unquoted. The escape hatch for anything without a first-class parameter |
+| `extra-args` | list | Raw flags passed to `run` verbatim, unquoted. The escape hatch for anything without a first-class parameter. A token mentioning `sh.glide.` is rejected, so glidesh's own labels cannot be overwritten |
 
 Shared-memory workloads (CUDA IPC in particular) need the host IPC namespace — without it, a client mapping another process's GPU buffers fails with `cudaErrorMapBufferObjectFailed`:
 
