@@ -535,7 +535,14 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         }
     }
 
-    if let Some(var) = step_reads_error_var(&tasks, when.as_ref(), until.as_ref(), &loop_source) {
+    // No failure exists yet where the step's own work runs.
+    if let Some(var) = find_reference(
+        is_error_var,
+        &tasks,
+        when.as_ref(),
+        until.as_ref(),
+        &loop_source,
+    ) {
         return Err(GlideshError::ConfigParse {
             message: format!(
                 "step '{name}': only rescue and always tasks can use ${{{var}}}, which describes \
@@ -579,7 +586,7 @@ fn parse_section(
     if children.is_empty() {
         return Err(err(format!("{kind} needs at least one task")));
     }
-    children
+    let tasks = children
         .iter()
         .map(|child| match child.name().value() {
             nested @ ("rescue" | "always") => Err(err(format!(
@@ -587,28 +594,34 @@ fn parse_section(
             ))),
             _ => parse_task(child),
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    // The block runs once, after the loop, when no item is bound.
+    if let Some(var) = find_reference(is_item_var, &tasks, None, None, &None) {
+        return Err(err(format!(
+            "{kind} cannot use ${{{var}}}: it runs once per step, after the loop"
+        )));
+    }
+    Ok(tasks)
 }
 
-/// A `${@error.*}` reference outside `rescue`/`always`, where no failure exists yet: the
-/// step's own tasks, its `when=`, `until=` and `loop=`.
-fn step_reads_error_var(
+/// The first variable `is_var` accepts that the given tasks, `when=`, `until=` or `loop=`
+/// reference.
+fn find_reference(
+    is_var: fn(&str) -> bool,
     tasks: &[TaskDef],
     when: Option<&Condition>,
     until: Option<&UntilGate>,
     loop_source: &Option<LoopSource>,
 ) -> Option<String> {
     let in_text = |text: &str| {
-        text.find("${@error").map(|at| {
-            text[at + 2..]
-                .split('}')
-                .next()
-                .unwrap_or("@error")
-                .to_string()
-        })
+        text.split("${")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
+            .find(|name| is_var(name))
+            .map(str::to_string)
     };
     let in_condition = |cond: Option<&Condition>| {
-        cond.and_then(|c| c.variables().find(|v| is_error_var(v)).map(str::to_string))
+        cond.and_then(|c| c.variables().find(|v| is_var(v)).map(str::to_string))
     };
     let in_args = |task: &TaskDef| {
         task.args.values().find_map(|value| match value {
@@ -619,7 +632,7 @@ fn step_reads_error_var(
         })
     };
     let in_loop = match loop_source {
-        Some(LoopSource::Variable(var)) if is_error_var(var) => Some(var.clone()),
+        Some(LoopSource::Variable(var)) if is_var(var) => Some(var.clone()),
         _ => None,
     };
     in_condition(when)
@@ -2073,6 +2086,23 @@ plan "test" {
         );
         assert_eq!(resources(&step.always), ["rm -f /tmp/lock"]);
         assert_eq!(step.all_tasks().count(), 5);
+    }
+
+    #[test]
+    fn rescue_and_always_cannot_read_the_loop_item() {
+        for (kind, var) in [("rescue", "@item"), ("always", "@item.name")] {
+            let err = plan_err(&format!(
+                r#"step "s" loop="${{xs}}" {{ shell "a"; {kind} {{ shell "echo ${{{var}}}" }} }}"#
+            ));
+            assert!(
+                err.contains(&format!("{kind} cannot use ${{{var}}}")),
+                "{err}"
+            );
+        }
+        let err = plan_err(
+            r#"step "s" loop="${xs}" { shell "a"; rescue { shell "b" when="${@item} == x" } }"#,
+        );
+        assert!(err.contains("rescue cannot use ${@item}"), "{err}");
     }
 
     #[test]

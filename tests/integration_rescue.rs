@@ -71,7 +71,8 @@ plan "clean" {
 "#;
 
 /// A gate that times out and a loop item that fails are the step's failures too. The loop
-/// stops at the failed item, and the rescue runs once, not per item.
+/// stops at the failed item, and the rescue runs once, not per item. A task given as a `cmd`
+/// child node that fails before it runs is named by its command.
 const GATE_AND_LOOP: &str = r#"
 plan "gate-and-loop" {
     step "Wait" until="false" until-timeout=1 until-interval=1 {
@@ -84,6 +85,14 @@ plan "gate-and-loop" {
         shell "echo ${@item} >> /root/g-items; test ${@item} != b"
         rescue {
             shell "echo rescued >> /root/g-items"
+        }
+    }
+    step "Undefined" {
+        shell {
+            cmd "echo ${never-defined}"
+        }
+        rescue {
+            shell "cat > /root/g-cmd <<'EOF'\n${@error.task}\nEOF"
         }
     }
 }
@@ -228,6 +237,10 @@ async fn a_gate_timeout_and_a_failed_item_are_rescued_once() {
         "a gate failure names no task"
     );
     assert_eq!(read("/root/g-items").await, "a\nb\nrescued\n");
+    assert_eq!(
+        read("/root/g-cmd").await.trim(),
+        "shell 'echo ${never-defined}'"
+    );
 }
 
 fn run(dir: &Path, extra: &[&str]) -> (bool, String) {

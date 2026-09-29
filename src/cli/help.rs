@@ -175,7 +175,7 @@ RESCUE AND ALWAYS (handle a step's failure)
   variable is undefined (an error in its when= is not rescued). The step's tasks stop at
   the failure. If every rescue task succeeds, the failure is handled and the host goes on.
   always runs after the step and any rescue, whether or not they failed.
-  Both run once per step, after its loop, not per item, and have no ${@item}. They can read
+  Both run once per step, after its loop, not per item, and cannot use ${@item}. They can read
   ${@error.msg} (the error) and ${@error.task} (module 'resource'; empty when the step
   failed outside its tasks). A failed rescue or always fails the host. A rescue that does
   not run leaves its register= variables undefined. A step's changed status, which

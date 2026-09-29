@@ -147,10 +147,19 @@ impl Failure {
         vars.insert(Self::TASK.to_string(), self.task.clone());
     }
 
+    /// For a preview whose step did not fail: the real run might, so whether the variables
+    /// are defined is not known.
+    fn unknown(progress: &mut Progress) {
+        progress.unknown.insert(Self::MSG.to_string());
+        progress.unknown.insert(Self::TASK.to_string());
+    }
+
     /// Unbind them once the step is over, so no later step sees a failure it did not have.
-    fn withdraw(vars: &mut HashMap<String, String>) {
-        vars.remove(Self::MSG);
-        vars.remove(Self::TASK);
+    fn withdraw(vars: &mut HashMap<String, String>, progress: &mut Progress) {
+        for name in [Self::MSG, Self::TASK] {
+            vars.remove(name);
+            progress.unknown.remove(name);
+        }
     }
 }
 
@@ -629,8 +638,10 @@ impl NodeRunner {
                 .run_step_body(&run, &mut vars, &mut progress, &mut changed)
                 .await
                 .err();
-            if let Some(failed) = &failure {
-                failed.expose(&mut vars);
+            match &failure {
+                Some(failed) => failed.expose(&mut vars),
+                None if self.dry_run => Failure::unknown(&mut progress),
+                None => {}
             }
 
             if !step.rescue.is_empty() {
@@ -674,7 +685,7 @@ impl NodeRunner {
                 failure = failure.or(always.err());
             }
 
-            Failure::withdraw(&mut vars);
+            Failure::withdraw(&mut vars, &mut progress);
             step_changed.insert(step.name.clone(), changed);
             if failure.is_some() {
                 let _ = session.close().await;
@@ -867,9 +878,11 @@ impl NodeRunner {
         task: &TaskDef,
         vars: &HashMap<String, String>,
     ) -> Result<ModuleParams, Failure> {
+        // As written: a `cmd` given as a child node leaves the resource empty until the
+        // fallback below, which a failure here never reaches.
         let fail = |e: GlideshError| -> Failure {
-            self.emit_task_error(&task.module, &task.resource, &e.to_string());
-            Failure::in_task(&task.module, &task.resource, e.to_string())
+            self.emit_task_error(&task.module, &raw_resource(task), &e.to_string());
+            Failure::in_task(&task.module, &raw_resource(task), e.to_string())
         };
 
         let mut args = interpolate_args(&task.args, vars).map_err(fail)?;
@@ -999,8 +1012,8 @@ impl NodeRunner {
                 Some(m) => m,
                 None => {
                     let error = format!("Unknown module: {}", task.module);
-                    self.emit_task_error(&task.module, &task.resource, &error);
-                    return Err(Failure::in_task(&task.module, &task.resource, error));
+                    self.emit_task_error(&task.module, &raw_resource(task), &error);
+                    return Err(Failure::in_task(&task.module, &raw_resource(task), error));
                 }
             };
 
@@ -1503,8 +1516,39 @@ mod tests {
         Failure::in_task("shell", "deploy.sh", "exit code 3").expose(&mut vars);
         assert_eq!(vars["@error.msg"], "exit code 3");
         assert_eq!(vars["@error.task"], "shell 'deploy.sh'");
-        Failure::withdraw(&mut vars);
+        let mut progress = Progress::default();
+        Failure::withdraw(&mut vars, &mut progress);
         assert_eq!(vars, strings(&[("x", "1")]));
+    }
+
+    /// A preview that did not fail cannot tell `always` whether the real run will: a
+    /// `defined` test on the failure is undetermined, and ending the step settles it.
+    #[test]
+    fn a_preview_without_a_failure_leaves_the_failure_unknown_until_the_step_ends() {
+        let mut vars = HashMap::new();
+        let mut progress = Progress::default();
+        Failure::unknown(&mut progress);
+        let collections = HashMap::new();
+        let decide = |vars: &HashMap<String, String>, progress: &Progress| {
+            gate(
+                Some(&cond("defined ${@error.msg}")),
+                &Scope {
+                    vars,
+                    collections: &collections,
+                    unknown: &progress.unknown,
+                },
+            )
+        };
+        assert!(matches!(
+            decide(&vars, &progress),
+            Ok(Gate::Skip { decided: false, .. })
+        ));
+        Failure::withdraw(&mut vars, &mut progress);
+        assert!(progress.unknown.is_empty());
+        assert!(matches!(
+            decide(&vars, &progress),
+            Ok(Gate::Skip { decided: true, .. })
+        ));
     }
 
     /// Outside a task (the `until=` gate, the loop) there is no task to name, but the

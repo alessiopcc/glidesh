@@ -106,7 +106,7 @@ plan "nginx" {
 - **A failed rescue fails the host**, as the step would have: `always` still runs, then the
   host stops. The same holds for a failed `always`, even when the step itself succeeded.
 - **Once per step.** `rescue` and `always` run after the step's loop, not per item, and do
-  not see `${@item}`.
+  not see `${@item}`: a plan whose `rescue` or `always` uses it is rejected when it is parsed.
 - **`register=`** works in both blocks. A rescue that does not run leaves its `register=`
   variables **undefined**, as a [skipped task](/advanced/conditionals/#what-a-skip-does)
   does — so a later `when="defined ${var}"` asks whether the rescue ran:
@@ -145,4 +145,5 @@ A preview runs the blocks the same way: `rescue` if computing the step's preview
 `always` in any case, each task reporting what it would do. A preview cannot know whether the
 real run will fail, so a rescue's `register=` variables are neither defined nor undefined
 there, and a [`when=`](/advanced/conditionals/#under---dry-run) that tests one is reported as
-undetermined.
+undetermined. For the same reason, when a step's preview did not fail, an `always` task's
+`when="defined ${@error.msg}"` is undetermined too.
