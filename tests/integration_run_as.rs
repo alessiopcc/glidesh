@@ -822,3 +822,33 @@ async fn test_run_as_recursive_copy_to_root_without_attributes_works() {
     let content = root.exec("cat /glidesh-top.conf").await.unwrap();
     assert_eq!(content.stdout, "top");
 }
+
+#[tokio::test]
+async fn test_run_as_upload_through_a_symlinked_parent_trusts_the_real_directory_owner() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "mkdir -p /srv/glidesh-cfg && touch /srv/glidesh-cfg/real.conf && \
+         ln -s /srv/glidesh-cfg/real.conf /srv/glidesh-cfg/app.conf && \
+         chown -h www-data:www-data /srv/glidesh-cfg /srv/glidesh-cfg/real.conf \
+         /srv/glidesh-cfg/app.conf && ln -s /srv/glidesh-cfg /srv/glidesh-current",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    // `app.conf` is www-data's link in www-data's directory, reached through root's link.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"cfg").unwrap();
+    let params = upload_params(tmp.path(), "/srv/glidesh-current/app.conf", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let content = root.exec("cat /srv/glidesh-cfg/real.conf").await.unwrap();
+    assert_eq!(content.stdout, "cfg");
+}

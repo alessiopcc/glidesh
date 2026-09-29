@@ -1440,7 +1440,8 @@ fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
 /// - a sticky directory writable by others (`/tmp`) is accepted above an existing
 ///   directory or link, which others cannot rename there. Not above a file or a missing
 ///   entry, which anyone could create first — a link, or a hard link to a root file;
-/// - a symlink must be owned by a trusted user or by the owner of its directory;
+/// - a symlink must be owned by a trusted user or by the owner of its directory — the
+///   directory it really sits in, when the path reaches it through another symlink;
 /// - an entry that does not exist yet is skipped: its directory decides who can create it.
 ///
 /// Paths are read with `echo .` appended, since `$(…)` strips trailing newlines, which a
@@ -1450,6 +1451,7 @@ fn trusted_paths(targets: &[&str], login_uid: &str) -> String {
 fail() { echo "$*" >&2; exit 1; }
 trusted() { [ "$1" = 0 ] || [ "$1" = "$u" ] || [ "$1" = LOGIN ]; }
 owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || fail "cannot inspect $1"; }
+dir_owner() { stat -L -c %u "$1" 2>/dev/null || stat -L -f %u "$1" 2>/dev/null || fail "cannot inspect $1"; }
 up() { up=$(dirname "$1" && echo .) || fail "cannot resolve $1"; up=${up%??}; }
 bsd=
 acl_writable() {
@@ -1465,7 +1467,7 @@ entry() {
     kind=link
     o=$(owner "$1") || exit 1
     trusted "$o" && return 0
-    up "$1"; od=$(owner "$up") || exit 1
+    up "$1"; od=$(dir_owner "$up") || exit 1
     [ "$o" = "$od" ] ||
       fail "refusing: the symlink $1 is owned by uid $o, neither a trusted user nor the owner of its directory"
     return 0
