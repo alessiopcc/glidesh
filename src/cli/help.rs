@@ -231,6 +231,8 @@ MODULES (each checks the host first and changes only what differs)
                               Runs every time unless check= says the work is done.
   file \"<dest>\"               src= (required)  template=#true  recurse=#true  fetch=#true
                               owner= group= mode=\"0644\"  diff=#false
+                              Relative paths on this machine (src, a fetch's <dest>)
+                              resolve from the plan file's directory, not the cwd.
                               Compares SHA256, then owner/group/mode. Without them a
                               replaced file keeps its owner/group/mode (run-as too), a
                               new one gets the umask mode (usually 0644).

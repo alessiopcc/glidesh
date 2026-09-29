@@ -488,6 +488,7 @@ mod tests {
             "keeps its owner/group/mode",
             "refuses a destination others could redirect",
             "sudo and doas work for any user",
+            "resolve from the plan file's directory",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

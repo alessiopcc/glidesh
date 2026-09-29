@@ -52,8 +52,10 @@ impl FileModule {
             })
     }
 
-    fn resolve_src(src: &str, plan_base_dir: &std::path::Path) -> std::path::PathBuf {
-        let path = std::path::Path::new(src);
+    /// A path on this machine — an upload's `src`, a fetch's destination — resolved from
+    /// the plan's directory when relative, so a run does the same from any directory.
+    fn resolve_local(path: &str, plan_base_dir: &std::path::Path) -> std::path::PathBuf {
+        let path = std::path::Path::new(path);
         if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -68,7 +70,7 @@ impl FileModule {
         template_data: &TemplateData,
         plan_base_dir: &std::path::Path,
     ) -> Result<Vec<u8>, GlideshError> {
-        let resolved = Self::resolve_src(src, plan_base_dir);
+        let resolved = Self::resolve_local(src, plan_base_dir);
         let content = std::fs::read(&resolved).map_err(|e| GlideshError::Module {
             module: "file".to_string(),
             message: format!("Failed to read local file '{}': {}", resolved.display(), e),
@@ -170,7 +172,11 @@ impl Module for FileModule {
                     message: "fetch=true and recurse=true cannot be combined".to_string(),
                 });
             }
-            return Ok(ModuleStatus::pending(format!("Fetch {} -> {}", src, dest)));
+            return Ok(ModuleStatus::pending(format!(
+                "Fetch {} -> {}",
+                src,
+                Self::resolve_local(dest, ctx.plan_base_dir).display()
+            )));
         }
 
         if Self::is_recurse(params) {
@@ -381,10 +387,11 @@ impl FileModule {
         src: &str,
         dest: &str,
     ) -> Result<ModuleResult, GlideshError> {
+        let dest = Self::resolve_local(dest, ctx.plan_base_dir);
         if ctx.dry_run {
             return Ok(ModuleResult {
                 changed: false,
-                output: format!("[dry-run] Would fetch {} -> {}", src, dest),
+                output: format!("[dry-run] Would fetch {} -> {}", src, dest.display()),
                 stderr: String::new(),
                 exit_code: 0,
                 output_cut: false,
@@ -393,7 +400,7 @@ impl FileModule {
 
         let data = ctx.download_file(src).await?;
 
-        if let Some(parent) = std::path::Path::new(dest).parent() {
+        if let Some(parent) = dest.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| GlideshError::Module {
                     module: "file".to_string(),
@@ -406,14 +413,14 @@ impl FileModule {
             }
         }
 
-        std::fs::write(dest, &data).map_err(|e| GlideshError::Module {
+        std::fs::write(&dest, &data).map_err(|e| GlideshError::Module {
             module: "file".to_string(),
-            message: format!("Failed to write local file '{}': {}", dest, e),
+            message: format!("Failed to write local file '{}': {}", dest.display(), e),
         })?;
 
         Ok(ModuleResult {
             changed: true,
-            output: format!("fetch {} -> {} ({} bytes)", src, dest, data.len()),
+            output: format!("fetch {} -> {} ({} bytes)", src, dest.display(), data.len()),
             stderr: String::new(),
             exit_code: 0,
             output_cut: false,
@@ -427,7 +434,7 @@ impl FileModule {
         src: &str,
         dest: &str,
     ) -> Result<ModuleStatus, GlideshError> {
-        let resolved_src = Self::resolve_src(src, ctx.plan_base_dir);
+        let resolved_src = Self::resolve_local(src, ctx.plan_base_dir);
         if !resolved_src.is_dir() {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
@@ -595,7 +602,7 @@ impl FileModule {
         src: &str,
         dest: &str,
     ) -> Result<ModuleResult, GlideshError> {
-        let resolved_src = Self::resolve_src(src, ctx.plan_base_dir);
+        let resolved_src = Self::resolve_local(src, ctx.plan_base_dir);
         if !resolved_src.is_dir() {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
@@ -753,6 +760,29 @@ mod tests {
         assert_eq!(
             hash,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn a_relative_local_path_resolves_from_the_plans_directory() {
+        let plan_dir = std::env::temp_dir().join("plans");
+        assert_eq!(
+            FileModule::resolve_local("backups/db.sql", &plan_dir),
+            plan_dir.join("backups/db.sql")
+        );
+        assert_eq!(
+            FileModule::resolve_local("../out/db.sql", &plan_dir),
+            plan_dir.join("../out/db.sql")
+        );
+    }
+
+    #[test]
+    fn an_absolute_local_path_is_used_as_given() {
+        let absolute = std::env::temp_dir().join("backups").join("db.sql");
+        let absolute = absolute.to_str().unwrap();
+        assert_eq!(
+            FileModule::resolve_local(absolute, std::path::Path::new("/plans")),
+            std::path::PathBuf::from(absolute)
         );
     }
 
