@@ -118,6 +118,8 @@ glidesh run -i inventory.kdl -p deploy.kdl --var release=v1.4.2 --var db-passwor
 ```
 
 - `--var` only answers a declared prompt; a name the plan does not ask for is an error.
+  Errors about a `--var` name it by position (`--var #2`) and never repeat what you typed,
+  which may be a password; a close declared name is suggested instead.
 - When stdin is not a terminal, a prompt without `--var` takes its default. One with no
   default fails the run before it connects, and the error names every missing variable
   with the `--var` that fixes it — glidesh never waits for input it cannot get.

@@ -147,8 +147,11 @@ fn a_var_flag_the_plan_does_not_ask_for_fails() {
     );
     assert!(!ok, "{out}");
     assert!(
-        has(&out, "does not ask for: relase")
-            && has(&out, "declares: release, region, db-password"),
+        has(
+            &out,
+            "--var #3 (did you mean release?) names a variable the plan does not ask for"
+        ) && has(&out, "declares: release, region, db-password")
+            && !out.contains("relase"),
         "{out}"
     );
 }

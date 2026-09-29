@@ -37,26 +37,26 @@ pub fn distinct_prompts<'a>(plans: impl IntoIterator<Item = &'a Plan>) -> Vec<Va
 
 /// Split `--var name=value` flags. A malformed flag, or a name given twice, is an error.
 ///
-/// A malformed flag is described, never echoed: it may be a password typed without its
-/// `name=`, and nothing is registered for redaction yet.
+/// Nothing a flag holds is ever echoed, not even its name: a password passed without its
+/// `name=`, or one that itself contains `=`, would show up there before anything is
+/// registered to mask it. Errors name a flag by its position instead.
 fn parse_var_flags(flags: &[String]) -> Result<Vec<(String, String)>, GlideshError> {
     let mut pairs: Vec<(String, String)> = Vec::new();
-    for flag in flags {
+    for (position, flag) in flags.iter().enumerate().map(|(i, f)| (i + 1, f)) {
         let Some((name, value)) = flag.split_once('=').filter(|(n, _)| !n.trim().is_empty()) else {
             let problem = if flag.contains('=') {
-                "a --var has no name before '='"
+                "no name before '='"
             } else {
-                "a --var has no '='"
+                "no '='"
             };
             return Err(GlideshError::Other(format!(
-                "{problem}: it must be name=value, e.g. --var release=v1.2"
+                "--var #{position} has {problem}: it must be name=value, e.g. --var release=v1.2"
             )));
         };
         let name = name.trim();
         if pairs.iter().any(|(n, _)| n == name) {
             return Err(GlideshError::Other(format!(
-                "--var '{}' is given more than once",
-                shown_name(name)
+                "--var #{position} names the same variable as an earlier --var"
             )));
         }
         pairs.push((name.to_string(), value.to_string()));
@@ -64,15 +64,32 @@ fn parse_var_flags(flags: &[String]) -> Result<Vec<(String, String)>, GlideshErr
     Ok(pairs)
 }
 
-/// A `--var` name as an error may show it. A name made only of the characters variable names
-/// use is shown, so a typo such as `relase` is visible; anything else may be the start of a
-/// password that itself contains `=`, and is not.
-fn shown_name(name: &str) -> &str {
-    let plain = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if plain { name } else { "<not a variable name>" }
+/// The declared name a mistyped `--var` name most likely meant, if one is close. Only a
+/// declared name is ever shown, so a typo is still easy to fix without echoing the flag.
+fn closest_prompt<'a>(name: &str, prompts: &'a [VarPrompt]) -> Option<&'a str> {
+    prompts
+        .iter()
+        .map(|p| (edit_distance(name, &p.name), p.name.as_str()))
+        .filter(|(distance, declared)| *distance <= 2 && *distance < declared.len())
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, declared)| declared)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != *cb))
+                .min(above + 1)
+                .min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// Answer each prompt: from its `--var name=value` flag, else by `ask`ing when stdin is a
@@ -89,11 +106,14 @@ pub fn resolve_answers(
     mut ask: impl FnMut(&VarPrompt) -> Result<String, GlideshError>,
 ) -> Result<Vec<Answer>, GlideshError> {
     let given = parse_var_flags(var_flags)?;
-    let unknown: Vec<&str> = given
+    let unknown: Vec<String> = given
         .iter()
-        .map(|(n, _)| n.as_str())
-        .filter(|n| !prompts.iter().any(|p| p.name == *n))
-        .map(shown_name)
+        .enumerate()
+        .filter(|(_, (n, _))| !prompts.iter().any(|p| p.name == *n))
+        .map(|(i, (n, _))| match closest_prompt(n, prompts) {
+            Some(declared) => format!("#{} (did you mean {declared}?)", i + 1),
+            None => format!("#{}", i + 1),
+        })
         .collect();
     if !unknown.is_empty() {
         let declared = if prompts.is_empty() {
@@ -109,8 +129,8 @@ pub fn resolve_answers(
             )
         };
         return Err(GlideshError::Other(format!(
-            "--var names a variable the plan does not ask for: {} ({declared}). --var only \
-             answers a vars-prompt",
+            "--var {} names a variable the plan does not ask for ({declared}). --var only \
+             answers a vars-prompt; the name is not shown, since it may be part of a password",
             unknown.join(", ")
         )));
     }
@@ -355,11 +375,16 @@ mod tests {
     #[test]
     fn a_var_flag_for_an_undeclared_name_is_an_error() {
         let prompts = [prompt("release", None, false)];
-        let err = resolve_answers(&prompts, &flags(&["relase=v1"]), false, never_ask)
-            .unwrap_err()
-            .to_string();
+        let err = resolve_answers(
+            &prompts,
+            &flags(&["release=v1", "relase=v1"]),
+            false,
+            never_ask,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
-            err.contains("relase") && err.contains("declares: release"),
+            err.contains("--var #2 (did you mean release?)") && err.contains("declares: release"),
             "{err}"
         );
 
@@ -370,18 +395,33 @@ mod tests {
     }
 
     /// A password containing `=` passed without its `name=` splits into a "name" that is the
-    /// start of the password: only a name that looks like one is echoed.
+    /// start of the password, and looks like any other name: none is ever echoed.
     #[test]
-    fn an_undeclared_name_is_shown_only_when_it_looks_like_a_name() {
+    fn an_undeclared_or_repeated_name_is_never_echoed() {
         let prompts = [prompt("db-password", None, true)];
-        for (flag, shown) in [("relase=v1", true), ("hunter2!x=rest", false)] {
-            let err = resolve_answers(&prompts, &flags(&[flag]), false, never_ask)
+        for bad in [
+            &["hunter2=rest"][..],
+            &["hunter2!x=rest"],
+            &["hunter2=a", "hunter2=b"],
+        ] {
+            let err = resolve_answers(&prompts, &flags(bad), false, never_ask)
                 .unwrap_err()
                 .to_string();
-            let name = flag.split_once('=').unwrap().0;
-            assert_eq!(err.contains(name), shown, "{flag}: {err}");
-            assert!(err.contains("does not ask for"), "{err}");
+            assert!(!err.contains("hunter2"), "{bad:?}: {err}");
+            assert!(err.contains("--var #"), "{err}");
         }
+    }
+
+    #[test]
+    fn only_a_close_declared_name_is_suggested() {
+        let prompts = [
+            prompt("release", None, false),
+            prompt("db-password", None, true),
+        ];
+        assert_eq!(closest_prompt("relase", &prompts), Some("release"));
+        assert_eq!(closest_prompt("db-pasword", &prompts), Some("db-password"));
+        assert_eq!(closest_prompt("hunter2", &prompts), None);
+        assert_eq!(closest_prompt("r", &[prompt("x", None, false)]), None);
     }
 
     #[test]
