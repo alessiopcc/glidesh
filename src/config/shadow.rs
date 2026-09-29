@@ -6,6 +6,7 @@
 
 use crate::config::types::{Inventory, Plan};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
 /// Where an inventory sets a variable for a host.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,6 +32,8 @@ impl std::fmt::Display for VarScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shadow {
     pub plan: String,
+    /// The plan file it was found in: two files may name their plans alike.
+    pub source: PathBuf,
     pub name: String,
     /// Every place the inventory sets it for those hosts.
     pub scopes: BTreeSet<VarScope>,
@@ -74,6 +77,7 @@ pub struct SecretNames {
 /// given on the command line, and only the secrets file can be shadowed.
 pub fn shadowed<'a>(
     plan: &Plan,
+    source: &Path,
     inventory: Option<&Inventory>,
     secrets: &SecretNames,
     hosts: impl IntoIterator<Item = &'a str>,
@@ -132,25 +136,27 @@ pub fn shadowed<'a>(
         .filter_map(|name| scopes.get(name).map(|found| (name, found.clone())));
     merged(scalars.chain(structured).map(|(name, scopes)| Shadow {
         plan: plan.name.clone(),
+        source: source.to_path_buf(),
         name: name.to_string(),
         scopes,
     }))
 }
 
-/// One shadow per plan and variable, with the scopes of all: a plan several inventory
-/// groups run is checked once per group.
+/// One shadow per plan file and variable, with the scopes of all: a plan several
+/// inventory groups run is checked once per group.
 pub fn merged(shadows: impl IntoIterator<Item = Shadow>) -> Vec<Shadow> {
-    let mut by_name: BTreeMap<(String, String), BTreeSet<VarScope>> = BTreeMap::new();
+    let mut by_source: BTreeMap<(PathBuf, String), Shadow> = BTreeMap::new();
     for shadow in shadows {
-        by_name
-            .entry((shadow.plan, shadow.name))
-            .or_default()
-            .extend(shadow.scopes);
+        match by_source.entry((shadow.source.clone(), shadow.name.clone())) {
+            std::collections::btree_map::Entry::Occupied(mut known) => {
+                known.get_mut().scopes.extend(shadow.scopes)
+            }
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(shadow);
+            }
+        }
     }
-    by_name
-        .into_iter()
-        .map(|((plan, name), scopes)| Shadow { plan, name, scopes })
-        .collect()
+    by_source.into_values().collect()
 }
 
 #[cfg(test)]
@@ -193,7 +199,13 @@ host "lone" "10.0.2.1" {
             vars: secrets.iter().map(|s| s.to_string()).collect(),
             ..SecretNames::default()
         };
-        shadowed(&plan, Some(&inventory), &secrets, hosts.iter().copied())
+        shadowed(
+            &plan,
+            Path::new("plan.kdl"),
+            Some(&inventory),
+            &secrets,
+            hosts.iter().copied(),
+        )
     }
 
     fn scopes(shadow: &Shadow) -> Vec<VarScope> {
@@ -267,7 +279,7 @@ host "lone" "10.0.2.1" {
             vars: HashSet::from(["token".to_string()]),
             ..SecretNames::default()
         };
-        let found = shadowed(&plan, None, &secrets, ["10.0.0.9"]);
+        let found = shadowed(&plan, Path::new("plan.kdl"), None, &secrets, ["10.0.0.9"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "token");
     }
@@ -309,7 +321,7 @@ host "lone" "10.0.2.1" {
             vars: HashSet::from(["other".to_string()]),
             structured: HashSet::from(["api-keys".to_string()]),
         };
-        let found = shadowed(&plan, None, &secrets, ["web-1"]);
+        let found = shadowed(&plan, Path::new("plan.kdl"), None, &secrets, ["web-1"]);
         let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
@@ -320,23 +332,34 @@ host "lone" "10.0.2.1" {
     }
 
     #[test]
-    fn shadows_of_one_plan_from_several_groups_merge_into_one() {
-        let shadow = |scope: VarScope| Shadow {
+    fn shadows_of_one_plan_file_merge_and_of_two_files_do_not() {
+        let shadow = |source: &str, scope: VarScope| Shadow {
             plan: "deploy".to_string(),
+            source: PathBuf::from(source),
             name: "customer".to_string(),
             scopes: BTreeSet::from([scope]),
         };
         let found = merged([
-            shadow(VarScope::Group("web".to_string())),
-            shadow(VarScope::Host("db-1".to_string())),
+            shadow("web.kdl", VarScope::Group("web".to_string())),
+            shadow("web.kdl", VarScope::Host("db-1".to_string())),
+            shadow("other.kdl", VarScope::Host("lone".to_string())),
         ]);
-        assert_eq!(found.len(), 1);
+        assert_eq!(found.len(), 2, "{found:?}");
+        let web = found
+            .iter()
+            .find(|s| s.source == Path::new("web.kdl"))
+            .unwrap();
         assert_eq!(
-            scopes(&found[0]),
+            scopes(web),
             [
                 VarScope::Group("web".to_string()),
                 VarScope::Host("db-1".to_string())
             ]
         );
+        let other = found
+            .iter()
+            .find(|s| s.source == Path::new("other.kdl"))
+            .unwrap();
+        assert_eq!(scopes(other), [VarScope::Host("lone".to_string())]);
     }
 }

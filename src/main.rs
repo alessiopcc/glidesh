@@ -415,6 +415,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
         shadows.extend(config::shadow::shadowed(
             &plan,
+            fp_path,
             shadowable,
             &secret_names,
             targets.iter().map(|h| h.name.as_str()),
@@ -524,6 +525,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             config::resolve_includes(&mut plan, include_base)?;
             shadows.extend(config::shadow::shadowed(
                 &plan,
+                &resolved_path,
                 shadowable,
                 &secret_names,
                 filtered_targets.iter().map(|h| h.name.as_str()),
@@ -1118,12 +1120,14 @@ fn validate_plan_file(
 /// also sets for one of `hosts`.
 fn shadow_warnings(
     plan: &config::types::Plan,
+    source: &std::path::Path,
     inventory: Option<&Inventory>,
     secret_names: &config::shadow::SecretNames,
     hosts: &[String],
 ) -> Vec<String> {
     config::shadow::shadowed(
         plan,
+        source,
         inventory,
         secret_names,
         hosts.iter().map(String::as_str),
@@ -1204,7 +1208,7 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
             .map(|h| h.name)
             .collect();
         let shadows = |plan: &config::types::Plan| {
-            shadow_warnings(plan, inventory.as_ref(), &secret_names, &hosts)
+            shadow_warnings(plan, fp_path, inventory.as_ref(), &secret_names, &hosts)
         };
         print!("Validating plan '{}'... ", fp_path.display());
         valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars, shadows));
@@ -1255,7 +1259,7 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
             );
             let hosts: Vec<String> = hosts.into_iter().map(|h| h.name).collect();
             let shadows = |plan: &config::types::Plan| {
-                shadow_warnings(plan, Some(inventory), &secret_names, &hosts)
+                shadow_warnings(plan, &path, Some(inventory), &secret_names, &hosts)
             };
             valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars, shadows));
         }
