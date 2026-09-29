@@ -1133,7 +1133,18 @@ async fn test_run_as_upload_with_a_sudo_password_writes_only_the_content() {
     skip_unless_integration!();
 
     let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    // Credentials cached for every later sudo (a global timestamp) must not make sudo skip
+    // the password glidesh sends: it would reach the command's stdin and `log_input`.
+    root.exec(
+        "echo 'Defaults:ops log_input, timestamp_type=global' > /etc/sudoers.d/zz-log && \
+         chmod 440 /etc/sudoers.d/zz-log",
+    )
+    .await
+    .unwrap();
     let ops = container.ssh_session_as("ops").await;
+    let cached = ops.exec("echo ops-pass | sudo -S -p '' -v").await.unwrap();
+    assert_eq!(cached.exit_code, 0, "{}", cached.failure());
     let os_info = container.detect_os(&ops).await;
     let vars = HashMap::new();
     let ctx = container.module_context_run_as(&ops, &os_info, &vars, false, ops_to_app("ops-pass"));
@@ -1144,8 +1155,20 @@ async fn test_run_as_upload_with_a_sudo_password_writes_only_the_content() {
     let params = upload_params(tmp.path(), "/srv/app/sudo-pass.bin", &[]);
     FileModule.apply(&ctx, &params).await.unwrap();
 
-    let root = container.ssh_session().await;
     assert_eq!(hex_of(&root, "/srv/app/sudo-pass.bin").await, hex(BINARY));
+    let logged = root
+        .exec("find /var/log/sudo-io -name stdin -exec zcat -f {} + 2>/dev/null")
+        .await
+        .unwrap();
+    assert!(
+        logged.stdout.contains("no newline at the end"),
+        "the upload went through the input log: {:?}",
+        logged.stdout
+    );
+    assert!(
+        !logged.stdout.contains("ops-pass"),
+        "the password was logged"
+    );
     let deploy = container.ssh_session_as("deploy").await;
     let (file, _) = app_creates(&deploy).await;
     assert_eq!(

@@ -132,6 +132,12 @@ GLIDESH_RUNAS_PASS='…' glidesh run ... --run-as root  # from the environment
 The password is held in process memory only — never logged or written to disk. It is
 global for the run; `GLIDESH_RUNAS_PASS` takes precedence over `--ask-pass`.
 
+Glidesh sends it only when `sudo` needs one: once per connection and `run-as` user it
+asks whether `sudo` runs commands without a password (`NOPASSWD`), and if so sends none.
+When it does send it, `sudo -k` makes `sudo` ignore cached credentials and read it
+every time. Either way a password never reaches the command — whose input a sudoers
+`log_input` I/O log records — even with credentials cached by an earlier `sudo`.
+
 ## Method support and caveats
 
 | Method | Password | Notes |
@@ -154,9 +160,9 @@ way round, through a private file the login user then reads.
 - **`run-as="root"`** opens the staging file itself.
 - **Any other user** — a service account like `postgres`, which cannot open another
   user's private file — gets the content piped in by the login user (`sudo` or `doas`),
-  and a read piped back out. A `sudo` password is sent only when `sudo` needs one, ahead
-  of the content on the same stream, where `sudo` reads it itself; it is checked first,
-  so a wrong one fails before any content is sent. Content piped this way passes through
+  and a read piped back out. A `sudo` password ([sent only when needed](#passwords))
+  goes ahead of the content on the same stream, where `sudo` reads it itself; it is
+  checked first, so a wrong one fails before any content is sent. Content piped this way passes through
   `sudo`'s input and output, so a sudoers `log_input`/`log_output` I/O log records it —
   the content, never the password.
 - **`su`** cannot pipe content — its terminal would mangle binary data — so it works for

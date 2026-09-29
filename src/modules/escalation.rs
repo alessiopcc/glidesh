@@ -71,6 +71,8 @@ pub fn wrap(run_as: &ResolvedRunAs, inner: &str) -> Wrapped {
     match run_as.method {
         // `-n` fails fast instead of blocking on a password prompt; with a password
         // we use `-S` (read from stdin) and an empty prompt so nothing pollutes stderr.
+        // `-k` ignores cached credentials, so sudo always reads the password itself: one
+        // it skipped would reach the command's stdin, and a `log_input` I/O log.
         RunAsMethod::Sudo => match &run_as.password {
             None => Wrapped {
                 command: format!("sudo -n -u {user} -- sh -c {cmd}"),
@@ -78,7 +80,7 @@ pub fn wrap(run_as: &ResolvedRunAs, inner: &str) -> Wrapped {
                 pty: false,
             },
             Some(pw) => Wrapped {
-                command: format!("sudo -S -p '' -u {user} -- sh -c {cmd}"),
+                command: format!("sudo -k -S -p '' -u {user} -- sh -c {cmd}"),
                 stdin: Some(format!("{pw}\n").into_bytes()),
                 pty: false,
             },
@@ -166,7 +168,7 @@ mod tests {
     #[test]
     fn sudo_with_password() {
         let w = wrap(&resolved(RunAsMethod::Sudo, Some("s3cr3t")), "id -u");
-        assert_eq!(w.command, "sudo -S -p '' -u 'root' -- sh -c 'id -u'");
+        assert_eq!(w.command, "sudo -k -S -p '' -u 'root' -- sh -c 'id -u'");
         assert_eq!(w.stdin, Some(b"s3cr3t\n".to_vec()));
         assert!(!w.pty);
     }

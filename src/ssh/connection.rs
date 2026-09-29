@@ -165,6 +165,8 @@ pub struct SshSession {
     forward_registry: ForwardRegistry,
     /// The login user's uid, read once: [`trusted_paths`] trusts it.
     login_uid: tokio::sync::OnceCell<String>,
+    /// Per run-as user, whether sudo runs commands without a password.
+    sudo_passwordless: tokio::sync::Mutex<std::collections::HashMap<String, bool>>,
 }
 
 impl SshSession {
@@ -224,6 +226,7 @@ impl SshSession {
             _jump_handle: tokio::sync::Mutex::new(None),
             forward_registry,
             login_uid: tokio::sync::OnceCell::new(),
+            sudo_passwordless: tokio::sync::Mutex::default(),
         })
     }
 
@@ -350,6 +353,7 @@ impl SshSession {
             _jump_handle: tokio::sync::Mutex::new(Some(jump_handle)),
             forward_registry,
             login_uid: tokio::sync::OnceCell::new(),
+            sudo_passwordless: tokio::sync::Mutex::default(),
         })
     }
 
@@ -568,6 +572,7 @@ impl SshSession {
         outer: impl FnOnce(&str) -> String,
     ) -> Result<CommandOutput, GlideshError> {
         escalation::precheck(r)?;
+        let r = &self.sending_run_as(r).await?;
         let wrapped = escalation::wrap(r, command);
         let out = self
             .exec_with(
@@ -797,7 +802,7 @@ impl SshSession {
             self.exec_as(&place_staged_upload(tmp, remote_path, uid), Some(r))
                 .await?
         } else {
-            let r = &self.fed_run_as(r).await?;
+            let r = &self.sending_run_as(r).await?;
             // A wrong password makes `sudo -S` retry, reading the content that follows it
             // as more attempts: into the PAM stack and toward an account lockout.
             if r.password.is_some() {
@@ -832,22 +837,32 @@ impl SshSession {
         Ok(())
     }
 
-    /// `r` without its password when sudo needs none (`NOPASSWD`, cached credentials): a
-    /// password sudo does not read would go on to the command's stdin, which a sudoers
-    /// `log_input` I/O log records.
-    async fn fed_run_as(&self, r: &ResolvedRunAs) -> Result<ResolvedRunAs, GlideshError> {
+    /// `r` without its password when sudo needs none for that user (`NOPASSWD`), asked
+    /// once per session: a password sudo does not read goes on to the command's stdin,
+    /// which a sudoers `log_input` I/O log records. Every command runs as `sh`, so the
+    /// answer holds for all of them; with the password, `sudo -k` ignores cached
+    /// credentials, so sudo reads it every time.
+    async fn sending_run_as(&self, r: &ResolvedRunAs) -> Result<ResolvedRunAs, GlideshError> {
+        if r.password.is_none() || r.method != RunAsMethod::Sudo {
+            return Ok(r.clone());
+        }
         let passwordless = ResolvedRunAs {
             password: None,
             ..r.clone()
         };
-        if r.password.is_none() || r.method != RunAsMethod::Sudo {
-            return Ok(r.clone());
-        }
-        match self.exec_as("true", Some(&passwordless)).await {
-            Ok(out) if out.exit_code == 0 => Ok(passwordless),
-            Ok(_) | Err(GlideshError::RunAs { .. }) => Ok(r.clone()),
-            Err(e) => Err(e),
-        }
+        let mut known = self.sudo_passwordless.lock().await;
+        let free = match known.get(&r.user) {
+            Some(&free) => free,
+            None => {
+                // `-k`: credentials cached now would expire during the run.
+                let probe = format!("sudo -k -n -u {} -- sh -c true", shell_escape(&r.user));
+                let out = self.exec(&probe).await?;
+                let free = out.exit_code == 0;
+                known.insert(r.user.clone(), free);
+                free
+            }
+        };
+        Ok(if free { passwordless } else { r.clone() })
     }
 
     /// Download a source the login user may not be able to read directly. Without
@@ -1473,8 +1488,8 @@ const SU_STAGING_LIMIT: &str = "with run-as-method su, files are staged only for
 
 /// The escalated side of an upload fed on stdin by [`feed_staged_upload`]: skips to the
 /// line `mark`, then writes the rest into `dest` as [`place_staged_upload`] does. What
-/// comes before `mark` is the `sudo -S` password if sudo did not read it after all —
-/// credentials cached since `fed_run_as` found one needed — and must never reach the file.
+/// comes before `mark` is a `sudo -S` password sudo did not read after all — its policy
+/// changed since `sending_run_as` found one needed — and must never reach the file.
 fn write_fed_upload(dest: &str, login_uid: &str, mark: &str) -> String {
     // The content goes on fd 3 so no command of the guard can read from it, redirected on
     // the command: ksh does not pass an fd above 2 opened by a bare `exec` to children.
