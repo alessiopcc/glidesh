@@ -633,12 +633,11 @@ impl SshSession {
         path: &str,
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<bool, GlideshError> {
-        let dir = shell_escape(&format!("{}/", path.trim_end_matches('/')));
-        let script = format!("cd {dir} 2>/dev/null && pwd -P");
-        let out = self
-            .exec_as(&format!("sh -c {}", shell_escape(&script)), run_as)
-            .await?;
-        Ok(out.exit_code == 0 && out.stdout.trim_end_matches('\n') == "/")
+        let out = self.exec_as(&root_dir_check(path), run_as).await?;
+        root_dir_answer(&out.stdout).ok_or_else(|| GlideshError::Module {
+            module: "file".to_string(),
+            message: format!("could not tell whether {path} is /: {}", out.failure()),
+        })
     }
 
     /// `mkdir -p` each of `dirs`; escalated, only once [`trusted_paths`] holds for them,
@@ -1368,6 +1367,24 @@ fn place_staged_upload(tmp: &str, dest: &str, login_uid: &str) -> String {
     )
 }
 
+/// The command behind [`SshSession::is_root_dir_as`]. `/` is compared on the host by
+/// device and inode and the answer is a word, since `pwd -P` may print `//`, and under
+/// `su`'s PTY every line ends in `\r\n`, after any prompt.
+fn root_dir_check(path: &str) -> String {
+    let dir = shell_escape(&format!("{}/", path.trim_end_matches('/')));
+    let script = format!("if [ {dir} -ef / ]; then echo is-root; else echo not-root; fi");
+    format!("sh -c {}", shell_escape(&script))
+}
+
+/// [`root_dir_check`]'s answer; `None` when it gave none.
+fn root_dir_answer(stdout: &str) -> Option<bool> {
+    match (stdout.contains("is-root"), stdout.contains("not-root")) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
 /// The error for a recursive owner, group or mode change whose destination is `/`: it
 /// would change the whole filesystem.
 pub fn root_refusal(path: &str) -> GlideshError {
@@ -1742,6 +1759,34 @@ mod tests {
         let out = place(&tmp, &dest);
         assert!(!out.status.success());
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn the_root_answer_survives_a_pty_and_a_prompt() {
+        assert_eq!(root_dir_answer("Password: \r\nis-root\r\n"), Some(true));
+        assert_eq!(root_dir_answer("not-root\n"), Some(false));
+        assert_eq!(root_dir_answer("sudo: a password is required\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_name_of_root_is_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("root");
+        std::os::unix::fs::symlink("/", &link).unwrap();
+        let answer = |path: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(root_dir_check(path))
+                .output()
+                .unwrap();
+            root_dir_answer(&String::from_utf8_lossy(&out.stdout))
+        };
+        for path in ["/", "//", "", "/tmp/..", "/.", link.to_str().unwrap()] {
+            assert_eq!(answer(path), Some(true), "{path:?}");
+        }
+        assert_eq!(answer(dir.path().to_str().unwrap()), Some(false));
+        assert_eq!(answer("/no/such/dir"), Some(false));
     }
 
     #[test]
