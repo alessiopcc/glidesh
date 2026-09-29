@@ -73,7 +73,11 @@ All files under the local `configs/` directory are uploaded to `/etc/myapp/`, pr
 Recursive copy supports:
 - **Idempotency** — each file is compared by SHA256 checksum; only changed files are uploaded
 - **Template mode** — combine with `template=#true` to interpolate all files in the directory
-- **Attributes** — `owner`, `group`, and `mode` are applied recursively to all files and directories
+- **Attributes** — `owner`, `group`, and `mode` are applied recursively to all files and directories,
+  behind the destination when it is a symlink to a directory too. A symlink inside the tree gets
+  `owner`/`group` itself, never what it points to; `mode` skips it. A copy to `/` — however
+  it is named, `/tmp/..` or a symlink to it too — is refused with any of them, before anything
+  is uploaded: it would change the whole filesystem. Without them, a copy to `/` works.
 
 :::note
 `fetch=#true` and `recurse=#true` cannot be combined.
@@ -103,6 +107,30 @@ file "backups/${@host.name}-dump.sql" {
 | `group` | string | Remote file group |
 | `mode` | string | Remote file permissions (e.g., `"0644"`) |
 | `diff` | boolean | `#false` keeps this task's content out of [`--diff`](#--diff) (default `#true`) |
+
+## Owner and Mode
+
+`owner`, `group`, and `mode` always win. Without them, an upload follows the same rules
+with or without [`run-as`](/advanced/run-as/):
+
+- **A file that already exists** is rewritten in place: it keeps its owner, group, mode
+  and ACL, and every hard link to it sees the new content. Re-uploading a `0755` script
+  keeps it executable. One exception comes from the kernel: setuid/setgid bits are
+  cleared by a write from a user other than root, and by any `owner` or `group` change —
+  set `mode` as well to keep them.
+- **A new file** is created by the user writing it (the login user, or the `run-as`
+  user), so the usual rules apply: that user's group — the directory's group when the
+  directory is setgid — and `0666` minus the umask in effect: `0644` with the usual
+  `022`.
+- **A symlink** is written through: the file it points to gets the new content and
+  keeps its attributes; the link stays a link. `owner`, `group`, and `mode` apply to
+  that file too. With `run-as`, see
+  [Destinations other users control](/advanced/run-as/#destinations-other-users-control).
+- **A new directory** of a recursive copy gets `0777` minus the umask: `0755` usually.
+
+Where the directory has a default ACL, a new file or directory inherits it instead, and
+the umask does not apply. The write is not atomic: a program reading the file while it is
+uploaded can see it partly written.
 
 ## Path Resolution
 
@@ -163,6 +191,10 @@ file that is already in place. Instead of a diff, a one-line note says why none 
   `diff hidden (not readable by other users)`. Matching secrets cannot catch a value the plan
   no longer uses — it is not registered, yet the host's copy still holds it — so a file kept
   private is treated as sensitive whatever it contains.
+- **With `run-as`, a destination another user could redirect**
+  ([the rule](/advanced/run-as/#destinations-other-users-control)): they could swap the
+  checked file for a link to a private one before it is read. `diff not shown (could not
+  read it: …)`, naming the entry; the upload itself is refused for the same reason.
 - **A task written with `diff=#false`**: `diff off for this task (diff=#false)`.
 
 That leaves one case glidesh cannot catch: a world-readable file whose host copy still holds

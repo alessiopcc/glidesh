@@ -24,17 +24,18 @@ pub enum Remote {
     TooLarge(u64),
     /// Other users on the host cannot read it, so it was not downloaded.
     Private,
-    /// The size or mode could not be read, so the file was not downloaded.
+    /// The file could not be inspected, or the read was refused or failed on the host.
     Unreadable(String),
 }
 
 /// Read the destination for a diff, checking its size and mode before downloading it.
 pub async fn fetch_remote(ctx: &ModuleContext<'_>, path: &str) -> Result<Remote, GlideshError> {
     let escaped = shell_escape(path);
-    // BSD stat fallback for macOS targets, as in `get_file_attrs`.
+    // BSD stat fallback for macOS targets, as in `get_file_attrs`. `-L`: a symlink's
+    // own mode is 0777, which would let a private target's content into the diff.
     let out = ctx
         .exec(&format!(
-            "stat -c '%s %a' {escaped} 2>/dev/null || stat -f '%z %Lp' {escaped}"
+            "stat -L -c '%s %a' {escaped} 2>/dev/null || stat -L -f '%z %Lp' {escaped}"
         ))
         .await?;
     let parsed = out
@@ -55,7 +56,14 @@ pub async fn fetch_remote(ctx: &ModuleContext<'_>, path: &str) -> Result<Remote,
     if size > MAX_DIFF_BYTES {
         return Ok(Remote::TooLarge(size));
     }
-    Ok(Remote::Content(ctx.download_file(path).await?))
+    // The read resolves the path again: whoever could swap in a link to a private file
+    // after the `stat` must be refused. A refused read, or one the host fails, only drops
+    // the diff.
+    match ctx.download_trusted(path).await {
+        Ok(content) => Ok(Remote::Content(content)),
+        Err(GlideshError::Module { message, .. }) => Ok(Remote::Unreadable(message)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether the plan's `mode` could leave the file unreadable by other users. Only an octal
@@ -93,7 +101,7 @@ pub fn content_diff(
         Remote::TooLarge(size) => return too_large(path, *size),
         Remote::Private => return hidden_private(path),
         Remote::Unreadable(reason) => {
-            return format!("{path}: diff not shown (could not read its size and mode: {reason})");
+            return format!("{path}: diff not shown (could not read it: {reason})");
         }
         Remote::Content(bytes) => match as_text(bytes) {
             Some(text) => text,
@@ -252,7 +260,7 @@ mod tests {
         );
         assert_eq!(
             diff,
-            "/x: diff not shown (could not read its size and mode: permission denied)"
+            "/x: diff not shown (could not read it: permission denied)"
         );
     }
 

@@ -63,6 +63,12 @@ impl ModuleContext<'_> {
             .await
     }
 
+    pub async fn download_trusted(&self, remote_path: &str) -> Result<Vec<u8>, GlideshError> {
+        self.ssh
+            .download_trusted_as(remote_path, self.run_as.as_ref())
+            .await
+    }
+
     pub async fn checksum_remote(&self, remote_path: &str) -> Result<Option<String>, GlideshError> {
         self.ssh
             .checksum_remote(remote_path, self.run_as.as_ref())
@@ -86,6 +92,14 @@ impl ModuleContext<'_> {
         self.ssh
             .set_file_attrs(path, owner, group, mode, self.run_as.as_ref())
             .await
+    }
+
+    pub async fn is_root_dir(&self, path: &str) -> Result<bool, GlideshError> {
+        self.ssh.is_root_dir_as(path, self.run_as.as_ref()).await
+    }
+
+    pub async fn create_dirs(&self, dirs: &[&str]) -> Result<(), GlideshError> {
+        self.ssh.create_dirs_as(dirs, self.run_as.as_ref()).await
     }
 
     pub async fn set_file_attrs_recursive(
