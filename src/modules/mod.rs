@@ -165,7 +165,7 @@ impl ModuleRegistry {
     ) -> Result<(), crate::error::GlideshError> {
         let mut missing = Vec::new();
         for step in plan.steps() {
-            for task in &step.tasks {
+            for task in step.all_tasks() {
                 // `host` is not in the registry — it's intercepted directly
                 // by NodeRunner and routed through HostCoordinator for
                 // run-once-share-to-all semantics.

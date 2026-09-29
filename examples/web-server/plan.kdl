@@ -10,13 +10,24 @@ plan "web-server" {
         package "nginx" state="present"
     }
 
+    // nginx -t stops a broken config before the restart below loads it. The rescue puts the
+    // previous config back, then still fails the host: the change did not go out.
     step "Deploy nginx config" tags="config" {
+        shell "cp -p /etc/nginx/sites-available/default /etc/nginx/default.previous" changed-when=#false
         file "/etc/nginx/sites-available/default" {
             src "files/nginx.conf"
             template #true
             owner "root"
             group "root"
             mode "0644"
+        }
+        shell "nginx -t" changed-when=#false
+        rescue {
+            shell "mv /etc/nginx/default.previous /etc/nginx/sites-available/default"
+            shell "echo 'nginx -t rejected the new config; the previous one is back' >&2; exit 1"
+        }
+        always {
+            shell "rm -f /etc/nginx/default.previous" changed-when=#false
         }
     }
 

@@ -286,6 +286,18 @@ pub fn interpolate_args(
 mod tests {
     use super::*;
 
+    /// A value that looks like a reference or a loop, such as an error message quoting a
+    /// command, is written as it is: rendering what it holds could fail the task, or loop.
+    #[test]
+    fn a_rendered_value_is_never_expanded_again() {
+        let vars = HashMap::from([(
+            "@error.msg".to_string(),
+            "echo ${secret} ${for x in xs}${x}${endfor}".to_string(),
+        )]);
+        let out = render("failed: ${@error.msg}", &vars, &TemplateData::default()).unwrap();
+        assert_eq!(out, "failed: echo ${secret} ${for x in xs}${x}${endfor}");
+    }
+
     fn refs(content: &str, defined: &[&str]) -> Vec<String> {
         defined_references(content.as_bytes(), |n| defined.contains(&n))
     }

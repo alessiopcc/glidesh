@@ -13,7 +13,8 @@ pub struct RunSummary {
     pub succeeded: usize,
     pub failed: usize,
     pub total_changed: usize,
-    /// Tasks not run because a `when=` was false — a skipped step counts each of its tasks.
+    /// Tasks not run because a `when=` was false — a skipped step counts each of its own and
+    /// `always` tasks.
     pub total_skipped: usize,
     /// Hosts a stopped rolling run never started. Included in `total_hosts`.
     pub aborted: usize,
@@ -65,6 +66,23 @@ pub fn aborted_suffix(aborted: usize) -> String {
         String::new()
     } else {
         format!(", {aborted} aborted")
+    }
+}
+
+/// A step's `rescue` or `always` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Rescue,
+    Always,
+}
+
+impl Section {
+    /// How the block's start reads, in the plain output, the TUI and the run log alike.
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Rescue => "RESCUE",
+            Section::Always => "ALWAYS",
+        }
     }
 }
 
@@ -120,7 +138,8 @@ pub enum ExecutorEvent {
     StepSkipped {
         host: String,
         step: String,
-        /// Tasks in the step, so a renderer can count them without the plan.
+        /// Tasks the step would have run had it succeeded (its own and its `always` tasks), so a
+        /// renderer can count them without the plan.
         tasks: usize,
         reason: String,
     },
@@ -138,6 +157,12 @@ pub enum ExecutorEvent {
         first: bool,
         /// A preview checks the gate once and never waits; this reports it closed.
         preview: bool,
+    },
+    /// A step's `rescue` block starts because the step failed, or its `always` block starts.
+    SectionStarted {
+        host: String,
+        step: String,
+        section: Section,
     },
     /// A task's `when=` did not hold.
     TaskSkipped {

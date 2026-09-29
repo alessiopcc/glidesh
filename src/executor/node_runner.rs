@@ -1,7 +1,7 @@
 use crate::executor::barrier::Seat;
 use crate::executor::event_sink::EventSink;
 use crate::executor::host_coordinator::{HostCoordinator, TaskKey};
-use crate::executor::result::{ExecutorEvent, NodeResult};
+use crate::executor::result::{ExecutorEvent, NodeResult, Section};
 use glidesh::config::condition::{Condition, Outcome, Scope};
 use glidesh::config::tags::TagFilter;
 use glidesh::config::template::{TemplateData, interpolate_args};
@@ -112,6 +112,70 @@ fn inject_loop_item(vars: &mut HashMap<String, String>, item: &LoopItem) -> Vec<
             keys
         }
     }
+}
+
+/// Why a step failed, as its `rescue` and `always` tasks see it.
+#[derive(Debug, PartialEq)]
+struct Failure {
+    /// The task that failed, as `module 'resource'`; empty when the step failed outside its
+    /// tasks, in its `until=` gate or its loop.
+    task: String,
+    message: String,
+}
+
+impl Failure {
+    const MSG: &str = "@error.msg";
+    const TASK: &str = "@error.task";
+
+    fn in_task(module: &str, resource: &str, message: impl Into<String>) -> Self {
+        Failure {
+            task: format!("{module} '{resource}'"),
+            message: message.into(),
+        }
+    }
+
+    fn in_step(message: impl Into<String>) -> Self {
+        Failure {
+            task: String::new(),
+            message: message.into(),
+        }
+    }
+
+    /// Bind `${@error.msg}` and `${@error.task}` for the step's `rescue` and `always` tasks.
+    ///
+    /// Both are passed through `redact` first. The error is raw executor text — a command
+    /// line with its variables interpolated, and the command's output — so it can hold a
+    /// decrypted secret, and a rescue that writes it to a file or sends it on would otherwise
+    /// store in plaintext what every log shows as `***`.
+    fn expose(&self, vars: &mut HashMap<String, String>, redact: impl Fn(&str) -> String) {
+        vars.insert(Self::MSG.to_string(), redact(&self.message));
+        vars.insert(Self::TASK.to_string(), redact(&self.task));
+    }
+
+    /// For a preview whose step did not fail: the real run might, so whether the variables
+    /// are defined is not known.
+    fn unknown(progress: &mut Progress) {
+        progress.unknown.insert(Self::MSG.to_string());
+        progress.unknown.insert(Self::TASK.to_string());
+    }
+
+    /// Unbind them once the step is over, so no later step sees a failure it did not have.
+    fn withdraw(vars: &mut HashMap<String, String>, progress: &mut Progress) {
+        for name in [Self::MSG, Self::TASK] {
+            vars.remove(name);
+            progress.unknown.remove(name);
+        }
+    }
+}
+
+/// What every task of one step runs against.
+struct StepRun<'a> {
+    step: &'a Step,
+    step_idx: usize,
+    template_data: &'a TemplateData,
+    session: &'a SshSession,
+    os_info: &'a OsInfo,
+    trigger: Trigger,
 }
 
 pub struct NodeRunner {
@@ -544,14 +608,16 @@ impl NodeRunner {
             match decision {
                 Ok(Gate::Run) => {}
                 Ok(Gate::Skip { reason, decided }) => {
+                    // What a run that succeeds would have run: `rescue` tasks never run then.
+                    let tasks = step.tasks.len() + step.always.len();
                     let _ = self.event_tx.send(ExecutorEvent::StepSkipped {
                         host: self.host.name.clone(),
                         step: step.name.clone(),
-                        tasks: step.tasks.len(),
+                        tasks,
                         reason,
                     });
-                    progress.skipped += step.tasks.len();
-                    for name in step.tasks.iter().filter_map(|t| t.register.as_deref()) {
+                    progress.skipped += tasks;
+                    for name in step.all_tasks().filter_map(|t| t.register.as_deref()) {
                         progress.skip_register(&mut vars, name, decided);
                     }
                     step_changed.insert(step.name.clone(), false);
@@ -564,80 +630,74 @@ impl NodeRunner {
                 }
             }
 
-            if let Some(gate) = &step.until {
-                if let Err(error) = self.wait_for_gate(step, gate, &vars, &session).await {
-                    self.emit_step_error(&step.name, &error);
-                    let _ = session.close().await;
-                    return Ok(self.finish(false, &progress));
+            let run = StepRun {
+                step,
+                step_idx,
+                template_data: &template_data,
+                session: &session,
+                os_info: &os_info,
+                trigger,
+            };
+            let mut changed = false;
+            let mut failure = self
+                .run_step_body(&run, &mut vars, &mut progress, &mut changed)
+                .await
+                .err();
+            match &failure {
+                Some(failed) => {
+                    let secrets = self.secrets.registry();
+                    failed.expose(&mut vars, |text| secrets.redact(text));
+                }
+                None if self.dry_run => Failure::unknown(&mut progress),
+                None => {}
+            }
+
+            if !step.rescue.is_empty() {
+                if failure.is_some() {
+                    self.send_section(step, Section::Rescue);
+                    failure = self
+                        .run_step_tasks(
+                            &run,
+                            &step.rescue,
+                            step.tasks.len(),
+                            0,
+                            &mut vars,
+                            &mut progress,
+                            &mut changed,
+                        )
+                        .await
+                        .err();
+                } else {
+                    // Undefined, as a skipped task leaves it, so a later `defined` asks whether
+                    // the rescue ran. A preview cannot know whether the real run will fail,
+                    // so there neither the value nor its presence is known.
+                    for name in step.rescue.iter().filter_map(|t| t.register.as_deref()) {
+                        progress.skip_register(&mut vars, name, !self.dry_run);
+                    }
                 }
             }
 
-            match &step.loop_source {
-                None => {
-                    match self
-                        .run_step_tasks(
-                            step,
-                            step_idx,
-                            0,
-                            &mut vars,
-                            &template_data,
-                            &session,
-                            &os_info,
-                            &mut progress,
-                            trigger,
-                        )
-                        .await
-                    {
-                        Ok(changed) => {
-                            step_changed.insert(step.name.clone(), changed);
-                        }
-                        Err(_) => {
-                            let _ = session.close().await;
-                            return Ok(self.finish(false, &progress));
-                        }
-                    }
-                }
-                Some(loop_source) => {
-                    let items = match resolve_loop_items(loop_source, &vars, &template_data) {
-                        Ok(items) => items,
-                        Err(error) => {
-                            self.emit_step_error(&step.name, &error);
-                            let _ = session.close().await;
-                            return Ok(self.finish(false, &progress));
-                        }
-                    };
+            if !step.always.is_empty() {
+                self.send_section(step, Section::Always);
+                let always = self
+                    .run_step_tasks(
+                        &run,
+                        &step.always,
+                        step.tasks.len() + step.rescue.len(),
+                        0,
+                        &mut vars,
+                        &mut progress,
+                        &mut changed,
+                    )
+                    .await;
+                failure = failure.or(always.err());
+            }
 
-                    let mut any_iteration_changed = false;
-                    for (iter_idx, item) in items.iter().enumerate() {
-                        let injected = inject_loop_item(&mut vars, item);
-                        let result = self
-                            .run_step_tasks(
-                                step,
-                                step_idx,
-                                iter_idx,
-                                &mut vars,
-                                &template_data,
-                                &session,
-                                &os_info,
-                                &mut progress,
-                                trigger,
-                            )
-                            .await;
-                        for key in &injected {
-                            vars.remove(key);
-                        }
-                        match result {
-                            Ok(changed) => {
-                                any_iteration_changed |= changed;
-                            }
-                            Err(_) => {
-                                let _ = session.close().await;
-                                return Ok(self.finish(false, &progress));
-                            }
-                        }
-                    }
-                    step_changed.insert(step.name.clone(), any_iteration_changed);
-                }
+            Failure::withdraw(&mut vars, &mut progress);
+            step_changed.insert(step.name.clone(), changed);
+            if failure.is_some() {
+                let _ = session.close().await;
+                return Ok(self.finish(false, &progress));
             }
         }
 
@@ -820,16 +880,17 @@ impl NodeRunner {
     /// Interpolate a task's args and resource, decrypt any inline secret tokens, and apply
     /// the empty-resource `cmd` fallback — the assembly shared by [`Self::run_step_tasks`]
     /// and [`Self::run_host_task`]. On failure, emits the task-error event and returns the
-    /// `(step name, message)` the task loop propagates.
+    /// failure the task loop propagates.
     fn build_params(
         &self,
-        step: &Step,
         task: &TaskDef,
         vars: &HashMap<String, String>,
-    ) -> Result<ModuleParams, (String, String)> {
-        let fail = |e: GlideshError| -> (String, String) {
-            self.emit_task_error(&task.module, &task.resource, &e.to_string());
-            (step.name.clone(), e.to_string())
+    ) -> Result<ModuleParams, Failure> {
+        // As written: a `cmd` given as a child node leaves the resource empty until the
+        // fallback below, which a failure here never reaches.
+        let fail = |e: GlideshError| -> Failure {
+            self.emit_task_error(&task.module, &raw_resource(task), &e.to_string());
+            Failure::in_task(&task.module, &raw_resource(task), e.to_string())
         };
 
         let mut args = interpolate_args(&task.args, vars).map_err(fail)?;
@@ -854,27 +915,74 @@ impl NodeRunner {
         })
     }
 
+    /// A step's `until=` gate, then its tasks, once or for each item of its loop: the part
+    /// of the step that `rescue` covers.
+    async fn run_step_body(
+        &self,
+        run: &StepRun<'_>,
+        vars: &mut HashMap<String, String>,
+        progress: &mut Progress,
+        changed: &mut bool,
+    ) -> Result<(), Failure> {
+        let step = run.step;
+        let step_failed = |error: String| {
+            self.emit_step_error(&step.name, &error);
+            Failure::in_step(error)
+        };
+        if let Some(gate) = &step.until {
+            self.wait_for_gate(step, gate, vars, run.session)
+                .await
+                .map_err(step_failed)?;
+        }
+        let Some(loop_source) = &step.loop_source else {
+            return self
+                .run_step_tasks(run, &step.tasks, 0, 0, vars, progress, changed)
+                .await;
+        };
+        let items =
+            resolve_loop_items(loop_source, vars, run.template_data).map_err(step_failed)?;
+        for (iter_idx, item) in items.iter().enumerate() {
+            let injected = inject_loop_item(vars, item);
+            let result = self
+                .run_step_tasks(run, &step.tasks, 0, iter_idx, vars, progress, changed)
+                .await;
+            for key in &injected {
+                vars.remove(key);
+            }
+            result?;
+        }
+        Ok(())
+    }
+
+    fn send_section(&self, step: &Step, section: Section) {
+        let _ = self.event_tx.send(ExecutorEvent::SectionStarted {
+            host: self.host.name.clone(),
+            step: step.name.clone(),
+            section,
+        });
+    }
+
+    /// Run `tasks` — a step's own, or its `rescue` or `always` block. `first_task` is where
+    /// they start among all the step's tasks, which keeps each `host` task's run-once key
+    /// distinct.
     #[allow(clippy::too_many_arguments)]
     async fn run_step_tasks(
         &self,
-        step: &Step,
-        step_idx: usize,
+        run: &StepRun<'_>,
+        tasks: &[TaskDef],
+        first_task: usize,
         loop_iter: usize,
         vars: &mut HashMap<String, String>,
-        template_data: &TemplateData,
-        session: &SshSession,
-        os_info: &OsInfo,
         progress: &mut Progress,
-        trigger: Trigger,
-    ) -> Result<bool, (String, String)> {
-        let mut any_changed = false;
-
-        for (task_idx, task) in step.tasks.iter().enumerate() {
+        changed: &mut bool,
+    ) -> Result<(), Failure> {
+        let step = run.step;
+        for (task_idx, task) in tasks.iter().enumerate() {
             // Ahead of the `host` branch, so a host that skips a `host` task never joins its
             // run-once cell; the hosts that do still share the single execution.
             let scope = Scope {
                 vars,
-                collections: &template_data.collections,
+                collections: &run.template_data.collections,
                 unknown: &progress.unknown,
             };
             match gate(task.when.as_ref(), &scope) {
@@ -894,15 +1002,17 @@ impl NodeRunner {
                 }
                 Err(error) => {
                     self.emit_task_error(&task.module, &raw_resource(task), &error);
-                    return Err((step.name.clone(), error));
+                    return Err(Failure::in_task(&task.module, &raw_resource(task), error));
                 }
             }
 
             if task.module == host_module::MODULE_NAME {
-                let changed = self
-                    .run_host_task(step, step_idx, task_idx, loop_iter, task, vars, progress)
-                    .await?;
-                any_changed |= changed;
+                let key = TaskKey {
+                    step_idx: run.step_idx,
+                    task_idx: first_task + task_idx,
+                    loop_iter,
+                };
+                *changed |= self.run_host_task(key, task, vars, progress).await?;
                 continue;
             }
 
@@ -910,12 +1020,14 @@ impl NodeRunner {
                 Some(m) => m,
                 None => {
                     let error = format!("Unknown module: {}", task.module);
-                    self.emit_task_error(&task.module, &task.resource, &error);
-                    return Err((step.name.clone(), error));
+                    self.emit_task_error(&task.module, &raw_resource(task), &error);
+                    return Err(Failure::in_task(&task.module, &raw_resource(task), error));
                 }
             };
 
-            let params = self.build_params(step, task, vars)?;
+            let params = self.build_params(task, vars)?;
+            let failed =
+                |error: String| Failure::in_task(&task.module, &params.resource_name, error);
 
             // Escalation precedence: module > step > plan > host (host already
             // carries group/global/CLI defaults merged during target resolution).
@@ -928,16 +1040,16 @@ impl NodeRunner {
                 .resolve(glidesh::modules::escalation::password());
 
             let ctx = ModuleContext {
-                ssh: session,
-                os_info,
+                ssh: run.session,
+                os_info: run.os_info,
                 vars,
-                template_data,
+                template_data: run.template_data,
                 dry_run: self.dry_run,
                 diff: self.diff,
                 plan_base_dir: step.base_dir(&self.plan_base_dir),
                 run_as,
                 secrets: Some(self.secrets.registry()),
-                trigger,
+                trigger: run.trigger,
             };
 
             let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
@@ -955,7 +1067,7 @@ impl NodeRunner {
                         resource: params.resource_name.clone(),
                         error: e.to_string(),
                     });
-                    return Err((step.name.clone(), e.to_string()));
+                    return Err(failed(e.to_string()));
                 }
             };
 
@@ -973,12 +1085,12 @@ impl NodeRunner {
             if should_apply {
                 match module.apply(&ctx, &params).await {
                     Ok(result) => {
-                        let changed =
+                        let task_changed =
                             resolve_changed(self.dry_run, pending_plan.is_some(), result.changed)
                                 && !never_changes(task);
-                        if changed {
+                        if task_changed {
                             progress.changed += 1;
-                            any_changed = true;
+                            *changed = true;
                         }
                         if let Some(ref var_name) = task.register {
                             let value = match captured_output(
@@ -994,7 +1106,7 @@ impl NodeRunner {
                                         resource: params.resource_name.clone(),
                                         error: error.clone(),
                                     });
-                                    return Err((step.name.clone(), error));
+                                    return Err(failed(error));
                                 }
                             };
                             progress.register(vars, var_name, value, !self.dry_run);
@@ -1011,7 +1123,7 @@ impl NodeRunner {
                             host: self.host.name.clone(),
                             module: task.module.clone(),
                             resource: params.resource_name.clone(),
-                            changed,
+                            changed: task_changed,
                             dry_run: self.dry_run,
                             stdout,
                             stderr: result.stderr.clone(),
@@ -1025,7 +1137,7 @@ impl NodeRunner {
                             resource: params.resource_name.clone(),
                             error: e.to_string(),
                         });
-                        return Err((step.name.clone(), e.to_string()));
+                        return Err(failed(e.to_string()));
                     }
                 }
             } else {
@@ -1059,21 +1171,17 @@ impl NodeRunner {
                 }
             }
         }
-        Ok(any_changed)
+        Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn run_host_task(
         &self,
-        step: &Step,
-        step_idx: usize,
-        task_idx: usize,
-        loop_iter: usize,
+        key: TaskKey,
         task: &TaskDef,
         vars: &mut HashMap<String, String>,
         progress: &mut Progress,
-    ) -> Result<bool, (String, String)> {
-        let params = self.build_params(step, task, vars)?;
+    ) -> Result<bool, Failure> {
+        let params = self.build_params(task, vars)?;
         let resource_name = params.resource_name.clone();
 
         let _ = self.event_tx.send(ExecutorEvent::ModuleCheck {
@@ -1081,12 +1189,6 @@ impl NodeRunner {
             module: task.module.clone(),
             resource: resource_name.clone(),
         });
-
-        let key = TaskKey {
-            step_idx,
-            task_idx,
-            loop_iter,
-        };
 
         let targets = self.all_targets.clone();
         let ssh_key = self.key.clone();
@@ -1134,10 +1236,10 @@ impl NodeRunner {
                 let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
                     host: self.host.name.clone(),
                     module: task.module.clone(),
-                    resource: resource_name,
+                    resource: resource_name.clone(),
                     error: msg.clone(),
                 });
-                Err((step.name.clone(), msg))
+                Err(Failure::in_task(&task.module, &resource_name, msg))
             }
         }
     }
@@ -1414,6 +1516,66 @@ mod tests {
             resolve_loop_items(&LoopSource::Variable("disks".to_string()), &vars, &td).unwrap();
         assert_eq!(items.len(), 2);
         assert!(matches!(&items[0], LoopItem::Flat(s) if s == "sda"));
+    }
+
+    #[test]
+    fn a_failure_is_readable_only_until_its_step_ends() {
+        let mut vars = strings(&[("x", "1")]);
+        Failure::in_task("shell", "deploy.sh", "exit code 3").expose(&mut vars, str::to_string);
+        assert_eq!(vars["@error.msg"], "exit code 3");
+        assert_eq!(vars["@error.task"], "shell 'deploy.sh'");
+        let mut progress = Progress::default();
+        Failure::withdraw(&mut vars, &mut progress);
+        assert_eq!(vars, strings(&[("x", "1")]));
+    }
+
+    #[test]
+    fn a_failure_is_redacted_before_a_rescue_can_read_it() {
+        let mut vars = HashMap::new();
+        Failure::in_task("shell", "login -p hunter2", "denied for hunter2")
+            .expose(&mut vars, |text| text.replace("hunter2", "***"));
+        assert_eq!(vars["@error.task"], "shell 'login -p ***'");
+        assert_eq!(vars["@error.msg"], "denied for ***");
+    }
+
+    /// A preview that did not fail cannot tell `always` whether the real run will: a
+    /// `defined` test on the failure is undetermined, and ending the step settles it.
+    #[test]
+    fn a_preview_without_a_failure_leaves_the_failure_unknown_until_the_step_ends() {
+        let mut vars = HashMap::new();
+        let mut progress = Progress::default();
+        Failure::unknown(&mut progress);
+        let collections = HashMap::new();
+        let decide = |vars: &HashMap<String, String>, progress: &Progress| {
+            gate(
+                Some(&cond("defined ${@error.msg}")),
+                &Scope {
+                    vars,
+                    collections: &collections,
+                    unknown: &progress.unknown,
+                },
+            )
+        };
+        assert!(matches!(
+            decide(&vars, &progress),
+            Ok(Gate::Skip { decided: false, .. })
+        ));
+        Failure::withdraw(&mut vars, &mut progress);
+        assert!(progress.unknown.is_empty());
+        assert!(matches!(
+            decide(&vars, &progress),
+            Ok(Gate::Skip { decided: true, .. })
+        ));
+    }
+
+    /// Outside a task (the `until=` gate, the loop) there is no task to name, but the
+    /// variable is still defined, so a reference to it cannot fail the rescue.
+    #[test]
+    fn a_step_failure_names_no_task() {
+        let mut vars = HashMap::new();
+        Failure::in_step("until=: timed out").expose(&mut vars, str::to_string);
+        assert_eq!(vars["@error.task"], "");
+        assert_eq!(vars["@error.msg"], "until=: timed out");
     }
 
     #[test]

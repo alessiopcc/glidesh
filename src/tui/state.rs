@@ -277,6 +277,13 @@ impl TuiState {
                     ),
                 );
             }
+            ExecutorEvent::SectionStarted {
+                host,
+                step,
+                section,
+            } => {
+                self.push_node_log(host, format!("  {} step '{}'", section.label(), step));
+            }
             ExecutorEvent::TaskSkipped {
                 host,
                 module,
@@ -519,7 +526,7 @@ impl TuiState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::result::RunSummary;
+    use crate::executor::result::{RunSummary, Section};
 
     fn state() -> TuiState {
         state_for(false)
@@ -670,6 +677,22 @@ mod tests {
         assert_eq!(
             s.nodes[0].log_lines[1],
             "  SKIPPED shell 'uptime': when: ${y}"
+        );
+    }
+
+    #[test]
+    fn rescue_and_always_are_shown_in_the_host_log() {
+        let mut s = state();
+        for section in [Section::Rescue, Section::Always] {
+            s.handle_event(&ExecutorEvent::SectionStarted {
+                host: "web-1".to_string(),
+                step: "Deploy".to_string(),
+                section,
+            });
+        }
+        assert_eq!(
+            s.nodes[0].log_lines,
+            ["  RESCUE step 'Deploy'", "  ALWAYS step 'Deploy'"]
         );
     }
 

@@ -729,6 +729,19 @@ fn event_lines(
                 executor::waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
             )],
         ),
+        ExecutorEvent::SectionStarted {
+            host,
+            step,
+            section,
+        } => (
+            OutStream::Out,
+            vec![format!(
+                "[{}]   {} step '{}'",
+                display_id(host, display_ids),
+                section.label(),
+                step
+            )],
+        ),
         ExecutorEvent::TaskSkipped {
             host,
             module,
@@ -989,6 +1002,9 @@ fn validate_plan_file(
     check
         .problems
         .extend(config::checks::missing_file_sources(&plan, plan_dir));
+    check
+        .problems
+        .extend(config::checks::template_scope_problems(&plan, plan_dir));
     check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, |name| {
         plan.vars.contains_key(name) || known_vars.contains(name) || is_builtin_var(name)
     });
@@ -997,7 +1013,7 @@ fn validate_plan_file(
 
 /// A name in a namespace glidesh injects at run time, whatever the host.
 fn is_builtin_var(name: &str) -> bool {
-    ["@host.", "@os.", "@inventory.", "@item."]
+    ["@host.", "@os.", "@inventory.", "@item.", "@error."]
         .iter()
         .any(|prefix| name.starts_with(prefix))
         || name == "@item"
@@ -1682,6 +1698,7 @@ fn expand_tilde(path: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use executor::result::Section;
 
     fn no_display_ids() -> std::collections::HashMap<String, String> {
         std::collections::HashMap::new()
@@ -1808,6 +1825,25 @@ mod tests {
             &no_display_ids(),
         );
         assert_eq!(lines, ["[web-1]   skipped (when: ${x})"]);
+    }
+
+    #[test]
+    fn rescue_and_always_are_announced_before_their_tasks() {
+        for (section, expected) in [
+            (Section::Rescue, "[web-1]   RESCUE step 'Deploy'"),
+            (Section::Always, "[web-1]   ALWAYS step 'Deploy'"),
+        ] {
+            let (stream, lines) = event_lines(
+                &ExecutorEvent::SectionStarted {
+                    host: "web-1".to_string(),
+                    step: "Deploy".to_string(),
+                    section,
+                },
+                &no_display_ids(),
+            );
+            assert_eq!(stream, OutStream::Out);
+            assert_eq!(lines, [expected]);
+        }
     }
 
     #[test]

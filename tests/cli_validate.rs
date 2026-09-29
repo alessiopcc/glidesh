@@ -38,6 +38,29 @@ fn a_valid_plan_passes() {
     assert!(out.contains("OK (1 steps)"), "{out}");
 }
 
+/// The template is only rendered when the task runs; validate reads it now.
+#[test]
+fn a_template_reading_a_variable_its_block_never_has_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "failure.txt", "${@error.msg}");
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" { file "/var/log/f" src="failure.txt" template=#true } }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(!ok, "{out}");
+    assert!(out.contains("uses ${@error.msg}"), "{out}");
+
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" { shell "false"; rescue { file "/var/log/f" src="failure.txt" template=#true } } }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(ok, "a rescue may read the failure:\n{out}");
+}
+
 #[test]
 fn an_unknown_module_fails() {
     let dir = tempfile::tempdir().unwrap();

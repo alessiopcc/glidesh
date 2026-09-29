@@ -101,6 +101,10 @@ Any other attribute on a step is an error, so a misspelling such as `wehn=` is c
 
 Tasks accept `when`, `register` and `run-as` / `run-as-method` in addition to their module's own parameters.
 
+A failing step stops its host. Beside its tasks, a step can hold a `rescue { }` block that runs
+if it fails — and lets the host go on if it succeeds — and an `always { }` block that runs
+either way. See [Rescue & Always](/advanced/rescue/).
+
 ## Path Resolution
 
 All relative paths in a plan are resolved **relative to the plan file's directory**. This applies to:
