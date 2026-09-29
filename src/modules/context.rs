@@ -94,6 +94,10 @@ impl ModuleContext<'_> {
             .await
     }
 
+    pub async fn is_root_dir(&self, path: &str) -> Result<bool, GlideshError> {
+        self.ssh.is_root_dir_as(path, self.run_as.as_ref()).await
+    }
+
     pub async fn create_dirs(&self, dirs: &[&str]) -> Result<(), GlideshError> {
         self.ssh.create_dirs_as(dirs, self.run_as.as_ref()).await
     }

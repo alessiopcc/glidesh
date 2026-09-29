@@ -56,10 +56,9 @@ pub async fn fetch_remote(ctx: &ModuleContext<'_>, path: &str) -> Result<Remote,
     if size > MAX_DIFF_BYTES {
         return Ok(Remote::TooLarge(size));
     }
-    // Escalated, the path is re-resolved by the read: another user able to swap it for a
-    // link to a private file after the `stat` would get that file into the diff, so the
-    // read refuses such a path. That refusal, like a read the host fails, only drops the
-    // diff; a lost connection or a denied escalation still fails the check.
+    // The read resolves the path again: whoever could swap in a link to a private file
+    // after the `stat` must be refused. A refused read, or one the host fails, only drops
+    // the diff.
     match ctx.download_trusted(path).await {
         Ok(content) => Ok(Remote::Content(content)),
         Err(GlideshError::Module { message, .. }) => Ok(Remote::Unreadable(message)),

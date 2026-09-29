@@ -574,8 +574,7 @@ async fn test_run_as_recursive_owner_does_not_follow_a_link_in_the_tree() {
     );
     FileModule.apply(&ctx, &params).await.unwrap();
 
-    // `chown -R` over the tree reaches the planted link; it must change the link only.
-    // GNU already does; this guards against a `chown` that dereferences (busybox).
+    // GNU `chown -R` already spares the target; busybox needs `-h`.
     assert_eq!(stat(&root, "/etc/glidesh-rvictim").await, "644 root:root");
     assert_eq!(
         stat(&root, "/srv/glidesh-rtree/app.conf").await,
@@ -718,7 +717,6 @@ async fn test_run_as_recursive_owner_through_a_symlinked_destination() {
     );
     FileModule.apply(&ctx, &params).await.unwrap();
 
-    // The tree behind the link gets the owner, not just the link itself.
     assert_eq!(
         stat(&root, "/srv/glidesh-realtree/sub/app.conf").await,
         "644 nobody:root"
@@ -764,4 +762,63 @@ async fn test_run_as_recursive_attributes_on_root_are_refused_before_uploading()
         .await
         .unwrap();
     assert_eq!(uploaded.stdout.trim(), "");
+}
+
+#[tokio::test]
+async fn test_run_as_recursive_attributes_on_an_alias_of_root_are_refused() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("ln -s / /srv/glidesh-rootlink").await.unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("glidesh-alias.conf"), b"x").unwrap();
+    for dest in ["/tmp/..", "/.", "/srv/glidesh-rootlink"] {
+        let params = upload_params(
+            src.path(),
+            dest,
+            &[
+                ("recurse", ParamValue::Bool(true)),
+                ("mode", ParamValue::String("0700".to_string())),
+            ],
+        );
+        let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+        assert!(
+            err.to_string().contains("recursively on /"),
+            "{dest}: unexpected error: {err}"
+        );
+    }
+
+    assert_eq!(stat(&root, "/").await, "755 root:root");
+    let uploaded = root
+        .exec("test -e /glidesh-alias.conf && echo yes")
+        .await
+        .unwrap();
+    assert_eq!(uploaded.stdout.trim(), "", "refused before uploading");
+}
+
+#[tokio::test]
+async fn test_run_as_recursive_copy_to_root_without_attributes_works() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("glidesh-top.conf"), b"top").unwrap();
+    let params = upload_params(src.path(), "/", &[("recurse", ParamValue::Bool(true))]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let root = container.ssh_session().await;
+    let content = root.exec("cat /glidesh-top.conf").await.unwrap();
+    assert_eq!(content.stdout, "top");
 }

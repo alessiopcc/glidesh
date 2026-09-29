@@ -626,6 +626,21 @@ impl SshSession {
         Ok(())
     }
 
+    /// Whether `path` is the host's `/` once resolved there — literally, as `/tmp/..` or
+    /// `/.`, or through a symlink. A path that does not exist is not.
+    pub async fn is_root_dir_as(
+        &self,
+        path: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<bool, GlideshError> {
+        let dir = shell_escape(&format!("{}/", path.trim_end_matches('/')));
+        let script = format!("cd {dir} 2>/dev/null && pwd -P");
+        let out = self
+            .exec_as(&format!("sh -c {}", shell_escape(&script)), run_as)
+            .await?;
+        Ok(out.exit_code == 0 && out.stdout.trim_end_matches('\n') == "/")
+    }
+
     /// `mkdir -p` each of `dirs`; escalated, only once [`trusted_paths`] holds for them,
     /// since `mkdir -p` follows symlinks on the way.
     pub async fn create_dirs_as(
@@ -823,11 +838,9 @@ impl SshSession {
         result
     }
 
-    /// A private (`0700`) directory holding an empty `content` file (`0600`), both the
-    /// login user's, for a download to be staged in. Not a file straight in `/tmp`: in a
-    /// sticky world-writable directory `fs.protected_regular` (enabled by default under
-    /// systemd) refuses even root an `O_CREAT` open of another user's file, which a
-    /// shell's `>` is.
+    /// A private directory holding an empty `0600` `content` file, both the login user's,
+    /// to stage a download in. Not a file straight in `/tmp`: there `fs.protected_regular`
+    /// (enabled by default under systemd) refuses even root a `>` into another user's file.
     async fn mktemp_dir_remote(&self) -> Result<String, GlideshError> {
         // An explicit `sh`: the login shell may not be POSIX. A failure after `mktemp -d`
         // removes the directory here, since the caller never learns its path.
@@ -1039,13 +1052,8 @@ printf '%s' "$d""#;
     ) -> Result<(), GlideshError> {
         let changes = owner.is_some() || group.is_some() || mode.is_some();
         let root = path.trim_end_matches('/');
-        if changes && root.is_empty() {
-            return Err(GlideshError::Module {
-                module: "file".to_string(),
-                message: format!(
-                    "refusing to change owner, group or mode recursively on / (destination {path:?})"
-                ),
-            });
+        if changes && self.is_root_dir_as(path, run_as).await? {
+            return Err(root_refusal(path));
         }
         // The trailing slash resolves a root that is a symlink to the directory it points
         // to, as uploads through it do; `-h` would otherwise change only that link.
@@ -1054,9 +1062,8 @@ printf '%s' "$d""#;
             self.ensure_trusted_destination(path, r).await?;
         }
 
-        // The guard covers the tree's root, not what else lies inside it: `-h` changes a
-        // symlink found in the tree, never what it points to. GNU `chown -R` already
-        // does; busybox follows it without `-h`. `chmod -R` skips symlinks in both.
+        // `-h`: the guard covered the root only, and busybox `chown -R` follows a symlink
+        // inside the tree without it.
         match (owner, group) {
             (Some(o), Some(g)) => {
                 let output = self
@@ -1361,6 +1368,17 @@ fn place_staged_upload(tmp: &str, dest: &str, login_uid: &str) -> String {
     )
 }
 
+/// The error for a recursive owner, group or mode change whose destination is `/`: it
+/// would change the whole filesystem.
+pub fn root_refusal(path: &str) -> GlideshError {
+    GlideshError::Module {
+        module: "file".to_string(),
+        message: format!(
+            "refusing to change owner, group or mode recursively on / (destination {path:?})"
+        ),
+    }
+}
+
 /// `then`, run by `sh` once [`trusted_paths`] holds for every one of `targets`. An
 /// explicit `sh`, because `su` runs a command in the target's login shell, and zsh reads
 /// `0777` as decimal.
@@ -1381,11 +1399,10 @@ fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
 /// applied whether that sysctl is on or not:
 ///
 /// - a directory must not be writable by others, nor by a group other than root's, nor
-///   carry an ACL that may let others write: on Linux a POSIX ACL while group-writable
-///   (the group bits then show the ACL mask), on macOS/BSD an NFSv4 entry allowing
-///   `add_file`, `add_subdirectory`, `delete_child`, `writesecurity` or `chown`, which the
-///   mode bits do not show — or one that cannot be read. Not every ACL: macOS homes carry
-///   `everyone deny delete`;
+///   carry an ACL that may grant writing: on Linux one on a group-writable directory
+///   (the group bits show its mask); on macOS/BSD, where the mode bits do not show it, an
+///   entry allowing `add_file`, `add_subdirectory`, `delete_child`, `writesecurity` or
+///   `chown`, or an unreadable one — not any ACL, as macOS homes carry a deny entry;
 /// - a sticky directory writable by others (`/tmp`) is accepted above an existing
 ///   directory or link, which others cannot rename there. Not above a file or a missing
 ///   entry, which anyone could create first — a link, or a hard link to a root file;
@@ -1395,7 +1412,6 @@ fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
 /// Paths are read with `echo .` appended, since `$(…)` strips trailing newlines, which a
 /// name may end in.
 fn trusted_paths(targets: &[&str], login_uid: &str) -> String {
-    // A raw template: the script's own braces and quotes need no escaping.
     const SCRIPT: &str = r#"u=$(id -u)
 fail() { echo "$*" >&2; exit 1; }
 trusted() { [ "$1" = 0 ] || [ "$1" = "$u" ] || [ "$1" = LOGIN ]; }
@@ -1631,7 +1647,6 @@ mod tests {
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
 
         refused(&trusted(&shared.join("app.conf")), "other users can write");
-        // Deeper down too, and for a directory about to be created.
         refused(
             &trusted(&shared.join("new/app.conf")),
             "other users can write",
@@ -1690,12 +1705,10 @@ mod tests {
         let safe = dir.path().join("safe");
         std::fs::create_dir(&safe).unwrap();
 
-        // The link itself sits in a trusted directory, but what it resolves to does not.
         let link = safe.join("app.conf");
         std::os::unix::fs::symlink(shared.join("app.conf"), &link).unwrap();
         refused(&trusted(&link), "other users can write");
 
-        // And through a symlinked directory on the way.
         let via = safe.join("via");
         std::os::unix::fs::symlink(&shared, &via).unwrap();
         refused(&trusted(&via.join("app.conf")), "other users can write");

@@ -647,12 +647,10 @@ impl FileModule {
         let group = params.args.get("group").and_then(|v| v.as_str());
         let mode = params.args.get("mode").and_then(|v| v.as_str());
         let attrs_changed = owner.is_some() || group.is_some() || mode.is_some();
-        // Refused before anything is uploaded, rather than by the attribute change after.
-        if attrs_changed && dest_trimmed.is_empty() {
-            return Err(GlideshError::Module {
-                module: "file".to_string(),
-                message: "refusing to change owner, group or mode recursively on /".to_string(),
-            });
+        // Refused before anything is uploaded, rather than by the attribute change after;
+        // asked of the host, since `/tmp/..` or a symlink can name `/` too.
+        if attrs_changed && ctx.is_root_dir(dest_trimmed).await? {
+            return Err(crate::ssh::connection::root_refusal(dest));
         }
         let mut uploaded = 0usize;
 
@@ -672,7 +670,12 @@ impl FileModule {
         remote_dirs.sort();
         remote_dirs.dedup();
 
-        let dirs: Vec<&str> = remote_dirs.iter().map(String::as_str).collect();
+        // A copy to `/` names its top level as "", which `mkdir -p` rejects; `/` exists.
+        let dirs: Vec<&str> = remote_dirs
+            .iter()
+            .map(String::as_str)
+            .filter(|d| !d.is_empty())
+            .collect();
         ctx.create_dirs(&dirs).await?;
 
         for rel_path in &local_files {
