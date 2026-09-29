@@ -163,6 +163,8 @@ pub struct SshSession {
     host: String,
     _jump_handle: tokio::sync::Mutex<Option<client::Handle<SshHandler>>>,
     forward_registry: ForwardRegistry,
+    /// The login user's uid, read once: [`trusted_paths`] trusts it.
+    login_uid: tokio::sync::OnceCell<String>,
 }
 
 impl SshSession {
@@ -221,6 +223,7 @@ impl SshSession {
             host: host.to_string(),
             _jump_handle: tokio::sync::Mutex::new(None),
             forward_registry,
+            login_uid: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -346,6 +349,7 @@ impl SshSession {
             host: host.to_string(),
             _jump_handle: tokio::sync::Mutex::new(Some(jump_handle)),
             forward_registry,
+            login_uid: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -587,6 +591,72 @@ impl SshSession {
         Ok(path)
     }
 
+    async fn login_uid(&self) -> Result<&str, GlideshError> {
+        self.login_uid
+            .get_or_try_init(|| async {
+                let out = self.exec("id -u").await?;
+                let uid = out.stdout.trim();
+                if out.exit_code != 0 || uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return Err(GlideshError::SshChannel {
+                        message: format!("id -u failed on {}: {}", self.host, out.failure()),
+                    });
+                }
+                Ok(uid.to_string())
+            })
+            .await
+            .map(String::as_str)
+    }
+
+    /// Fails unless no user other than root, the escalated user and the login user can
+    /// redirect a privileged change of `path` ([`trusted_paths`]).
+    async fn ensure_trusted_destination(
+        &self,
+        path: &str,
+        r: &ResolvedRunAs,
+    ) -> Result<(), GlideshError> {
+        let uid = self.login_uid().await?;
+        let out = self.exec_as(&guarded(&[path], uid, ""), Some(r)).await?;
+        if out.exit_code != 0 {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!("unsafe destination {}: {}", path, out.failure()),
+            });
+        }
+        Ok(())
+    }
+
+    /// `mkdir -p` each of `dirs`; escalated, only once [`trusted_paths`] holds for them,
+    /// since `mkdir -p` follows symlinks on the way.
+    pub async fn create_dirs_as(
+        &self,
+        dirs: &[&str],
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<(), GlideshError> {
+        if dirs.is_empty() {
+            return Ok(());
+        }
+        let mkdir = format!(
+            "mkdir -p {}",
+            dirs.iter()
+                .map(|d| shell_escape(d))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let command = match run_as {
+            Some(_) => guarded(dirs, self.login_uid().await?, &mkdir),
+            None => mkdir,
+        };
+        let out = self.exec_as(&command, run_as).await?;
+        if out.exit_code != 0 {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!("failed to create {}: {}", dirs.join(", "), out.failure()),
+            });
+        }
+        Ok(())
+    }
+
     async fn sftp(&self) -> Result<SftpSession, GlideshError> {
         let guard = self.handle.lock().await;
         let channel = guard
@@ -696,8 +766,9 @@ impl SshSession {
         r: &ResolvedRunAs,
     ) -> Result<(), GlideshError> {
         self.upload_file(content, tmp).await?;
+        let uid = self.login_uid().await?;
         let out = self
-            .exec_as(&place_staged_upload(tmp, remote_path), Some(r))
+            .exec_as(&place_staged_upload(tmp, remote_path, uid), Some(r))
             .await?;
         if out.exit_code != 0 {
             return Err(GlideshError::Module {
@@ -852,6 +923,10 @@ impl SshSession {
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
         let escaped = shell_escape(path);
+        let changes = owner.is_some() || group.is_some() || mode.is_some();
+        if let Some(r) = run_as.filter(|_| changes) {
+            self.ensure_trusted_destination(path, r).await?;
+        }
 
         match (owner, group) {
             (Some(o), Some(g)) => {
@@ -918,6 +993,10 @@ impl SshSession {
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
         let escaped = shell_escape(path);
+        let changes = owner.is_some() || group.is_some() || mode.is_some();
+        if let Some(r) = run_as.filter(|_| changes) {
+            self.ensure_trusted_destination(path, r).await?;
+        }
 
         match (owner, group) {
             (Some(o), Some(g)) => {
@@ -1198,26 +1277,117 @@ fn f_key_escape(n: u8) -> Vec<u8> {
 /// The escalated command that writes a staged upload from `tmp` into `dest` the way a
 /// plain SFTP upload does: truncate and write, never replace. An existing file keeps its
 /// inode — owner, group, mode, ACL and hard links — and a symlink is written through;
-/// a new file is created by the escalated user, so the filesystem applies its umask, a
+/// a new file is created by the escalated user, so the filesystem applies the umask, a
 /// setgid directory's group and a default ACL. Moving the `mktemp` file (`0600`) into
 /// place instead would carry its mode and ownership over, replace links, and skip
-/// inheritance. Not atomic, as SFTP is not.
-///
-/// A symlink is followed only when root or the escalated user owns it, as the kernel's
-/// `protected_symlinks` rule does: a link another user planted would otherwise let them
-/// aim a privileged write at any file.
-fn place_staged_upload(tmp: &str, dest: &str) -> String {
+/// inheritance. Not atomic, as SFTP is not. Runs only after [`trusted_paths`] passes.
+fn place_staged_upload(tmp: &str, dest: &str, login_uid: &str) -> String {
     let t = shell_escape(tmp);
-    let d = shell_escape(dest);
     // `> dest` truncates before `cat` reads, so a staging file the escalated user cannot
     // read (a non-root run-as user other than the login user) must fail first.
-    format!(
-        "{{ test -r {t} || {{ echo 'the run-as user cannot read the staged upload' >&2; false; }}; }} \
-         && {{ ! test -L {d} || {{ o=$(stat -c %u {d} 2>/dev/null || stat -f %u {d}); \
-         [ \"$o\" = 0 ] || [ \"$o\" = \"$(id -u)\" ] || \
-         {{ echo \"refusing to write through a symlink owned by uid $o; name the file it points to\" >&2; false; }}; }}; }} \
-         && cat {t} > {d} && rm -f {t}"
+    guarded(
+        &[dest],
+        login_uid,
+        &format!(
+            "test -r {t} || {{ echo 'the run-as user cannot read the staged upload' >&2; exit 1; }}\n\
+             cat {t} > {} && rm -f {t}",
+            shell_escape(dest)
+        ),
     )
+}
+
+/// `then`, run by `sh` once [`trusted_paths`] holds for every one of `targets`. An
+/// explicit `sh`, because `su` runs a command in the target's login shell, and zsh reads
+/// `0777` as decimal.
+fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
+    let script = format!("{}\n{then}", trusted_paths(targets, login_uid));
+    format!("sh -c {}", shell_escape(&script))
+}
+
+/// A POSIX `sh` script, for an escalated shell, that exits non-zero with the reason on
+/// stderr when a privileged write to, or `chown`/`chmod` of, one of `targets` could be
+/// redirected by a user other than root, the escalated user, the login user (it already
+/// writes the staged content) and the owners of the directories on the way. Anyone else
+/// able to rename an entry there could swap in a symlink between this check and the
+/// write, which would follow it: a shell cannot open a file refusing links.
+///
+/// For a target, and for every symlink met on its way to `/`, each directory above it and
+/// each directory the link resolves to — the rule of the kernel's `protected_symlinks`,
+/// applied whether that sysctl is on or not:
+///
+/// - a directory must not be writable by others, nor by a group other than root's, nor
+///   carry an ACL while group-writable (the group bits then show the ACL mask, which may
+///   grant writing to anyone);
+/// - a sticky directory writable by others (`/tmp`) is accepted above an existing
+///   directory or link, which others cannot rename there. Not above a file or a missing
+///   entry, which anyone could create first — a link, or a hard link to a root file;
+/// - a symlink must be owned by a trusted user or by the owner of its directory;
+/// - an entry that does not exist yet is skipped: its directory decides who can create it.
+///
+/// Paths are read with `echo .` appended, since `$(…)` strips trailing newlines, which a
+/// name may end in.
+fn trusted_paths(targets: &[&str], login_uid: &str) -> String {
+    // A raw template: the script's own braces and quotes need no escaping.
+    const SCRIPT: &str = r#"u=$(id -u)
+fail() { echo "$*" >&2; exit 1; }
+trusted() { [ "$1" = 0 ] || [ "$1" = "$u" ] || [ "$1" = LOGIN ]; }
+owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || fail "cannot inspect $1"; }
+up() { up=$(dirname "$1" && echo .) || fail "cannot resolve $1"; up=${up%??}; }
+has_acl() { case $(ls -ld "$1" 2>/dev/null) in ??????????+*) return 0 ;; esac; return 1; }
+entry() {
+  if [ -L "$1" ]; then
+    kind=link
+    o=$(owner "$1") || exit 1
+    trusted "$o" && return 0
+    up "$1"; od=$(owner "$up") || exit 1
+    [ "$o" = "$od" ] ||
+      fail "refusing: the symlink $1 is owned by uid $o, neither a trusted user nor the owner of its directory"
+    return 0
+  fi
+  if [ ! -d "$1" ]; then
+    kind=missing; [ -e "$1" ] && kind=file
+    return 0
+  fi
+  kind=dir
+  a=$(stat -c '%g %a' "$1" 2>/dev/null || stat -f '%g %Mp%Lp' "$1" 2>/dev/null) || fail "cannot inspect $1"
+  g=${a%% *}; m=$((0${a#* }))
+  if [ $((m & 02)) -ne 0 ] || { [ $((m & 020)) -ne 0 ] && [ "$g" != 0 ]; }; then
+    { [ $((m & 01000)) -ne 0 ] && [ "$2" = ancestor ]; } || fail "refusing: other users can write to $1"; fi
+  if [ $((m & 020)) -ne 0 ] && has_acl "$1"; then
+    fail "refusing: $1 has an ACL, which may let other users write to it"; fi
+}
+check() {
+  p=$1; d=$2; role=$3
+  [ "$d" -le 40 ] || fail "refusing: too many symlinks under $1"
+  while :; do
+    entry "$p" "$role"
+    if [ "$kind" = link ]; then
+      l=$(readlink "$p" && echo .) || fail "cannot read the symlink $p"; l=${l%??}
+      case $l in /*) ;; *) up "$p"; l=$up/$l ;; esac
+      ( check "$l" $((d + 1)) "$role" ) || exit 1
+    fi
+    up "$p"
+    [ "$up" = "$p" ] && return 0
+    p=$up
+    case $kind in dir|link) role=ancestor ;; *) role=parent ;; esac
+  done
+}
+for t in TARGETS; do
+  case $t in /*) ;; *) t=$(pwd -P)/$t ;; esac
+  ( check "$t" 0 target ) || exit 1
+done"#;
+    // A trailing slash would make `test -L` look through a symlink.
+    let targets: Vec<String> = targets
+        .iter()
+        .map(|t| match t.trim_end_matches('/') {
+            "" if t.starts_with('/') => shell_escape("/"),
+            trimmed => shell_escape(trimmed),
+        })
+        .collect();
+    // LOGIN first: a target path may itself contain the text "LOGIN".
+    SCRIPT
+        .replace("LOGIN", &shell_escape(login_uid))
+        .replace("TARGETS", &targets.join(" "))
 }
 
 #[cfg(test)]
@@ -1226,7 +1396,7 @@ mod tests {
 
     #[cfg(unix)]
     fn place(tmp: &std::path::Path, dest: &std::path::Path) -> std::process::Output {
-        let cmd = place_staged_upload(tmp.to_str().unwrap(), dest.to_str().unwrap());
+        let cmd = place_staged_upload(tmp.to_str().unwrap(), dest.to_str().unwrap(), "0");
         std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
@@ -1273,7 +1443,7 @@ mod tests {
         let dest = dir.path().join("new.conf");
         let tmp = staged(dir.path(), "content");
 
-        let cmd = place_staged_upload(tmp.to_str().unwrap(), dest.to_str().unwrap());
+        let cmd = place_staged_upload(tmp.to_str().unwrap(), dest.to_str().unwrap(), "0");
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!("umask 027 && {cmd}"))
@@ -1354,6 +1524,142 @@ mod tests {
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read the staged upload"));
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
+    }
+
+    #[cfg(unix)]
+    fn trusted(dest: &std::path::Path) -> std::process::Output {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(guarded(&[dest.to_str().unwrap()], "0", ""))
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn refused(out: &std::process::Output, why: &str) {
+        assert!(!out.status.success(), "{:?}", out);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(why),
+            "{:?}",
+            out
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        refused(&trusted(&shared.join("app.conf")), "other users can write");
+        // Deeper down too, and for a directory about to be created.
+        refused(
+            &trusted(&shared.join("new/app.conf")),
+            "other users can write",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sticky_directory_is_accepted_above_the_destination_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sticky = dir.path().join("sticky");
+        std::fs::create_dir_all(sticky.join("app")).unwrap();
+        std::fs::set_permissions(&sticky, std::fs::Permissions::from_mode(0o1777)).unwrap();
+
+        // Others could create the file first in the destination's own directory.
+        refused(&trusted(&sticky.join("app.conf")), "other users can write");
+        let out = trusted(&sticky.join("app/app.conf"));
+        assert!(out.status.success(), "{:?}", out);
+        // An existing directory there, as `mkdir -p` and recursive uploads check it,
+        // cannot be renamed by others.
+        let out = trusted(&sticky.join("app"));
+        assert!(out.status.success(), "{:?}", out);
+        // A missing one could be created first, as a link, before `mkdir -p` runs.
+        refused(&trusted(&sticky.join("new/sub")), "other users can write");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_slash_does_not_hide_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(shared.join("app")).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let link = dir.path().join("app");
+        std::os::unix::fs::symlink(shared.join("app"), &link).unwrap();
+
+        let target = format!("{}/", link.display());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(guarded(&[target.as_str()], "0", ""))
+            .output()
+            .unwrap();
+        refused(&out, "other users can write");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_followed_into_the_directory_it_points_to() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let safe = dir.path().join("safe");
+        std::fs::create_dir(&safe).unwrap();
+
+        // The link itself sits in a trusted directory, but what it resolves to does not.
+        let link = safe.join("app.conf");
+        std::os::unix::fs::symlink(shared.join("app.conf"), &link).unwrap();
+        refused(&trusted(&link), "other users can write");
+
+        // And through a symlinked directory on the way.
+        let via = safe.join("via");
+        std::os::unix::fs::symlink(&shared, &via).unwrap();
+        refused(&trusted(&via.join("app.conf")), "other users can write");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_with_a_double_slash_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = format!("/{}/app.conf", dir.path().display());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(guarded(&[dest.as_str()], "0", ""))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{:?}", out);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_directory_fails_the_upload_before_writing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let dest = shared.join("app.conf");
+        std::fs::write(&dest, "keep me").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let tmp = staged(dir.path(), "new");
+
+        let out = place(&tmp, &dest);
+        assert!(!out.status.success());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn a_login_uid_placeholder_in_the_path_is_not_replaced() {
+        let script = trusted_paths(&["/srv/LOGIN/TARGETS.conf"], "1000");
+        assert!(script.contains("'/srv/LOGIN/TARGETS.conf'"), "{script}");
+        assert!(script.contains("= '1000' ]"), "{script}");
     }
 
     #[cfg(unix)]

@@ -336,8 +336,7 @@ impl FileModule {
             if let Some(parent) = std::path::Path::new(dest).parent() {
                 let parent_str = parent.to_string_lossy();
                 if !parent_str.is_empty() {
-                    ctx.exec(&format!("mkdir -p '{}'", parent_str.replace('\'', "'\\''")))
-                        .await?;
+                    ctx.create_dirs(&[&parent_str]).await?;
                 }
             }
 
@@ -651,14 +650,8 @@ impl FileModule {
         remote_dirs.sort();
         remote_dirs.dedup();
 
-        if !remote_dirs.is_empty() {
-            let dirs_arg = remote_dirs
-                .iter()
-                .map(|d| format!("'{}'", d.replace('\'', "'\\''")))
-                .collect::<Vec<_>>()
-                .join(" ");
-            ctx.exec(&format!("mkdir -p {}", dirs_arg)).await?;
-        }
+        let dirs: Vec<&str> = remote_dirs.iter().map(String::as_str).collect();
+        ctx.create_dirs(&dirs).await?;
 
         for rel_path in &local_files {
             let local_path = resolved_src.join(rel_path);

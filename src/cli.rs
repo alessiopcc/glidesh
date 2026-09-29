@@ -486,6 +486,7 @@ mod tests {
             "secret=#true",
             "--var NAME=VALUE",
             "keeps its owner/group/mode",
+            "refuses a destination others could redirect",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

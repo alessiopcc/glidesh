@@ -111,16 +111,17 @@ with or without [`run-as`](/advanced/run-as/):
 
 - **A file that already exists** is rewritten in place: it keeps its owner, group, mode
   and ACL, and every hard link to it sees the new content. Re-uploading a `0755` script
-  keeps it executable. One exception comes from the kernel: a write by a user other
-  than root clears setuid/setgid bits — set `mode` to keep them.
+  keeps it executable. One exception comes from the kernel: setuid/setgid bits are
+  cleared by a write from a user other than root, and by any `owner` or `group` change —
+  set `mode` as well to keep them.
 - **A new file** is created by the user writing it (the login user, or the `run-as`
   user), so the usual rules apply: that user's group — the directory's group when the
-  directory is setgid — and `0666` minus that user's umask: `0644` with the usual `022`.
+  directory is setgid — and `0666` minus the umask in effect: `0644` with the usual
+  `022`.
 - **A symlink** is written through: the file it points to gets the new content and
   keeps its attributes; the link stays a link. `owner`, `group`, and `mode` apply to
-  that file too. With `run-as`, only a link owned by root or the `run-as` user is
-  followed; any other fails the task, since whoever made it could aim a privileged write
-  at any file.
+  that file too. With `run-as`, see
+  [Destinations other users control](/advanced/run-as/#destinations-other-users-control).
 - **A new directory** of a recursive copy gets `0777` minus the umask: `0755` usually.
 
 Where the directory has a default ACL, a new file or directory inherits it instead, and

@@ -187,7 +187,9 @@ async fn test_run_as_upload_keeps_the_replaced_files_owner_and_mode() {
     let container = common::TestContainer::start();
     let root = container.ssh_session().await;
     root.exec(
-        "printf old > /etc/glidesh-runas-kept.sh &&          chown nobody:nogroup /etc/glidesh-runas-kept.sh &&          chmod 0755 /etc/glidesh-runas-kept.sh",
+        "printf old > /etc/glidesh-runas-kept.sh && \
+         chown nobody:nogroup /etc/glidesh-runas-kept.sh && \
+         chmod 0755 /etc/glidesh-runas-kept.sh",
     )
     .await
     .unwrap();
@@ -331,7 +333,7 @@ async fn test_run_as_upload_of_a_new_file_takes_a_setgid_directorys_group() {
 
     let container = common::TestContainer::start();
     let root = container.ssh_session().await;
-    root.exec("mkdir -p /srv/glidesh-shared && chgrp nogroup /srv/glidesh-shared && chmod 2775 /srv/glidesh-shared")
+    root.exec("mkdir -p /srv/glidesh-shared && chgrp nogroup /srv/glidesh-shared && chmod 2755 /srv/glidesh-shared")
         .await
         .unwrap();
 
@@ -431,9 +433,9 @@ async fn test_run_as_upload_refuses_a_symlink_another_user_planted() {
     let root = container.ssh_session().await;
     root.exec(
         "printf secret > /etc/glidesh-runas-victim && chmod 0600 /etc/glidesh-runas-victim && \
-         mkdir -p /srv/glidesh-bob && chown nobody /srv/glidesh-bob && \
-         ln -s /etc/glidesh-runas-victim /srv/glidesh-bob/app.conf && \
-         chown -h nobody /srv/glidesh-bob/app.conf",
+         mkdir -p /srv/glidesh-links && \
+         ln -s /etc/glidesh-runas-victim /srv/glidesh-links/app.conf && \
+         chown -h nobody /srv/glidesh-links/app.conf",
     )
     .await
     .unwrap();
@@ -445,10 +447,10 @@ async fn test_run_as_upload_refuses_a_symlink_another_user_planted() {
 
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), b"overwritten").unwrap();
-    let params = upload_params(tmp.path(), "/srv/glidesh-bob/app.conf", &[]);
+    let params = upload_params(tmp.path(), "/srv/glidesh-links/app.conf", &[]);
     let err = FileModule.apply(&ctx, &params).await.unwrap_err();
     assert!(
-        err.to_string().contains("symlink owned by uid"),
+        err.to_string().contains("nor the owner of its directory"),
         "unexpected error: {err}"
     );
 
@@ -482,4 +484,60 @@ async fn test_run_as_root_upload_without_a_mode_keeps_setuid() {
         stat(&root, "/usr/local/bin/glidesh-suid").await,
         "4755 root:root"
     );
+}
+
+#[tokio::test]
+async fn test_run_as_upload_into_a_service_users_directory_works() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("mkdir -p /srv/glidesh-www && chown www-data:www-data /srv/glidesh-www")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    // Its owner is trusted, as the kernel trusts a directory's owner with its links.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"<h1>ok</h1>").unwrap();
+    let params = upload_params(tmp.path(), "/srv/glidesh-www/index.html", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let content = root.exec("cat /srv/glidesh-www/index.html").await.unwrap();
+    assert_eq!(content.stdout, "<h1>ok</h1>");
+}
+
+#[tokio::test]
+async fn test_run_as_upload_into_a_group_writable_directory_is_refused() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("mkdir -p /srv/glidesh-team && chgrp nogroup /srv/glidesh-team && chmod 0775 /srv/glidesh-team")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"x").unwrap();
+    let params = upload_params(tmp.path(), "/srv/glidesh-team/app.conf", &[]);
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("other users can write to /srv/glidesh-team"),
+        "unexpected error: {err}"
+    );
+    let exists = root
+        .exec("test -e /srv/glidesh-team/app.conf && echo yes")
+        .await
+        .unwrap();
+    assert_eq!(exists.stdout.trim(), "");
 }

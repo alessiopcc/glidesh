@@ -150,14 +150,39 @@ directly. With `run-as` set, the `file` module stages the upload in a private (`
 file in `/tmp`, then the elevated shell writes its content into the destination and
 removes it. The staging file's mode and owner never reach the result: a file that
 already existed keeps its owner, group, and mode, and a new one is created by the
-escalation target, so its umask or the directory's default ACL decides the mode
-(`0644` usually) — the same as a plain upload
+escalation target, so the umask in effect (the session's; `sudo` adds its own, `022`
+by default) or the directory's default ACL decides the mode (`0644` usually) — the same
+as a plain upload
 ([Owner and Mode](/modules/file/#owner-and-mode)). Any explicit
 `owner`/`group`/`mode` you set is applied afterwards.
 
-A destination that is a symlink is written through only when root or the escalation
-target owns the link. A link owned by anyone else fails the task: it could point the
-privileged write at any file on the host.
+## Destinations other users control
+
+An escalated write follows symlinks, as any write does. If another user could put a
+symlink at the destination — or swap one in while glidesh works — they could aim the
+privileged write, or `owner`/`group`/`mode`, at any file on the host. So before creating
+directories, writing, or changing attributes with `run-as`, glidesh applies the rule the
+Linux kernel uses for symlinks (`protected_symlinks`) — whether or not the host enables
+it — and fails the task otherwise, naming the entry. Along the path to `/`, and through
+every symlink on the way:
+
+- a directory must not be writable by others, nor by a group other than root's, nor
+  carry an ACL while group-writable (its group bits then show the ACL mask, which may
+  let anyone write);
+- a directory writable by others is accepted when it is sticky, like `/tmp`, and what
+  sits in it already exists as a directory or link: others cannot rename that. A file or
+  a missing entry right under it is refused, since anyone could create it first — so
+  upload to `/tmp/app/x` with `/tmp/app` in place, not to `/tmp/x`;
+- a symlink, including the destination itself, must be owned by root, the `run-as`
+  user, the login user, or the owner of the directory it sits in; what it points to is
+  checked the same way;
+- a directory that does not exist yet is skipped: its parent decides who can create it.
+
+A directory's owner is trusted with what is in it, as the kernel trusts it: uploading
+as root into `/var/www/html` owned by `www-data` works, and `www-data` could redirect
+that write — the same holds for any tool that writes there as root. To deploy into a
+directory a team shares (say `2775 root:devs`), write it without `run-as` as a user in
+that group, or tighten the directory first.
 
 ## How it differs from the SSH user
 

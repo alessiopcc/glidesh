@@ -88,6 +88,10 @@ impl ModuleContext<'_> {
             .await
     }
 
+    pub async fn create_dirs(&self, dirs: &[&str]) -> Result<(), GlideshError> {
+        self.ssh.create_dirs_as(dirs, self.run_as.as_ref()).await
+    }
+
     pub async fn set_file_attrs_recursive(
         &self,
         path: &str,
