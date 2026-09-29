@@ -37,6 +37,20 @@ RUN useradd -m -s /bin/bash deploy && \
     echo "deploy ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/deploy && \
     chmod 440 /etc/sudoers.d/deploy
 
+# A non-root run-as target (`deploy` escalates to it) with a directory of its own, and
+# `ops`, whose sudo asks for a password (`ops-pass`), for the `sudo -S` path.
+RUN useradd -M -s /usr/sbin/nologin app && \
+    install -d -o app -g app -m 0755 /srv/app && \
+    useradd -m -s /bin/bash ops && \
+    echo 'ops:ops-pass' | chpasswd && \
+    mkdir -p /home/ops/.ssh && \
+    echo "${PUBKEY}" > /home/ops/.ssh/authorized_keys && \
+    chmod 700 /home/ops/.ssh && \
+    chmod 600 /home/ops/.ssh/authorized_keys && \
+    chown -R ops:ops /home/ops/.ssh && \
+    echo "ops ALL=(ALL) ALL" > /etc/sudoers.d/ops && \
+    chmod 440 /etc/sudoers.d/ops
+
 # Create a 64MB loopback image for disk module tests
 RUN dd if=/dev/zero of=/opt/fake.img bs=1M count=64
 

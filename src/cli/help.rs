@@ -133,6 +133,8 @@ PLAN SYNTAX
     subscribe=\"<step>, <step>\"  when a named earlier step changed something, redo this step's
                                 work (see SUBSCRIBE)
     run-as=\"root\" run-as-method=\"sudo|doas|su\"   escalate every task in the step
+                                (file uploads, fetches and --diff reads with su work only for
+                                run-as root or the login user; sudo and doas work for any user)
   Task: <module> \"<resource>\" [param=value ...] [{ param value ... }]
     Parameters go as attributes (state=\"absent\") or child nodes (state \"absent\").
     Lists: `ports \"80:80\" \"443:443\"` or a block of `- \"item\"` lines.
@@ -234,7 +236,8 @@ MODULES (each checks the host first and changes only what differs)
                               new one gets the umask mode (usually 0644).
                               With run-as, refuses a destination others could redirect:
                               a directory on its path writable by others or by a group
-                              other than root's (sticky /tmp only above an existing dir:
+                              other than root's or a trusted user's private group
+                              (sticky /tmp only above an existing dir:
                               /tmp/app/x, not /tmp/x), or a symlink owned by neither
                               root, the run-as or login user, nor its directory's owner.
   package \"<name>\"            state=present|absent (apt, dnf, yum, pacman, apk, zypper, nix)

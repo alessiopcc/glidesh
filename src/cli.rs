@@ -487,6 +487,7 @@ mod tests {
             "--var NAME=VALUE",
             "keeps its owner/group/mode",
             "refuses a destination others could redirect",
+            "sudo and doas work for any user",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

@@ -132,13 +132,23 @@ GLIDESH_RUNAS_PASS='…' glidesh run ... --run-as root  # from the environment
 The password is held in process memory only — never logged or written to disk. It is
 global for the run; `GLIDESH_RUNAS_PASS` takes precedence over `--ask-pass`.
 
+Glidesh sends it only when `sudo` asks for it: each command gets a prompt of its own
+(`-p`), and the password goes out when that prompt appears, never before — or when a
+prompt PAM shows instead (Kerberos, say) has sat unanswered for two seconds. Without a
+prompt — `NOPASSWD`, or a sudoers change during the run — no password is sent, so it
+never reaches the command, whose input a sudoers `log_input` I/O log records. A second
+prompt means the password was wrong, or PAM wants more than it (a one-time code):
+nothing more is sent, and the task fails as a denied escalation. `sudo -k` keeps
+cached credentials out of it, both ways: none from an earlier `sudo` are used, and a run
+leaves none behind for the login user.
+
 ## Method support and caveats
 
 | Method | Password | Notes |
 |--------|----------|-------|
 | `sudo` (default) | passwordless **or** password via stdin | Recommended. |
 | `doas` | passwordless only | `doas` reads passwords from a TTY; configure `nopass`/`persist` in `doas.conf`. |
-| `su` | password via PTY | Requires a PTY, which merges stderr into stdout. Best-effort; prefer `sudo`. |
+| `su` | password via PTY | Requires a PTY, which merges stderr into stdout. File uploads, fetches and `--diff` reads work only for `run-as="root"` or the login user. Best-effort; prefer `sudo`. |
 
 A denied escalation (wrong password, not a sudoer, missing TTY) is reported as a
 distinct error, not confused with a command that failed on its own.
@@ -146,9 +156,25 @@ distinct error, not confused with a command that failed on its own.
 ## File uploads to root-owned paths
 
 SFTP writes as the login user, so it cannot create files in directories like `/etc`
-directly. With `run-as` set, the `file` module stages the upload in a private (`0600`)
-file in `/tmp`, then the elevated shell writes its content into the destination and
-removes it. The staging file's mode and owner never reach the result: a file that
+directly. With `run-as` set, the elevated shell writes the destination:
+
+- **`run-as="root"`** reads the content from a private (`0600`) file the login user
+  staged in `/tmp`, then removes it.
+- **Any other user** — a service account like `postgres`, which cannot open another
+  user's private file — gets the content on its input, sent by glidesh only once the
+  destination has passed [its check](#destinations-other-users-control) and `sudo` is
+  done with any [password](#passwords). Content sent this way passes through `sudo`'s
+  input, so a sudoers `log_input` I/O log records it — the content, never the password.
+- **`su`** cannot take content on its input — its terminal would mangle binary data — so
+  it works for root or the login user only: any other `run-as` user fails the upload
+  before anything is written, naming the limitation. Use `sudo` or `doas` for it.
+
+Fetches and `--diff` reads go through a private file the login user stages and then
+reads. Root writes it directly, as does `su` — for root or the login user only, like
+uploads; with `sudo` or `doas`, any other user's read is written into it by the login
+user, and so passes through `sudo`'s output, which `log_output` records.
+
+What is staged never reaches the result: a file that
 already existed keeps its owner, group, and mode, and a new one is created by the
 escalation target, so the umask in effect (the session's; `sudo` adds its own, `022`
 by default) or the directory's default ACL decides the mode (`0644` usually) — the same
@@ -173,6 +199,12 @@ every symlink on the way:
   mode bits do not show — or an ACL glidesh cannot read as macOS lists it (`ls -le`),
   which on FreeBSD is any ACL. A deny-only ACL, like the `everyone deny delete` of a
   macOS home, is fine;
+- a directory writable by a user's private group is accepted, where the user is root,
+  the `run-as` user, the login user or the directory's owner: the group has that user's
+  name, is their primary group, and lists no other member. Distributions with
+  user-private groups (Debian, Ubuntu, Fedora) give such users a `002` umask, so every
+  directory they create is group-writable. glidesh does not look for other accounts an
+  administrator gave the same primary group;
 - a directory writable by others is accepted when it is sticky, like `/tmp`, and what
   sits in it already exists as a directory or link: others cannot rename that. A file or
   a missing entry right under it is refused, since anyone could create it first — so
