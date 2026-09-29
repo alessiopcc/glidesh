@@ -117,7 +117,9 @@ with or without [`run-as`](/advanced/run-as/):
   directory is setgid — and `0666` minus that user's umask: `0644` with the usual `022`.
 - **A symlink** is written through: the file it points to gets the new content and
   keeps its attributes; the link stays a link. `owner`, `group`, and `mode` apply to
-  that file too.
+  that file too. With `run-as`, only a link owned by root or the `run-as` user is
+  followed; any other fails the task, since whoever made it could aim a privileged write
+  at any file.
 - **A new directory** of a recursive copy gets `0777` minus the umask: `0755` usually.
 
 Where the directory has a default ACL, a new file or directory inherits it instead, and

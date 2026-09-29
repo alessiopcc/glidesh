@@ -33,6 +33,17 @@ pub struct CommandOutput {
     pub stdout_cut: bool,
 }
 
+impl CommandOutput {
+    /// Why the command failed: stderr, or stdout when stderr is empty — under a PTY
+    /// (`su`) the server merges stderr into stdout.
+    pub fn failure(&self) -> &str {
+        match self.stderr.trim() {
+            "" => self.stdout.trim(),
+            err => err,
+        }
+    }
+}
+
 /// Exit code reported for a command that did not exit with a status of its own, as the
 /// OpenSSH client does.
 pub const NO_EXIT_STATUS: u32 = 255;
@@ -694,7 +705,7 @@ impl SshSession {
                 message: format!(
                     "failed to write staged upload to {}: {}",
                     remote_path,
-                    out.stderr.trim()
+                    out.failure()
                 ),
             });
         }
@@ -741,7 +752,7 @@ impl SshSession {
                 message: format!(
                     "failed to stage download of {}: {}",
                     remote_path,
-                    out.stderr.trim()
+                    out.failure()
                 ),
             });
         }
@@ -1191,14 +1202,21 @@ fn f_key_escape(n: u8) -> Vec<u8> {
 /// setgid directory's group and a default ACL. Moving the `mktemp` file (`0600`) into
 /// place instead would carry its mode and ownership over, replace links, and skip
 /// inheritance. Not atomic, as SFTP is not.
+///
+/// A symlink is followed only when root or the escalated user owns it, as the kernel's
+/// `protected_symlinks` rule does: a link another user planted would otherwise let them
+/// aim a privileged write at any file.
 fn place_staged_upload(tmp: &str, dest: &str) -> String {
     let t = shell_escape(tmp);
+    let d = shell_escape(dest);
     // `> dest` truncates before `cat` reads, so a staging file the escalated user cannot
     // read (a non-root run-as user other than the login user) must fail first.
     format!(
         "{{ test -r {t} || {{ echo 'the run-as user cannot read the staged upload' >&2; false; }}; }} \
-         && cat {t} > {} && rm -f {t}",
-        shell_escape(dest)
+         && {{ ! test -L {d} || {{ o=$(stat -c %u {d} 2>/dev/null || stat -f %u {d}); \
+         [ \"$o\" = 0 ] || [ \"$o\" = \"$(id -u)\" ] || \
+         {{ echo \"refusing to write through a symlink owned by uid $o; name the file it points to\" >&2; false; }}; }}; }} \
+         && cat {t} > {d} && rm -f {t}"
     )
 }
 
@@ -1303,6 +1321,19 @@ mod tests {
         assert!(out.status.success(), "{:?}", out);
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
         assert_eq!(mode_of(&dest), before);
+    }
+
+    #[test]
+    fn a_failure_under_a_pty_is_read_from_stdout() {
+        let out = |stdout: &str, stderr: &str| CommandOutput {
+            exit_code: 1,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            stdout_cut: false,
+        };
+        assert_eq!(out("", " denied\n").failure(), "denied");
+        assert_eq!(out("merged by su\n", "").failure(), "merged by su");
+        assert_eq!(out("noise", "denied").failure(), "denied");
     }
 
     #[cfg(unix)]

@@ -422,3 +422,36 @@ async fn test_run_as_upload_through_a_symlink_with_a_mode_is_ok_on_the_next_run(
         "a second run should be ok, got {status:?}"
     );
 }
+
+#[tokio::test]
+async fn test_run_as_upload_refuses_a_symlink_another_user_planted() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf secret > /etc/glidesh-runas-victim && chmod 0600 /etc/glidesh-runas-victim && \
+         mkdir -p /srv/glidesh-bob && chown nobody /srv/glidesh-bob && \
+         ln -s /etc/glidesh-runas-victim /srv/glidesh-bob/app.conf && \
+         chown -h nobody /srv/glidesh-bob/app.conf",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"overwritten").unwrap();
+    let params = upload_params(tmp.path(), "/srv/glidesh-bob/app.conf", &[]);
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(
+        err.to_string().contains("symlink owned by uid"),
+        "unexpected error: {err}"
+    );
+
+    let content = root.exec("cat /etc/glidesh-runas-victim").await.unwrap();
+    assert_eq!(content.stdout, "secret");
+}

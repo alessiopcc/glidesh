@@ -155,6 +155,10 @@ escalation target, so its umask or the directory's default ACL decides the mode
 ([Owner and Mode](/modules/file/#owner-and-mode)). Any explicit
 `owner`/`group`/`mode` you set is applied afterwards.
 
+A destination that is a symlink is written through only when root or the escalation
+target owns the link. A link owned by anyone else fails the task: it could point the
+privileged write at any file on the host.
+
 ## How it differs from the SSH user
 
 `run-as` is independent of the SSH **login** user (`user="…"` / `${@host.user}`). You
