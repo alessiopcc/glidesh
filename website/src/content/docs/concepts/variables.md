@@ -159,10 +159,10 @@ the host (plain POSIX `sh`, so busybox hosts work too).
 | `${@fact.kernel}` | Kernel release, e.g. `6.1.0-18-amd64` | `uname -r` |
 | `${@fact.arch}` | Machine architecture, e.g. `x86_64`, `aarch64` | `uname -m` |
 | `${@fact.cpu.count}` | Online CPUs, e.g. `8` | `nproc` (or `getconf _NPROCESSORS_ONLN`) |
-| `${@fact.mem.total-mb}` | Total memory in MiB, an integer, e.g. `15935` | `MemTotal` in `/proc/meminfo` |
-| `${@fact.ip.default}` | Source address of the default route, e.g. `10.0.0.12` | `ip route get 1.1.1.1` |
+| `${@fact.mem.total-mb}` | Total memory in MiB, rounded down to an integer, e.g. `15935` | `MemTotal` in `/proc/meminfo` |
+| `${@fact.ip.default}` | Source address of the default route, e.g. `10.0.0.12` | the `src` field of `ip route get 1.1.1.1` |
 
-Every fact is always defined. One the host cannot report — `ip` not installed, no default
+Every fact is always defined. A fact the host cannot report — `ip` not installed, no default
 route, no `/proc/meminfo` — expands to an empty string; it never fails the connection or the
 task. Guard a fact that may be missing with `when="${@fact.ip.default}"`.
 
