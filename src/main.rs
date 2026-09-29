@@ -529,11 +529,15 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     }
     let tags = TagFilter::from_args(args.tags.as_deref(), args.skip_tags.as_deref())?;
     tags.check_known(group_plans.iter().map(|gp| gp.plan.as_ref()))?;
+    let answers = answer_prompts(&mut group_plans, &args.vars)?;
     let secrets = open_secrets(
         &args.secrets,
         args.key.as_deref(),
         secrets_provider.as_ref(),
     )?;
+    for answer in answers.iter().filter(|a| a.secret) {
+        secrets.register_plaintext(&answer.value);
+    }
 
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
@@ -563,6 +567,65 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         &args,
     )
     .await
+}
+
+/// Answer the run's `vars-prompt`s — from `--var`, else on the terminal — and make each
+/// answer a plan variable of the plans that ask for it. Runs before anything connects, and
+/// without a terminal never waits for input.
+fn answer_prompts(
+    group_plans: &mut [executor::GroupPlan],
+    var_flags: &[String],
+) -> Result<Vec<config::prompts::Answer>, GlideshError> {
+    use std::io::IsTerminal;
+    let prompts = config::prompts::distinct_prompts(group_plans.iter().map(|gp| gp.plan.as_ref()));
+    let answers = config::prompts::resolve_answers(
+        &prompts,
+        var_flags,
+        std::io::stdin().is_terminal(),
+        ask_prompt,
+    )?;
+    for gp in group_plans.iter_mut() {
+        config::prompts::apply_answers(Arc::make_mut(&mut gp.plan), &answers);
+    }
+    Ok(answers)
+}
+
+/// Ask one prompt on the terminal. An empty answer takes the default; with no default the
+/// question is asked again, since an empty value is far more often a slip than intended.
+fn ask_prompt(prompt: &config::types::VarPrompt) -> Result<String, GlideshError> {
+    use std::io::Write;
+    let label = match (&prompt.default, prompt.secret) {
+        (Some(_), true) => format!("{} [keep default]: ", prompt.text),
+        (Some(default), false) => format!("{} [{}]: ", prompt.text, default),
+        (None, _) => format!("{}: ", prompt.text),
+    };
+    let failed = |e: std::io::Error| {
+        GlideshError::Other(format!(
+            "Failed to read an answer for '{}': {e}",
+            prompt.name
+        ))
+    };
+    loop {
+        let answer = if prompt.secret {
+            rpassword::prompt_password(&label).map_err(failed)?
+        } else {
+            eprint!("{label}");
+            std::io::stderr().flush().map_err(failed)?;
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).map_err(failed)? == 0 {
+                return Err(GlideshError::Other(format!(
+                    "no answer for '{}': input ended",
+                    prompt.name
+                )));
+            }
+            line.trim_end_matches(['\r', '\n']).to_string()
+        };
+        match (&prompt.default, answer.is_empty()) {
+            (_, false) => return Ok(answer),
+            (Some(default), true) => return Ok(default.clone()),
+            (None, true) => eprintln!("'{}' needs a value.", prompt.name),
+        }
+    }
 }
 
 /// Merge secret-file structured vars into a plan (the plan's own value wins on conflict).
@@ -1006,7 +1069,10 @@ fn validate_plan_file(
         .problems
         .extend(config::checks::template_scope_problems(&plan, plan_dir));
     check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, |name| {
-        plan.vars.contains_key(name) || known_vars.contains(name) || is_builtin_var(name)
+        plan.vars.contains_key(name)
+            || plan.prompts.iter().any(|p| p.name == name)
+            || known_vars.contains(name)
+            || is_builtin_var(name)
     });
     check
 }

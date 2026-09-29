@@ -99,6 +99,7 @@ glidesh run [OPTIONS]
 | `--max-fail <N\|N%>` | — | Stop starting batches once more hosts than this have failed, overriding the plan's `max-fail` | the plan's `max-fail`, else stop only when a whole batch fails |
 | `--tags <TAGS>` | — | Run only steps with one of these [tags](/advanced/tags/) (comma-separated), plus steps tagged `always` | every step |
 | `--skip-tags <TAGS>` | — | Skip steps with any of these [tags](/advanced/tags/), even `always` ones | — |
+| `--var <NAME=VALUE>` | — | Answer the plan's [`vars-prompt`](/concepts/variables/#prompted-variables) for `NAME` instead of being asked; repeatable. A name the plan does not prompt for is an error | ask on the terminal |
 | `--concurrency <N>` | — | Max concurrent hosts | `10` |
 | `--dry-run` | — | Report what would change without applying it | `false` |
 | `--diff` | — | Show the detail behind each pending change, where the module can describe it | `false` |
@@ -223,6 +224,20 @@ glidesh run -i inventory.kdl -p plan.kdl -t web-1,web-3,db-1
 ```
 
 When `--plan` is omitted, each resolved target uses its own `plan=` (host-level wins over group-level); targets without an associated plan are skipped.
+
+### Prompted variables and non-interactive runs
+
+A plan's [`vars-prompt`](/concepts/variables/#prompted-variables) is answered once, before
+glidesh connects to any host. Answer on the command line to skip the questions:
+
+```bash
+glidesh run -i inventory.kdl -p deploy.kdl --var release=v1.4.2 --var db-password="$DB_PASSWORD"
+```
+
+When stdin is not a terminal (CI, scripts, agents), glidesh never waits for input: a
+prompt with no `--var` takes its `default=`, and if it has none the run fails before
+connecting, naming every missing variable and the `--var name=value` that fixes it.
+`--var` only answers a declared prompt — a name the plan does not prompt for is an error.
 
 ### Ad-hoc host with a plan
 

@@ -82,6 +82,8 @@ Non-interactive use (scripts, CI, agents):
   - `run` uses plain-text output when stdout is not a terminal; -T forces it.
   - Unknown host keys fail the connection: pass --accept-new-host-key to trust new hosts.
   - Encrypted secrets need a passphrase: set GLIDESH_SECRET_PASS or GLIDESH_SECRET_PASS_FILE.
+  - A plan's vars-prompt is answered with --var name=value; without a terminal, a prompt
+    with no --var and no default fails the run before it connects, naming the fix.
   - `run` exits non-zero when any host failed; `validate` when any check failed.
 
 `glidesh run --help` documents plan syntax, variables, conditions and every module's
@@ -99,6 +101,7 @@ Examples:
   glidesh run -i inventory.kdl -p plan.kdl -t web-1,db:db-1 --serial 1 --max-fail 0
   glidesh run -i inventory.kdl -p plan.kdl --tags config --skip-tags slow
   glidesh run -i inventory.kdl                  # each host runs the plan= its inventory names
+  glidesh run -i inventory.kdl -p plan.kdl --var release=v1.4   # answer a vars-prompt
   glidesh run --host 10.0.0.5 -u deploy -p plan.kdl
   glidesh run --host 10.0.0.5 -u deploy -c uptime
 
@@ -110,6 +113,9 @@ PLAN SYNTAX
       max-fail \"10%\"            stop starting batches once more hosts than this have failed
       vars { name \"value\" }     variables for this plan (they override inventory variables)
       vars-file \"vars.kdl\"      more variables, from a file of `name \"value\"` lines
+      vars-prompt { release \"Release to deploy\" default=\"main\" }
+                                variables asked for when the run starts (see PROMPTED
+                                VARIABLES)
       include \"common.kdl\" [tags=\"a,b\"]
                                 inline another plan's steps and variables here; tags=
                                 adds those tags to every step it brings in (see TAGS)
@@ -151,6 +157,20 @@ VARIABLES
             ${@error.msg} ${@error.task} (in rescue and always blocks only)
   In `file` templates: ${for h in @group.web}${h.address}${endfor}, and loops over list
   variables. An undefined variable fails the task.
+
+PROMPTED VARIABLES (vars-prompt)
+  vars-prompt {
+      release \"Release to deploy\" default=\"main\"
+      db-password \"Database password\" secret=#true
+  }
+  `glidesh run` asks for each one once, before connecting to any host; the answer is a
+  plan variable, ${release}. An empty answer takes default=. secret=#true reads without
+  echo and shows the value as *** in output and run logs.
+  --var NAME=VALUE answers one without asking (repeatable; a name the plan does not
+  prompt for is an error). When stdin is not a terminal, a prompt without --var takes its
+  default, or the run fails before connecting and names every missing --var.
+  Only the plan you run may prompt: vars-prompt in an included plan is an error, as is a
+  prompted name that is also in vars. --dry-run asks too; `validate` never asks.
 
 CONDITIONS (when=)
   ${a} == value   ${a} != value   ${a}   defined ${a}   undefined ${a}   !term   x && y   x || y

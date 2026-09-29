@@ -13,4 +13,11 @@ Deploy a containerized application with ports, environment variables, and volume
 glidesh run -i examples/container-app/inventory.kdl -p examples/container-app/plan.kdl
 ```
 
-Customize `app-image` and `app-port` in the plan vars for your application.
+glidesh asks which nginx tag to deploy (Enter keeps `alpine`). To answer up front, as a
+script or CI would:
+
+```bash
+glidesh run -i examples/container-app/inventory.kdl -p examples/container-app/plan.kdl --var app-tag=1.27-alpine
+```
+
+Customize the image and `app-port` in the plan for your application.

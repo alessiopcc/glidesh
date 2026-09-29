@@ -317,6 +317,12 @@ pub struct RunArgs {
     #[arg(long, value_name = "N|N%")]
     pub max_fail: Option<String>,
 
+    /// Answer the plan's `vars-prompt` for NAME instead of being asked. Repeatable. Only
+    /// names the plan prompts for are accepted. Needed for each prompt without a default when
+    /// stdin is not a terminal
+    #[arg(long = "var", value_name = "NAME=VALUE", conflicts_with = "command")]
+    pub vars: Vec<String>,
+
     /// Hosts worked on at once (minimum 1)
     #[arg(long, default_value = "10", value_parser = parse_concurrency)]
     pub concurrency: usize,
@@ -476,6 +482,9 @@ mod tests {
             "until-timeout",
             "RESCUE AND ALWAYS",
             "${@error.msg}",
+            "vars-prompt",
+            "secret=#true",
+            "--var NAME=VALUE",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }
@@ -491,6 +500,7 @@ mod tests {
             "--dry-run --diff",
             "--accept-new-host-key",
             "GLIDESH_SECRET_PASS",
+            "--var name=value",
             "exits non-zero",
             "glidesh run --help",
         ] {
