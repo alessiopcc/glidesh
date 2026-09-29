@@ -2059,16 +2059,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn nothing_is_created_inside_a_new_directory_others_could_write() {
-        let gid = std::process::Command::new("id").arg("-g").output().unwrap();
-        if String::from_utf8_lossy(&gid.stdout).trim() == "0" {
-            return; // a group-writable directory of root's group is accepted
-        }
+    fn nothing_is_created_inside_a_new_directory_a_shared_group_could_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(gid) = own_groups()
+            .into_iter()
+            .find(|gid| gid != "0" && !is_private_group(gid))
+        else {
+            return; // the account belongs to no shared group to try
+        };
+        // A setgid parent hands its group to what is created in it.
         let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::chown(dir.path(), None, Some(gid.parse().unwrap())).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o2700)).unwrap();
+
         let out = mkdir_with_umask(&dir.path().join("a/b"), "002");
         refused(&out, "other users can write");
         assert!(dir.path().join("a").is_dir());
         assert!(!dir.path().join("a/b").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_directory_of_the_users_private_group_is_trusted() {
+        let primary = std::process::Command::new("id").arg("-g").output().unwrap();
+        let primary = String::from_utf8_lossy(&primary.stdout).trim().to_string();
+        if !is_private_group(&primary) {
+            return; // the account has no private group
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let out = mkdir_with_umask(&dir.path().join("a/b"), "002");
+        assert!(out.status.success(), "{:?}", out);
+        assert!(dir.path().join("a/b").is_dir());
+    }
+
+    /// This account's group ids.
+    #[cfg(unix)]
+    fn own_groups() -> Vec<String> {
+        let out = std::process::Command::new("id").arg("-G").output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether `gid` is this account's private group, as the guard's `private_group` reads it.
+    #[cfg(unix)]
+    fn is_private_group(gid: &str) -> bool {
+        let user = std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        let user = String::from_utf8_lossy(&user.stdout).trim().to_string();
+        let primary = std::process::Command::new("id").arg("-g").output().unwrap();
+        let Ok(group) = std::process::Command::new("getent")
+            .args(["group", gid])
+            .output()
+        else {
+            return false;
+        };
+        let group = String::from_utf8_lossy(&group.stdout).trim().to_string();
+        let fields: Vec<&str> = group.split(':').collect();
+        fields.len() == 4
+            && fields[0] == user
+            && String::from_utf8_lossy(&primary.stdout).trim() == gid
+            && (fields[3].is_empty() || fields[3] == user)
     }
 
     #[test]
