@@ -154,11 +154,11 @@ way round, through a private file the login user then reads.
 - **`run-as="root"`** opens the staging file itself.
 - **Any other user** — a service account like `postgres`, which cannot open another
   user's private file — gets the content piped in by the login user (`sudo` or `doas`),
-  and a read piped back out. A `sudo` password travels ahead of the content on the same
-  stream and never reaches the file, even when `sudo` does not ask for it; it is checked
-  first, so a wrong one fails before any content is sent. Content piped this way passes
-  through `sudo`'s input and output, so a sudoers `log_input`/`log_output` I/O log
-  records it.
+  and a read piped back out. A `sudo` password is sent only when `sudo` needs one, ahead
+  of the content on the same stream, where `sudo` reads it itself; it is checked first,
+  so a wrong one fails before any content is sent. Content piped this way passes through
+  `sudo`'s input and output, so a sudoers `log_input`/`log_output` I/O log records it —
+  the content, never the password.
 - **`su`** cannot pipe content — its terminal would mangle binary data — so it works for
   root or the login user only: any other `run-as` user fails the upload, fetch or
   `--diff` read before anything is written, naming the limitation. Use `sudo` or `doas`

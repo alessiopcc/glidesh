@@ -1179,14 +1179,22 @@ async fn test_run_as_a_wrong_sudo_password_fails_before_sending_the_content() {
 }
 
 #[tokio::test]
-async fn test_run_as_a_sudo_password_sudo_does_not_read_never_reaches_the_file() {
+async fn test_run_as_a_sudo_password_sudo_does_not_need_is_not_sent() {
     skip_unless_integration!();
 
     let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "echo 'Defaults:deploy log_input' > /etc/sudoers.d/zz-log && chmod 440 /etc/sudoers.d/zz-log",
+    )
+    .await
+    .unwrap();
+
     let deploy = container.ssh_session_as("deploy").await;
     let os_info = container.detect_os(&deploy).await;
     let vars = HashMap::new();
-    // deploy's sudo is NOPASSWD, so sudo leaves the password line on stdin.
+    // deploy's sudo is NOPASSWD: a password sent anyway would reach the command's stdin,
+    // which `log_input` records.
     let run_as = ResolvedRunAs {
         user: "app".to_string(),
         method: RunAsMethod::Sudo,
@@ -1199,6 +1207,18 @@ async fn test_run_as_a_sudo_password_sudo_does_not_read_never_reaches_the_file()
     let params = upload_params(tmp.path(), "/srv/app/nopasswd.bin", &[]);
     FileModule.apply(&ctx, &params).await.unwrap();
 
-    let root = container.ssh_session().await;
     assert_eq!(hex_of(&root, "/srv/app/nopasswd.bin").await, hex(BINARY));
+    let logged = root
+        .exec("find /var/log/sudo-io -name stdin -exec zcat -f {} + 2>/dev/null")
+        .await
+        .unwrap();
+    assert!(
+        logged.stdout.contains("no newline at the end"),
+        "the upload went through the input log: {:?}",
+        logged.stdout
+    );
+    assert!(
+        !logged.stdout.contains("unused-pass"),
+        "the password was logged"
+    );
 }

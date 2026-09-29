@@ -797,6 +797,7 @@ impl SshSession {
             self.exec_as(&place_staged_upload(tmp, remote_path, uid), Some(r))
                 .await?
         } else {
+            let r = &self.fed_run_as(r).await?;
             // A wrong password makes `sudo -S` retry, reading the content that follows it
             // as more attempts: into the PAM stack and toward an account lockout.
             if r.password.is_some() {
@@ -829,6 +830,24 @@ impl SshSession {
             });
         }
         Ok(())
+    }
+
+    /// `r` without its password when sudo needs none (`NOPASSWD`, cached credentials): a
+    /// password sudo does not read would go on to the command's stdin, which a sudoers
+    /// `log_input` I/O log records.
+    async fn fed_run_as(&self, r: &ResolvedRunAs) -> Result<ResolvedRunAs, GlideshError> {
+        let passwordless = ResolvedRunAs {
+            password: None,
+            ..r.clone()
+        };
+        if r.password.is_none() || r.method != RunAsMethod::Sudo {
+            return Ok(r.clone());
+        }
+        match self.exec_as("true", Some(&passwordless)).await {
+            Ok(out) if out.exit_code == 0 => Ok(passwordless),
+            Ok(_) | Err(GlideshError::RunAs { .. }) => Ok(r.clone()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Download a source the login user may not be able to read directly. Without
@@ -1454,8 +1473,8 @@ const SU_STAGING_LIMIT: &str = "with run-as-method su, files are staged only for
 
 /// The escalated side of an upload fed on stdin by [`feed_staged_upload`]: skips to the
 /// line `mark`, then writes the rest into `dest` as [`place_staged_upload`] does. What
-/// comes before `mark` is the `sudo -S` password when sudo did not read it — its
-/// credentials were cached, or it needs none — and must never reach the file.
+/// comes before `mark` is the `sudo -S` password if sudo did not read it after all —
+/// credentials cached since `fed_run_as` found one needed — and must never reach the file.
 fn write_fed_upload(dest: &str, login_uid: &str, mark: &str) -> String {
     // The content goes on fd 3 so no command of the guard can read from it, redirected on
     // the command: ksh does not pass an fd above 2 opened by a bare `exec` to children.
