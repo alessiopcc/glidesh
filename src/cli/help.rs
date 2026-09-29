@@ -166,13 +166,13 @@ PROMPTED VARIABLES (vars-prompt)
   `glidesh run` asks for each one once, before connecting to any host; the answer is a
   plan variable, ${release}. An empty answer takes default=. secret=#true reads without
   echo and shows the value as *** in output and run logs; a non-empty secret answer needs
-  at least 4 characters, or it could not be masked.
+  at least 4 bytes (4 plain ASCII characters), or it could not be masked.
   --var NAME=VALUE answers one without asking (repeatable; a name the plan does not
   prompt for is an error). When stdin is not a terminal, a prompt without --var takes its
   default, or the run fails before connecting and names every missing --var.
   Only the plan you run may prompt: vars-prompt in an included plan is an error, as is a
-  prompted name that is also in vars, or one with `=` or whitespace (--var could not name
-  it). Inventory plan= groups whose plans prompt for the same name share one answer; it
+  prompted name that is also in vars, or one starting with `-` or with `=` or whitespace
+  (--var could not name it). Inventory plan= groups whose plans prompt for the same name share one answer; it
   keeps a default only if every plan gives the same one. --dry-run asks too; `validate`
   never asks.
 

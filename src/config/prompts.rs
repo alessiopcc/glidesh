@@ -195,8 +195,8 @@ pub fn too_short_to_mask(prompt: &VarPrompt, value: &str) -> bool {
 /// Why [`too_short_to_mask`] refuses an answer, for the error and the terminal.
 pub fn short_secret_problem() -> String {
     format!(
-        "a secret answer needs at least {MIN_REDACTABLE_LEN} characters, or it could not be \
-         masked as *** in output and logs"
+        "a secret answer needs at least {MIN_REDACTABLE_LEN} bytes ({MIN_REDACTABLE_LEN} plain \
+         ASCII characters), or it could not be masked as *** in output and logs"
     )
 }
 

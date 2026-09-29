@@ -213,12 +213,17 @@ fn parse_vars_prompt(node: &kdl::KdlNode) -> Result<Vec<VarPrompt>, GlideshError
     for child in children.nodes() {
         let name = child.name().value().to_string();
         super::validate_user_var_name(&name)?;
-        // `--var name=value` splits at the first `=` and trims the name, so a name that
-        // could not be written that way could never be answered without a terminal.
-        if name.is_empty() || name.contains('=') || name.contains(char::is_whitespace) {
+        // `--var name=value` splits at the first `=` and trims the name, and a value starting
+        // with `-` is read as another flag, so a name that could not be written that way
+        // could never be answered without a terminal.
+        if name.is_empty()
+            || name.starts_with('-')
+            || name.contains('=')
+            || name.contains(char::is_whitespace)
+        {
             return Err(error(format!(
                 "vars-prompt name {name:?} cannot be given as --var name=value: use a name \
-                 without '=' or whitespace"
+                 that does not start with '-' and has no '=' or whitespace"
             )));
         }
         let mut args = child.entries().iter().filter(|e| e.name().is_none());
@@ -1413,6 +1418,10 @@ plan "main" {
                 "cannot be given as --var",
             ),
             ("vars-prompt {\n \"\" \"A\"\n}", "cannot be given as --var"),
+            (
+                "vars-prompt {\n \"-rel\" \"A\"\n}",
+                "cannot be given as --var",
+            ),
             (
                 "vars-prompt {\n \" release\" \"A\"\n}",
                 "cannot be given as --var",

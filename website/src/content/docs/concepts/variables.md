@@ -94,13 +94,13 @@ plan "deploy" {
 }
 ```
 
-Each child is a variable name (without `=` or whitespace, so `--var name=value` can always
-answer it), the question to ask, and optionally:
+Each child is a variable name (not starting with `-`, and without `=` or whitespace, so
+`--var name=value` can always answer it), the question to ask, and optionally:
 
 - `default="…"` — taken when the answer is empty, and when there is no terminal to ask on
 - `secret=#true` — read without echo, and shown as `***` in the TUI, plain output and run
   logs, exactly like a [decrypted secret](#secret-variables). A non-empty answer must be at
-  least 4 characters: a shorter one could not be masked, so it is refused (asked again at a
+  least 4 bytes (4 plain ASCII characters): a shorter one could not be masked, so it is refused (asked again at a
   terminal)
 
 `glidesh run` asks each question once, before connecting to any host, and the answers
