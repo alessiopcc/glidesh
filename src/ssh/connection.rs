@@ -692,7 +692,7 @@ impl SshSession {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
                 message: format!(
-                    "failed to move staged upload to {}: {}",
+                    "failed to place staged upload at {} (write, owner or mode): {}",
                     remote_path,
                     out.stderr.trim()
                 ),
@@ -1186,18 +1186,21 @@ fn f_key_escape(n: u8) -> Vec<u8> {
 /// one belongs to the escalated user with `0666` minus its umask. `mktemp` staged the
 /// content `0600`, which `mv` would otherwise carry over. Attributes are set after the
 /// move, never on the staging file, so the content is not readable in `/tmp` by anyone
-/// the destination's directory keeps out. Run under an explicit `sh`, since `su` uses
-/// the target's login shell.
+/// the destination's directory keeps out. A symlink destination is written through, as
+/// SFTP does: moving over it would replace the link with a file carrying the link's own
+/// `0777` mode and leave the target unchanged. Run under an explicit `sh`, since `su`
+/// uses the target's login shell.
 fn place_staged_upload(tmp: &str, dest: &str) -> String {
     let d = shell_escape(dest);
+    let t = shell_escape(tmp);
     // A non-root escalation target cannot give a file back to another owner; the
     // content and mode still land, as they would for a plain upload by that user.
     let script = format!(
-        "a=$(stat -c '%a %u:%g' {d} 2>/dev/null || stat -f '%Lp %u:%g' {d} 2>/dev/null); \
+        "if [ -L {d} ]; then cat {t} > {d} && rm -f {t}; else \
+         a=$(stat -c '%a %u:%g' {d} 2>/dev/null || stat -f '%Lp %u:%g' {d} 2>/dev/null); \
          mv -f {t} {d} && if [ -n \"$a\" ]; then \
          {{ chown \"${{a#* }}\" {d} 2>/dev/null || [ \"$(id -u)\" != 0 ]; }} && chmod \"${{a%% *}}\" {d}; \
-         else chown \"$(id -u):$(id -g)\" {d} && chmod \"$(printf '%o' $((0666 & ~0$(umask))))\" {d}; fi",
-        t = shell_escape(tmp),
+         else chown \"$(id -u):$(id -g)\" {d} && chmod \"$(printf '%o' $((0666 & ~0$(umask))))\" {d}; fi; fi",
     );
     format!("sh -c {}", shell_escape(&script))
 }
@@ -1263,6 +1266,31 @@ mod tests {
             .unwrap();
         assert!(out.status.success(), "{:?}", out);
         assert_eq!(mode_of(&dest), 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_destination_is_written_through_not_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.conf");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = dir.path().join("link.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let tmp = staged(dir.path(), "new");
+
+        let out = place(&tmp, &link);
+        assert!(out.status.success(), "{:?}", out);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(mode_of(&target), 0o640);
+        assert!(!tmp.exists());
     }
 
     #[cfg(unix)]

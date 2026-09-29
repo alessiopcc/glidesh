@@ -113,6 +113,8 @@ with or without [`run-as`](/advanced/run-as/):
   changes. Re-uploading a `0755` script keeps it executable.
 - **A new file** belongs to the user writing it (the login user, or the `run-as` user)
   and gets `0666` minus that user's umask: `0644` with the usual `022`.
+- **A symlink** is written through: the file it points to gets the new content and
+  keeps its attributes; the link stays a link.
 - **A new directory** of a recursive copy gets `0777` minus the umask: `0755` usually.
 
 ## Path Resolution

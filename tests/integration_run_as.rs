@@ -283,3 +283,44 @@ async fn test_run_as_recursive_upload_gets_the_plain_upload_modes() {
         "755 root:root"
     );
 }
+
+#[tokio::test]
+async fn test_run_as_upload_writes_through_a_symlink_destination() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf old > /etc/glidesh-runas-target.conf && \
+         chmod 0640 /etc/glidesh-runas-target.conf && \
+         ln -s /etc/glidesh-runas-target.conf /etc/glidesh-runas-link.conf",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new").unwrap();
+    let params = upload_params(tmp.path(), "/etc/glidesh-runas-link.conf", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    // Moving over the link would leave a regular file with the link's own 0777 mode.
+    let link = root
+        .exec("test -L /etc/glidesh-runas-link.conf && echo link")
+        .await
+        .unwrap();
+    assert_eq!(link.stdout.trim(), "link");
+    let content = root
+        .exec("cat /etc/glidesh-runas-target.conf")
+        .await
+        .unwrap();
+    assert_eq!(content.stdout, "new");
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-target.conf").await,
+        "640 root:root"
+    );
+}
