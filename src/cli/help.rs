@@ -133,6 +133,8 @@ PLAN SYNTAX
     subscribe=\"<step>, <step>\"  when a named earlier step changed something, redo this step's
                                 work (see SUBSCRIBE)
     run-as=\"root\" run-as-method=\"sudo|doas|su\"   escalate every task in the step
+                                (file uploads, fetches and --diff reads with su work only for
+                                run-as root or the login user; sudo and doas work for any user)
   Task: <module> \"<resource>\" [param=value ...] [{ param value ... }]
     Parameters go as attributes (state=\"absent\") or child nodes (state \"absent\").
     Lists: `ports \"80:80\" \"443:443\"` or a block of `- \"item\"` lines.

@@ -138,7 +138,7 @@ global for the run; `GLIDESH_RUNAS_PASS` takes precedence over `--ask-pass`.
 |--------|----------|-------|
 | `sudo` (default) | passwordless **or** password via stdin | Recommended. |
 | `doas` | passwordless only | `doas` reads passwords from a TTY; configure `nopass`/`persist` in `doas.conf`. |
-| `su` | password via PTY | Requires a PTY, which merges stderr into stdout. Best-effort; prefer `sudo`. |
+| `su` | password via PTY | Requires a PTY, which merges stderr into stdout. File uploads, fetches and `--diff` reads work only for `run-as="root"` or the login user. Best-effort; prefer `sudo`. |
 
 A denied escalation (wrong password, not a sudoer, missing TTY) is reported as a
 distinct error, not confused with a command that failed on its own.
@@ -146,9 +146,25 @@ distinct error, not confused with a command that failed on its own.
 ## File uploads to root-owned paths
 
 SFTP writes as the login user, so it cannot create files in directories like `/etc`
-directly. With `run-as` set, the `file` module stages the upload in a private (`0600`)
-file in `/tmp`, then the elevated shell writes its content into the destination and
-removes it. The staging file's mode and owner never reach the result: a file that
+directly. With `run-as` set, the `file` module stages the upload in the login user's
+private (`0600`) file in `/tmp`, the elevated shell writes its content into the
+destination, and the staging file is removed. Fetches and `--diff` reads stage the other
+way round, through a private file the login user then reads.
+
+- **`run-as="root"`** opens the staging file itself.
+- **Any other user** — a service account like `postgres`, which cannot open another
+  user's private file — gets the content piped in by the login user (`sudo` or `doas`),
+  and a read piped back out. A `sudo` password travels ahead of the content on the same
+  stream and never reaches the file, even when `sudo` does not ask for it; it is checked
+  first, so a wrong one fails before any content is sent. Content piped this way passes
+  through `sudo`'s input and output, so a sudoers `log_input`/`log_output` I/O log
+  records it.
+- **`su`** cannot pipe content — its terminal would mangle binary data — so it works for
+  root or the login user only: any other `run-as` user fails the upload, fetch or
+  `--diff` read before anything is written, naming the limitation. Use `sudo` or `doas`
+  for it.
+
+The staging file's mode and owner never reach the result: a file that
 already existed keeps its owner, group, and mode, and a new one is created by the
 escalation target, so the umask in effect (the session's; `sudo` adds its own, `022`
 by default) or the directory's default ACL decides the mode (`0644` usually) — the same

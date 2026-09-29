@@ -852,3 +852,273 @@ async fn test_run_as_upload_through_a_symlinked_parent_trusts_the_real_directory
     let content = root.exec("cat /srv/glidesh-cfg/real.conf").await.unwrap();
     assert_eq!(content.stdout, "cfg");
 }
+
+fn run_as_app() -> ResolvedRunAs {
+    ResolvedRunAs {
+        user: "app".to_string(),
+        method: RunAsMethod::Sudo,
+        password: None,
+    }
+}
+
+/// Content that `cat` must pass through untouched: NUL, invalid UTF-8, `\r`, and no
+/// newline at the end.
+const BINARY: &[u8] = b"\x00\xff\r\nline\nno newline at the end";
+
+async fn hex_of(session: &glidesh::ssh::SshSession, path: &str) -> String {
+    let out = session
+        .exec(&format!("od -An -v -tx1 {path} | tr -d ' \\n'"))
+        .await
+        .unwrap();
+    out.stdout.trim().to_string()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn test_run_as_a_non_root_user_uploads_a_new_file() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_app());
+
+    // The staging file is deploy's and 0600, so `app` could never read it.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), BINARY).unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/data.bin", &[]);
+    let result = FileModule.apply(&ctx, &params).await.unwrap();
+    assert!(result.changed);
+
+    let root = container.ssh_session().await;
+    assert_eq!(hex_of(&root, "/srv/app/data.bin").await, hex(BINARY));
+    assert_eq!(stat(&root, "/srv/app/data.bin").await, "644 app:app");
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run is ok, got {status:?}"
+    );
+    let leftovers = deploy
+        .exec("ls -d /tmp/glidesh.* 2>/dev/null | wc -l")
+        .await
+        .unwrap();
+    assert_eq!(leftovers.stdout.trim(), "0", "the staging file is removed");
+}
+
+#[tokio::test]
+async fn test_run_as_a_non_root_user_keeps_the_replaced_files_mode() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf old > /srv/app/run.sh && chown app:app /srv/app/run.sh && \
+         chmod 0750 /srv/app/run.sh",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_app());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new").unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/run.sh", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let content = root.exec("cat /srv/app/run.sh").await.unwrap();
+    assert_eq!(content.stdout, "new");
+    assert_eq!(stat(&root, "/srv/app/run.sh").await, "750 app:app");
+}
+
+#[tokio::test]
+async fn test_run_as_a_non_root_user_writes_through_its_symlink() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf old > /srv/app/real.conf && ln -s /srv/app/real.conf /srv/app/app.conf && \
+         chown -h app:app /srv/app/real.conf /srv/app/app.conf",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_app());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"linked").unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/app.conf", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let content = root.exec("cat /srv/app/real.conf").await.unwrap();
+    assert_eq!(content.stdout, "linked");
+    let link = root.exec("test -L /srv/app/app.conf").await.unwrap();
+    assert_eq!(link.exit_code, 0, "the link stays a link");
+}
+
+#[tokio::test]
+async fn test_run_as_a_non_root_user_copies_a_tree() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_app());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::create_dir(src.path().join("conf")).unwrap();
+    std::fs::write(src.path().join("conf").join("a.conf"), b"a").unwrap();
+    let params = upload_params(
+        src.path(),
+        "/srv/app/tree/",
+        &[("recurse", ParamValue::Bool(true))],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let root = container.ssh_session().await;
+    let content = root.exec("cat /srv/app/tree/conf/a.conf").await.unwrap();
+    assert_eq!(content.stdout, "a");
+    assert_eq!(stat(&root, "/srv/app/tree/conf").await, "755 app:app");
+    assert_eq!(
+        stat(&root, "/srv/app/tree/conf/a.conf").await,
+        "644 app:app"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_a_non_root_user_fetches_and_diffs_its_own_files() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf 'port=80\\n' > /srv/app/private.conf && printf 'port=80\\n' > /srv/app/app.conf && \
+         chown app:app /srv/app/private.conf /srv/app/app.conf && \
+         chmod 0600 /srv/app/private.conf && chmod 0644 /srv/app/app.conf",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_app());
+
+    // The staging file is deploy's and 0600, so `app` could never write it.
+    let local = tempfile::tempdir().unwrap();
+    let dest = local.path().join("fetched.conf");
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String("/srv/app/private.conf".to_string()),
+    );
+    args.insert("fetch".to_string(), ParamValue::Bool(true));
+    let params = ModuleParams {
+        resource_name: dest.to_string_lossy().to_string(),
+        args,
+    };
+    FileModule.apply(&ctx, &params).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "port=80\n");
+
+    let mut preview = container.module_context_run_as(&deploy, &os_info, &vars, true, run_as_app());
+    preview.diff = true;
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"port=8080\n").unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/app.conf", &[]);
+    let status = FileModule.check(&preview, &params).await.unwrap();
+    let ModuleStatus::Pending { diff, .. } = status else {
+        panic!("expected Pending, got {status:?}");
+    };
+    let diff = diff.unwrap();
+    assert!(diff.contains("-port=80"), "{diff}");
+    assert!(diff.contains("+port=8080"), "{diff}");
+}
+
+fn ops_to_app(password: &str) -> ResolvedRunAs {
+    ResolvedRunAs {
+        user: "app".to_string(),
+        method: RunAsMethod::Sudo,
+        password: Some(password.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn test_run_as_upload_with_a_sudo_password_writes_only_the_content() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ops = container.ssh_session_as("ops").await;
+    let os_info = container.detect_os(&ops).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&ops, &os_info, &vars, false, ops_to_app("ops-pass"));
+
+    // sudo reads the password from the same stdin that carries the content.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), BINARY).unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/sudo-pass.bin", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let root = container.ssh_session().await;
+    assert_eq!(hex_of(&root, "/srv/app/sudo-pass.bin").await, hex(BINARY));
+    assert_eq!(stat(&root, "/srv/app/sudo-pass.bin").await, "644 app:app");
+}
+
+#[tokio::test]
+async fn test_run_as_a_wrong_sudo_password_fails_before_sending_the_content() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ops = container.ssh_session_as("ops").await;
+    let os_info = container.detect_os(&ops).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&ops, &os_info, &vars, false, ops_to_app("wrong"));
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"never sent").unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/wrong-pass.conf", &[]);
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(
+        matches!(err, glidesh::error::GlideshError::RunAs { .. }),
+        "a denied escalation, got {err}"
+    );
+
+    let root = container.ssh_session().await;
+    let exists = root.exec("test -e /srv/app/wrong-pass.conf").await.unwrap();
+    assert_ne!(exists.exit_code, 0, "nothing is written");
+}
+
+#[tokio::test]
+async fn test_run_as_a_sudo_password_sudo_does_not_read_never_reaches_the_file() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    // deploy's sudo is NOPASSWD, so sudo leaves the password line on stdin.
+    let run_as = ResolvedRunAs {
+        user: "app".to_string(),
+        method: RunAsMethod::Sudo,
+        password: Some("unused-pass".to_string()),
+    };
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as);
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), BINARY).unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/nopasswd.bin", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let root = container.ssh_session().await;
+    assert_eq!(hex_of(&root, "/srv/app/nopasswd.bin").await, hex(BINARY));
+}

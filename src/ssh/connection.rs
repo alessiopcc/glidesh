@@ -1,4 +1,4 @@
-use crate::config::types::{ResolvedJumpHost, ResolvedRunAs};
+use crate::config::types::{ResolvedJumpHost, ResolvedRunAs, RunAsMethod};
 use crate::error::GlideshError;
 use crate::modules::escalation;
 use crate::ssh::HostKeyPolicy;
@@ -556,11 +556,22 @@ impl SshSession {
         let Some(r) = run_as else {
             return self.exec(command).await;
         };
+        self.exec_as_within(command, r, str::to_string).await
+    }
+
+    /// [`Self::exec_as`], the escalated command placed in a login-user script by `outer`,
+    /// to feed it or keep its output in files only the login user can read or write.
+    async fn exec_as_within(
+        &self,
+        command: &str,
+        r: &ResolvedRunAs,
+        outer: impl FnOnce(&str) -> String,
+    ) -> Result<CommandOutput, GlideshError> {
         escalation::precheck(r)?;
         let wrapped = escalation::wrap(r, command);
         let out = self
             .exec_with(
-                &wrapped.command,
+                &outer(&wrapped.command),
                 ExecOptions {
                     stdin: wrapped.stdin,
                     pty: wrapped.pty,
@@ -750,7 +761,9 @@ impl SshSession {
 
     /// Upload to a destination the login user may not be able to write directly.
     /// Without escalation this is a plain SFTP write; with escalation the content is
-    /// staged in `/tmp` over SFTP and written into place with the escalated shell.
+    /// staged in the login user's private file in `/tmp` over SFTP. Root, or any user
+    /// through `su`, reads it escalated; any other run-as user, who cannot, gets it piped
+    /// in by the login user.
     pub async fn upload_file_as(
         &self,
         content: &[u8],
@@ -780,9 +793,21 @@ impl SshSession {
     ) -> Result<(), GlideshError> {
         self.upload_file(content, tmp).await?;
         let uid = self.login_uid().await?;
-        let out = self
-            .exec_as(&place_staged_upload(tmp, remote_path, uid), Some(r))
-            .await?;
+        let out = if stages_escalated(r) {
+            self.exec_as(&place_staged_upload(tmp, remote_path, uid), Some(r))
+                .await?
+        } else {
+            // A wrong password makes `sudo -S` retry, reading the content that follows it
+            // as more attempts: into the PAM stack and toward an account lockout.
+            if r.password.is_some() {
+                self.exec_as("true", Some(r)).await?;
+            }
+            let mark = format!("glidesh-content-{}", uuid::Uuid::new_v4().simple());
+            self.exec_as_within(&write_fed_upload(remote_path, uid, &mark), r, |escalated| {
+                feed_staged_upload(tmp, &mark, escalated)
+            })
+            .await?
+        };
         if out.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
@@ -797,7 +822,7 @@ impl SshSession {
     }
 
     /// Download a source the login user may not be able to read directly. Without
-    /// escalation this is a plain SFTP read; with escalation the escalated shell copies
+    /// escalation this is a plain SFTP read; with escalation the escalated shell reads
     /// the file into the login user's private staging file, then it is read over SFTP.
     pub async fn download_file_as(
         &self,
@@ -864,15 +889,33 @@ printf '%s' "$d""#;
         r: &ResolvedRunAs,
         trusted: bool,
     ) -> Result<Vec<u8>, GlideshError> {
-        // Written into the login user's `0600` staging file, which keeps its owner and
-        // mode: readable over SFTP by the login user, by nobody else.
-        let stage = format!("cat {} > {}", shell_escape(remote_path), shell_escape(tmp));
-        let command = if trusted {
-            guarded(&[remote_path], self.login_uid().await?, &stage)
+        // The login user's `0600` staging file keeps its owner and mode: readable over SFTP
+        // by the login user, by nobody else.
+        let src = shell_escape(remote_path);
+        let t = shell_escape(tmp);
+        let escalated_writes = stages_escalated(r);
+        let mark = format!("glidesh-content-{}", uuid::Uuid::new_v4().simple());
+        let read = if escalated_writes {
+            format!(
+                "test -w {t} || {{ echo {} >&2; exit 1; }}\ncat {src} > {t}",
+                shell_escape(SU_STAGING_LIMIT)
+            )
         } else {
-            stage
+            format!("printf '%s\\n' {}\ncat {src}", shell_escape(&mark))
         };
-        let out = self.exec_as(&command, Some(r)).await?;
+        let command = if trusted {
+            guarded(&[remote_path], self.login_uid().await?, &read)
+        } else {
+            read
+        };
+        let out = if escalated_writes {
+            self.exec_as(&command, Some(r)).await?
+        } else {
+            self.exec_as_within(&command, r, |escalated| {
+                format!("sh -c {}", shell_escape(&format!("{escalated} > {t}")))
+            })
+            .await?
+        };
         if out.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
@@ -883,7 +926,14 @@ printf '%s' "$d""#;
                 ),
             });
         }
-        self.download_file(tmp).await
+        let staged = self.download_file(tmp).await?;
+        if escalated_writes {
+            return Ok(staged);
+        }
+        after_mark(&staged, &mark).ok_or_else(|| GlideshError::Module {
+            module: "file".to_string(),
+            message: format!("the staged download of {remote_path} lost its start"),
+        })
     }
 
     pub async fn checksum_remote(
@@ -1359,11 +1409,75 @@ fn place_staged_upload(tmp: &str, dest: &str, login_uid: &str) -> String {
         &[dest],
         login_uid,
         &format!(
-            "test -r {t} || {{ echo 'the run-as user cannot read the staged upload' >&2; exit 1; }}\n\
+            "test -r {t} || {{ echo {} >&2; exit 1; }}\n\
              cat {t} > {} && rm -f {t}",
+            shell_escape(SU_STAGING_LIMIT),
             shell_escape(dest)
         ),
     )
+}
+
+/// Whether the escalated side opens the login user's private staging file itself, which
+/// only root or the login user can. Root does, so content never passes through sudo's
+/// stdin or stdout, which an I/O log (`log_input`, `log_output`) records; `su` must, as
+/// its PTY mangles binary data.
+fn stages_escalated(r: &ResolvedRunAs) -> bool {
+    r.method == RunAsMethod::Su || r.user == "root"
+}
+
+/// What follows the first `mark` line in a staged download: the escalated side prints
+/// the mark before the content, and anything sudo printed ahead of it (a PAM notice) is
+/// dropped.
+fn after_mark(staged: &[u8], mark: &str) -> Option<Vec<u8>> {
+    let line = format!("{mark}\n");
+    staged
+        .windows(line.len())
+        .position(|w| w == line.as_bytes())
+        .map(|at| staged[at + line.len()..].to_vec())
+}
+
+/// Why `su` cannot stage a file for most users: its PTY mangles binary data, so the
+/// escalated side reads or writes the login user's private staging file itself.
+const SU_STAGING_LIMIT: &str = "with run-as-method su, files are staged only for root or the \
+     login user: the run-as user cannot open the login user's private staging file; use \
+     run-as-method sudo or doas";
+
+/// The escalated side of an upload fed on stdin by [`feed_staged_upload`]: skips to the
+/// line `mark`, then writes the rest into `dest` as [`place_staged_upload`] does. What
+/// comes before `mark` is the `sudo -S` password when sudo did not read it — its
+/// credentials were cached, or it needs none — and must never reach the file.
+fn write_fed_upload(dest: &str, login_uid: &str, mark: &str) -> String {
+    // The content goes on fd 3 so no command of the guard can read from it, redirected on
+    // the command: ksh does not pass an fd above 2 opened by a bare `exec` to children.
+    format!(
+        "while :; do\n\
+         IFS= read -r l || {{ echo 'the upload ended before its content' >&2; exit 1; }}\n\
+         [ \"$l\" = {} ] && break\n\
+         done\n\
+         {} 3<&0 </dev/null",
+        shell_escape(mark),
+        guarded(
+            &[dest],
+            login_uid,
+            &format!("cat <&3 > {}", shell_escape(dest))
+        )
+    )
+}
+
+/// The login side of [`write_fed_upload`]: the channel's stdin (the `sudo -S` password,
+/// or nothing), `mark`, then the staged file, piped into the `escalated` command; the
+/// staged file is removed whatever happens. sudo and `read` both take a pipe a byte at a
+/// time, so each leaves what follows its line in the pipe.
+fn feed_staged_upload(tmp: &str, mark: &str, escalated: &str) -> String {
+    let t = shell_escape(tmp);
+    // Only the escalated side's status survives the pipe, and it would truncate the
+    // destination even if `cat` could not read the staged file.
+    let script = format!(
+        "test -r {t} || {{ echo 'cannot read the staged upload' >&2; rm -f {t}; exit 1; }}\n\
+         {{ cat; printf '%s\\n' {}; cat {t}; }} | {escalated}\ns=$?\nrm -f {t}\nexit $s",
+        shell_escape(mark)
+    );
+    format!("sh -c {}", shell_escape(&script))
 }
 
 /// The command behind [`SshSession::is_root_dir_as`]. `/` is compared on the host by
@@ -1657,7 +1771,7 @@ mod tests {
 
         let out = place(&tmp, &dest);
         assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read the staged upload"));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("run-as-method sudo or doas"));
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
     }
 
@@ -1785,6 +1899,118 @@ mod tests {
         let out = place(&tmp, &dest);
         assert!(!out.status.success());
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn a_staged_download_drops_what_sudo_printed_before_the_mark() {
+        let staged = b"Warning: your password will expire in 3 days\nm-1\n\x00a\nm-1\nb";
+        assert_eq!(after_mark(staged, "m-1").unwrap(), b"\x00a\nm-1\nb");
+        assert_eq!(after_mark(b"m-1\n", "m-1").unwrap(), b"");
+    }
+
+    #[test]
+    fn a_staged_download_without_its_mark_is_refused() {
+        assert_eq!(after_mark(b"content", "m-1"), None);
+        assert_eq!(after_mark(b"m-1", "m-1"), None);
+    }
+
+    #[test]
+    fn only_root_and_su_read_the_staging_file_escalated() {
+        let run_as = |user: &str, method| ResolvedRunAs {
+            user: user.to_string(),
+            method,
+            password: None,
+        };
+        assert!(stages_escalated(&run_as("root", RunAsMethod::Sudo)));
+        assert!(stages_escalated(&run_as("postgres", RunAsMethod::Su)));
+        assert!(!stages_escalated(&run_as("postgres", RunAsMethod::Sudo)));
+        assert!(!stages_escalated(&run_as("postgres", RunAsMethod::Doas)));
+    }
+
+    #[cfg(unix)]
+    const MARK: &str = "glidesh-content-0123abcd";
+
+    /// Runs a fed upload of `content`, with `stdin` on the channel and `escalate`
+    /// standing in for sudo: a script that gets the escalated command as `$0`.
+    #[cfg(unix)]
+    fn feed(
+        dir: &std::path::Path,
+        dest: &std::path::Path,
+        content: &[u8],
+        stdin: &[u8],
+        escalate: &str,
+    ) -> (std::process::Output, std::path::PathBuf) {
+        use std::io::Write;
+        let tmp = staged(dir, "");
+        std::fs::write(&tmp, content).unwrap();
+        let inner = write_fed_upload(dest.to_str().unwrap(), "0", MARK);
+        let escalated = format!("sh -c {} {}", shell_escape(escalate), shell_escape(&inner));
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(feed_staged_upload(tmp.to_str().unwrap(), MARK, &escalated))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        (child.wait_with_output().unwrap(), tmp)
+    }
+
+    #[cfg(unix)]
+    const BINARY: &[u8] = b"\x00\xff\nglidesh-content-0123abcd\n\r\nno newline at the end";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fed_upload_writes_the_content_after_a_password_sudo_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("app.bin");
+        let sudo = r#"IFS= read -r pw; [ "$pw" = secret ] || exit 9; exec sh -c "$0""#;
+
+        let (out, tmp) = feed(dir.path(), &dest, BINARY, b"secret\n", sudo);
+        assert!(out.status.success(), "{:?}", out);
+        assert_eq!(std::fs::read(&dest).unwrap(), BINARY);
+        assert!(!tmp.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_password_sudo_did_not_read_never_reaches_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("app.bin");
+
+        let (out, _) = feed(dir.path(), &dest, BINARY, b"secret\n", r#"exec sh -c "$0""#);
+        assert!(out.status.success(), "{:?}", out);
+        assert_eq!(std::fs::read(&dest).unwrap(), BINARY);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fed_upload_without_a_password_writes_the_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("app.bin");
+
+        let (out, _) = feed(dir.path(), &dest, BINARY, b"", r#"exec sh -c "$0""#);
+        assert!(out.status.success(), "{:?}", out);
+        assert_eq!(std::fs::read(&dest).unwrap(), BINARY);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_fed_upload_leaves_the_destination_and_no_staged_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let dest = shared.join("app.conf");
+        std::fs::write(&dest, "keep me").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let (out, tmp) = feed(dir.path(), &dest, b"new", b"", r#"exec sh -c "$0""#);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("other users can write"));
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
+        assert!(!tmp.exists());
     }
 
     #[cfg(unix)]
