@@ -111,7 +111,8 @@ with or without [`run-as`](/advanced/run-as/):
 
 - **A file that already exists** is rewritten in place: it keeps its owner, group, mode
   and ACL, and every hard link to it sees the new content. Re-uploading a `0755` script
-  keeps it executable.
+  keeps it executable. One exception comes from the kernel: a write by a user other
+  than root clears setuid/setgid bits — set `mode` to keep them.
 - **A new file** is created by the user writing it (the login user, or the `run-as`
   user), so the usual rules apply: that user's group — the directory's group when the
   directory is setgid — and `0666` minus that user's umask: `0644` with the usual `022`.

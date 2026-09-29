@@ -455,3 +455,31 @@ async fn test_run_as_upload_refuses_a_symlink_another_user_planted() {
     let content = root.exec("cat /etc/glidesh-runas-victim").await.unwrap();
     assert_eq!(content.stdout, "secret");
 }
+
+#[tokio::test]
+async fn test_run_as_root_upload_without_a_mode_keeps_setuid() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("printf old > /usr/local/bin/glidesh-suid && chmod 4755 /usr/local/bin/glidesh-suid")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new").unwrap();
+    let params = upload_params(tmp.path(), "/usr/local/bin/glidesh-suid", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    // The kernel clears setuid/setgid on a write only by a writer without CAP_FSETID;
+    // root has it, so the in-place write keeps them.
+    assert_eq!(
+        stat(&root, "/usr/local/bin/glidesh-suid").await,
+        "4755 root:root"
+    );
+}
