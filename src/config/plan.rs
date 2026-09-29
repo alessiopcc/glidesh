@@ -1,7 +1,7 @@
 use crate::config::condition::Condition;
 use crate::config::types::{
-    Amount, ExecutionMode, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step, TaskDef,
-    UntilGate,
+    Amount, ExecutionMode, Include, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step,
+    TaskDef, UntilGate,
 };
 use crate::error::GlideshError;
 use std::collections::{HashMap, HashSet};
@@ -146,16 +146,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                 vars_files.push(path);
             }
             "include" => {
-                let path = node
-                    .entries()
-                    .iter()
-                    .find(|e| e.name().is_none())
-                    .and_then(|e| e.value().as_string())
-                    .ok_or_else(|| GlideshError::ConfigParse {
-                        message: "include requires a path argument".to_string(),
-                    })?
-                    .to_string();
-                items.push(PlanItem::Include(path));
+                items.push(PlanItem::Include(parse_include(node)?));
             }
             other => {
                 return Err(GlideshError::ConfigParse {
@@ -178,6 +169,41 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         run_as,
         items,
     })
+}
+
+fn parse_include(node: &kdl::KdlNode) -> Result<Include, GlideshError> {
+    let path = node
+        .entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .and_then(|e| e.value().as_string())
+        .ok_or_else(|| GlideshError::ConfigParse {
+            message: "include requires a path argument".to_string(),
+        })?
+        .to_string();
+    // An attribute other than tags= used to be ignored, so a misspelled `tag=` would
+    // quietly leave the included steps untagged.
+    for entry in node.entries() {
+        if let Some(key) = entry.name().map(|n| n.value()) {
+            if key != "tags" {
+                return Err(GlideshError::ConfigParse {
+                    message: format!(
+                        "include '{path}': unknown attribute '{key}' (expected one of: tags)"
+                    ),
+                });
+            }
+        }
+    }
+    let tags = match node.get("tags") {
+        Some(value) => {
+            let list = value.as_string().ok_or_else(|| GlideshError::ConfigParse {
+                message: format!("include '{path}': tags= must be a string, like \"web,deploy\""),
+            })?;
+            super::tags::parse_list(list, &format!("include '{path}'"))?
+        }
+        None => Vec::new(),
+    };
+    Ok(Include { path, tags })
 }
 
 fn amount_error(setting: &str, min: usize, got: &str) -> GlideshError {
@@ -253,7 +279,7 @@ pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshE
         None,
         base_dir,
         &mut seen,
-        &RunAsSpec::default(),
+        &Inherited::default(),
     )?;
     plan.items = resolved;
 
@@ -358,6 +384,13 @@ fn resolve_vars_files(
     Ok(())
 }
 
+/// What the plans including an included plan layer onto every step it brings in.
+#[derive(Default)]
+struct Inherited {
+    run_as: RunAsSpec,
+    tags: Vec<String>,
+}
+
 /// `vars` and `structured` accumulate every plan's variables, the including plan's
 /// inserted before its includes' so it wins. `source_dir` is `None` for the top-level plan,
 /// whose steps resolve relative paths from the run's plan directory.
@@ -368,7 +401,7 @@ fn resolve_items(
     source_dir: Option<&Path>,
     base_dir: &Path,
     seen: &mut HashSet<String>,
-    inherited_run_as: &RunAsSpec,
+    inherited: &Inherited,
 ) -> Result<Vec<PlanItem>, GlideshError> {
     let mut result = Vec::new();
     for item in items {
@@ -379,11 +412,12 @@ fn resolve_items(
                 // (the step's own run-as still wins). Without this, escalation set
                 // at the plan level of an included file would be lost.
                 let mut s = s.clone();
-                s.run_as = s.run_as.clone().merge_over(inherited_run_as);
+                s.run_as = s.run_as.clone().merge_over(&inherited.run_as);
                 s.source_dir = source_dir.map(Path::to_path_buf);
+                s.tags = super::tags::merge(&s.tags, &inherited.tags);
                 result.push(PlanItem::Step(s));
             }
-            PlanItem::Include(path) => {
+            PlanItem::Include(Include { path, tags }) => {
                 let resolved_path = if Path::new(path).is_absolute() {
                     PathBuf::from(path)
                 } else {
@@ -423,7 +457,11 @@ fn resolve_items(
 
                 // The included plan's plan-level run-as governs its own steps,
                 // layered under anything inherited from the including plan(s).
-                let child_run_as = included.run_as.clone().merge_over(inherited_run_as);
+                // Its steps also carry the include's tags, then any from further out.
+                let child = Inherited {
+                    run_as: included.run_as.clone().merge_over(&inherited.run_as),
+                    tags: super::tags::merge(tags, &inherited.tags),
+                };
                 let child_dir =
                     std::fs::canonicalize(child_base).unwrap_or_else(|_| child_base.to_path_buf());
                 let child_items = resolve_items(
@@ -433,7 +471,7 @@ fn resolve_items(
                     Some(&child_dir),
                     child_base,
                     seen,
-                    &child_run_as,
+                    &child,
                 )?;
                 result.extend(child_items);
             }
@@ -1143,7 +1181,9 @@ plan "main" {
         let fp = parse_plan(input).unwrap();
         assert_eq!(fp.items.len(), 3);
         assert_eq!(fp.steps().len(), 2);
-        matches!(&fp.items[1], PlanItem::Include(p) if p == "common/security.kdl");
+        assert!(
+            matches!(&fp.items[1], PlanItem::Include(i) if i.path == "common/security.kdl" && i.tags.is_empty())
+        );
     }
 
     /// Like `mode`, these belong to whichever plan is run: a plan written to work both on its
@@ -1533,6 +1573,102 @@ plan "parent" {
             ),
         ]);
         assert_eq!(plan.steps()[0].tags, ["web", "deploy"]);
+    }
+
+    #[test]
+    fn an_include_takes_a_tag_list() {
+        let plan = parse_plan(r#"plan "p" { include "web.kdl" tags="web, deploy,web" }"#).unwrap();
+        let PlanItem::Include(include) = &plan.items[0] else {
+            panic!("expected an include");
+        };
+        assert_eq!(
+            *include,
+            (Include {
+                path: "web.kdl".to_string(),
+                tags: vec!["web".to_string(), "deploy".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_include_tags_or_an_unknown_include_attribute_fail_to_parse() {
+        let err = plan_err(r#"include "web.kdl" tags="web,,db""#);
+        assert!(
+            err.contains("include 'web.kdl': invalid tag list 'web,,db'"),
+            "{err}"
+        );
+        let err = plan_err(r#"include "web.kdl" tags=#true"#);
+        assert!(
+            err.contains("include 'web.kdl': tags= must be a string"),
+            "{err}"
+        );
+        let err = plan_err(r#"include "web.kdl" tag="web""#);
+        assert!(
+            err.contains("include 'web.kdl': unknown attribute 'tag' (expected one of: tags)"),
+            "{err}"
+        );
+    }
+
+    /// An include's tags follow each step's own, then those of includes further out,
+    /// each tag once.
+    #[test]
+    fn include_tags_reach_every_step_brought_in_including_nested_ones() {
+        let (_dir, plan) = resolve_tree(&[
+            (
+                "main.kdl",
+                r#"plan "main" {
+                    step "Top" tags="top" { shell "true" }
+                    include "roles/web.kdl" tags="web,deploy"
+                }"#,
+            ),
+            (
+                "roles/web.kdl",
+                r#"plan "web" {
+                    step "Web" tags="deploy,nginx" { shell "true" }
+                    include "common.kdl" tags="base"
+                }"#,
+            ),
+            (
+                "roles/common.kdl",
+                r#"plan "common" {
+                    step "Common" { shell "true" }
+                    step "Common web" tags="web" { shell "true" }
+                }"#,
+            ),
+        ]);
+        let tags: Vec<(&str, Vec<&str>)> = plan
+            .steps()
+            .iter()
+            .map(|s| (s.name.as_str(), s.tags.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                ("Top", vec!["top"]),
+                ("Web", vec!["deploy", "nginx", "web"]),
+                ("Common", vec!["base", "web", "deploy"]),
+                ("Common web", vec!["web", "base", "deploy"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn tags_selects_the_steps_an_include_tags() {
+        let (_dir, plan) = resolve_tree(&[
+            (
+                "main.kdl",
+                r#"plan "main" {
+                    step "Top" { shell "true" }
+                    include "db.kdl" tags="db"
+                }"#,
+            ),
+            ("db.kdl", r#"plan "db" { step "Db" { shell "true" } }"#),
+        ]);
+        let filter = super::super::tags::TagFilter::from_args(Some("db"), None).unwrap();
+        filter.check_known([&plan].into_iter()).unwrap();
+        let steps = plan.steps();
+        assert!(filter.excludes(&steps[0].tags).is_some());
+        assert_eq!(filter.excludes(&steps[1].tags), None);
     }
 
     #[test]

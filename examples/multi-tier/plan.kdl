@@ -1,7 +1,7 @@
 plan "multi-tier" {
     mode "sync"
 
-    include "common/base.kdl"
+    include "common/base.kdl" tags="base"
 
     step "Install nginx" {
         package "nginx" state="present"

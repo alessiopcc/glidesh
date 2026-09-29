@@ -330,7 +330,16 @@ pub struct Plan {
 #[derive(Debug, Clone)]
 pub enum PlanItem {
     Step(Box<Step>),
-    Include(String), // path to another plan file
+    Include(Include),
+}
+
+/// An `include "path"` in a plan, before `resolve_includes` inlines it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Include {
+    /// Path to the included plan, relative to the including plan's directory.
+    pub path: String,
+    /// `tags=`: added to every step the included plan brings in, nested includes too.
+    pub tags: Vec<String>,
 }
 
 impl Plan {

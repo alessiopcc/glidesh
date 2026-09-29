@@ -47,7 +47,9 @@ glidesh run -i inventory.kdl -p plan.kdl --skip-tags packages          # everyth
   `--tags` would otherwise run nothing, and one in `--skip-tags` would run the very steps it
   meant to hold back. With an inventory whose groups run different plans, a tag counts as
   known if any of those plans uses it.
-- Tags work with [included plans](/advanced/plan-includes/): an included step keeps its tags.
+- Tags work with [included plans](/advanced/plan-includes/): an included step keeps its tags,
+  and `include "roles/db.kdl" tags="db"` adds `db` to every step that include brings in,
+  nested includes too. Those tags count as in use for the unknown-tag check.
 - Only steps are tagged. `tags=` on a built-in module's task is an error; move the task to a
   step of its own. An [external module](/modules/external/) may take its own `tags` parameter,
   which is passed to the plugin as usual.

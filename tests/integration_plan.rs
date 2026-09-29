@@ -200,7 +200,7 @@ plan "full" {
     );
 
     // include
-    assert!(matches!(&fp.items[2], PlanItem::Include(p) if p == "monitoring.kdl"));
+    assert!(matches!(&fp.items[2], PlanItem::Include(i) if i.path == "monitoring.kdl"));
 }
 
 /// Test that host-level vars override group vars and flow through to module execution.

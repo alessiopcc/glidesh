@@ -110,7 +110,9 @@ PLAN SYNTAX
       max-fail \"10%\"            stop starting batches once more hosts than this have failed
       vars { name \"value\" }     variables for this plan (they override inventory variables)
       vars-file \"vars.kdl\"      more variables, from a file of `name \"value\"` lines
-      include \"common.kdl\"      inline another plan's steps and variables here
+      include \"common.kdl\" [tags=\"a,b\"]
+                                inline another plan's steps and variables here; tags=
+                                adds those tags to every step it brings in (see TAGS)
       step \"<name>\" [attributes] { <tasks> [rescue { <tasks> }] [always { <tasks> }] }
   }
   Steps run in order; tasks in a step run in order. A step stops the host on failure,
@@ -159,6 +161,7 @@ TAGS
   A step left out is reported as skipped, does not trigger its subscribers, and leaves its
   register= variables undefined: tag a step that registers what others need `always`.
   A tag no step carries is an error, so a typo cannot silently run nothing.
+  include \"x.kdl\" tags=\"db\" tags every step the include brings in, nested includes too.
 
 UNTIL (wait for the host to be ready)
   step \"Wait for API\" until=\"curl -sf localhost:8080/health\" until-timeout=600 until-interval=5
