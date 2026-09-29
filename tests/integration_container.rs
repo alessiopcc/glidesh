@@ -583,6 +583,44 @@ async fn test_absent_removes_container() {
     assert!(!result.changed);
 }
 
+/// Whichever runtime command produced a container task's output — `run`, `start` or
+/// `stop` — the task reports when that output was cut, so `register=` can refuse it.
+#[tokio::test]
+async fn runtime_output_over_the_limit_is_reported_as_cut() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    install_fake_docker(&ssh).await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+
+    let running = params("chatty", &[("image", s("nginx:alpine"))]);
+    let stopped = params("chatty", &[("state", s("stopped"))]);
+    let absent = params("chatty", &[("state", s("absent"))]);
+    let result = ContainerModule.apply(&ctx, &running).await.unwrap();
+    assert!(!result.output_cut);
+
+    ssh.exec(&format!("touch {STATE_ROOT}/flood"))
+        .await
+        .unwrap();
+    for (what, p) in [
+        ("stop", &stopped),
+        ("start", &running),
+        ("remove", &absent),
+        ("run", &running),
+    ] {
+        let result = ContainerModule.apply(&ctx, p).await.unwrap();
+        assert!(result.changed, "{what}");
+        assert_eq!(result.output_cut, what != "remove", "{what}");
+    }
+
+    ssh.exec(&format!("rm {STATE_ROOT}/flood")).await.unwrap();
+    let result = ContainerModule.apply(&ctx, &stopped).await.unwrap();
+    assert!(!result.output_cut);
+}
+
 /// A custom network is created on demand; built-in modes are left alone.
 #[tokio::test]
 async fn test_custom_network_is_created() {

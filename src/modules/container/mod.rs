@@ -463,9 +463,9 @@ impl ContainerModule {
                 == run_args::spec_hash(runtime, params)?;
 
         let keep = spec_matches && action != StartAction::Recreate && ctx.trigger != Trigger::Fired;
-        let (changed, output) = if keep {
+        let (changed, (output, output_cut)) = if keep {
             match action {
-                StartAction::None => (false, String::new()),
+                StartAction::None => (false, (String::new(), false)),
                 StartAction::Start => (true, Self::lifecycle(ctx, runtime, "start", name).await?),
                 StartAction::Unpause => {
                     (true, Self::lifecycle(ctx, runtime, "unpause", name).await?)
@@ -489,7 +489,7 @@ impl ContainerModule {
                     ),
                 });
             }
-            (true, out.stdout)
+            (true, (out.stdout, out.stdout_cut))
         };
 
         if let Some(spec) = health::parse_wait(params)? {
@@ -501,7 +501,7 @@ impl ContainerModule {
             output,
             stderr: String::new(),
             exit_code: 0,
-            output_cut: false,
+            output_cut,
         })
     }
 
@@ -581,12 +581,13 @@ impl ContainerModule {
         })
     }
 
+    /// The command's stdout, and whether it was cut at the output limit.
     async fn lifecycle(
         ctx: &ModuleContext<'_>,
         runtime: &str,
         verb: &str,
         name: &str,
-    ) -> Result<String, GlideshError> {
+    ) -> Result<(String, bool), GlideshError> {
         let out = ctx
             .exec(&format!("{} {} {}", runtime, verb, shell_escape(name)))
             .await?;
@@ -602,7 +603,7 @@ impl ContainerModule {
                 ),
             });
         }
-        Ok(out.stdout)
+        Ok((out.stdout, out.stdout_cut))
     }
 
     /// Remove a container and verify it is actually gone. Silently ignoring a
@@ -654,13 +655,13 @@ impl ContainerModule {
             });
         }
 
-        let output = Self::lifecycle(ctx, runtime, "stop", name).await?;
+        let (output, output_cut) = Self::lifecycle(ctx, runtime, "stop", name).await?;
         Ok(ModuleResult {
             changed: true,
             output,
             stderr: String::new(),
             exit_code: 0,
-            output_cut: false,
+            output_cut,
         })
     }
 

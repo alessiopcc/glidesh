@@ -28,7 +28,8 @@ What the variable holds depends on what happened to the task:
   fails the task rather than expanding to an empty string; test for it with
   `when="defined ${var}"`.
 - **Its output was over 8 MiB** — the task fails. glidesh keeps only the first and last
-  4 MiB of a command's output (see [Output limit](/modules/shell/#output-limit)), and a
+  4 MiB of the output of a command it runs on a host (see
+  [Output limit](/modules/shell/#output-limit)), and a
   value with its middle missing would feed later steps the wrong data. Write large output to
   a file on the host and register something smaller, such as its path.
 
