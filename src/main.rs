@@ -148,6 +148,19 @@ fn apply_rollout_override(
     Ok(())
 }
 
+/// A plan's directory as an absolute path, which a module resolves local paths from and
+/// reports them by. A bare `plan.kdl` has `""` as its parent, the current directory.
+fn absolute_dir(dir: &std::path::Path) -> std::path::PathBuf {
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    };
+    std::fs::canonicalize(dir)
+        .or_else(|_| std::path::absolute(dir))
+        .unwrap_or_else(|_| dir.to_path_buf())
+}
+
 /// `--mode`, when given, overrides the plan's own `mode` in either direction.
 fn apply_mode_override(plan: &mut glidesh::config::types::Plan, mode: Option<&str>) {
     match mode {
@@ -400,8 +413,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                 .map(|h| (h.name.clone(), String::new(), pn.clone())),
         );
 
-        let plan_base_dir =
-            std::fs::canonicalize(plan_base_dir).unwrap_or_else(|_| plan_base_dir.to_path_buf());
+        let plan_base_dir = absolute_dir(plan_base_dir);
         group_plans.push(executor::GroupPlan {
             plan: Arc::new(plan),
             targets,
@@ -508,8 +520,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                     .map(|h| (h.name.clone(), gn.clone(), pn.clone())),
             );
 
-            let plan_base_dir =
-                std::fs::canonicalize(include_base).unwrap_or_else(|_| include_base.to_path_buf());
+            let plan_base_dir = absolute_dir(include_base);
             group_plans.push(executor::GroupPlan {
                 plan: Arc::new(plan),
                 targets: filtered_targets,
@@ -1771,6 +1782,20 @@ fn expand_tilde(path: &std::path::Path) -> PathBuf {
 mod tests {
     use super::*;
     use executor::result::Section;
+
+    #[test]
+    fn the_directory_of_a_bare_plan_name_is_the_absolute_current_one() {
+        let bare = std::path::Path::new("plan.kdl").parent().unwrap();
+        let dir = absolute_dir(bare);
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert_eq!(dir, std::fs::canonicalize(".").unwrap());
+    }
+
+    #[test]
+    fn a_plan_directory_that_does_not_resolve_is_still_absolute() {
+        let dir = absolute_dir(std::path::Path::new("no-such-dir/plans"));
+        assert!(dir.is_absolute(), "{}", dir.display());
+    }
 
     fn no_display_ids() -> std::collections::HashMap<String, String> {
         std::collections::HashMap::new()
