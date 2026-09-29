@@ -114,14 +114,15 @@ with or without [`run-as`](/advanced/run-as/):
   keeps it executable.
 - **A new file** is created by the user writing it (the login user, or the `run-as`
   user), so the usual rules apply: that user's group — the directory's group when the
-  directory is setgid — a default ACL if the directory has one, and `0666` minus that
-  user's umask: `0644` with the usual `022`.
+  directory is setgid — and `0666` minus that user's umask: `0644` with the usual `022`.
 - **A symlink** is written through: the file it points to gets the new content and
-  keeps its attributes; the link stays a link.
-
-The write is not atomic: a program reading the file while it is uploaded can see it
-partly written.
+  keeps its attributes; the link stays a link. `owner`, `group`, and `mode` apply to
+  that file too.
 - **A new directory** of a recursive copy gets `0777` minus the umask: `0755` usually.
+
+Where the directory has a default ACL, a new file or directory inherits it instead, and
+the umask does not apply. The write is not atomic: a program reading the file while it is
+uploaded can see it partly written.
 
 ## Path Resolution
 

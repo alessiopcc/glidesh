@@ -31,10 +31,11 @@ pub enum Remote {
 /// Read the destination for a diff, checking its size and mode before downloading it.
 pub async fn fetch_remote(ctx: &ModuleContext<'_>, path: &str) -> Result<Remote, GlideshError> {
     let escaped = shell_escape(path);
-    // BSD stat fallback for macOS targets, as in `get_file_attrs`.
+    // BSD stat fallback for macOS targets, as in `get_file_attrs`. `-L`: a symlink's
+    // own mode is 0777, which would let a private target's content into the diff.
     let out = ctx
         .exec(&format!(
-            "stat -c '%s %a' {escaped} 2>/dev/null || stat -f '%z %Lp' {escaped}"
+            "stat -L -c '%s %a' {escaped} 2>/dev/null || stat -L -f '%z %Lp' {escaped}"
         ))
         .await?;
     let parsed = out

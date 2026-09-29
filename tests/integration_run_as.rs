@@ -380,3 +380,45 @@ async fn test_run_as_upload_keeps_a_setuid_mode_with_an_owner() {
         "4755 nobody:root"
     );
 }
+
+#[tokio::test]
+async fn test_run_as_upload_through_a_symlink_with_a_mode_is_ok_on_the_next_run() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf old > /etc/glidesh-runas-mtarget.conf && \
+         ln -s /etc/glidesh-runas-mtarget.conf /etc/glidesh-runas-mlink.conf",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new").unwrap();
+    let params = upload_params(
+        tmp.path(),
+        "/etc/glidesh-runas-mlink.conf",
+        &[
+            ("owner", ParamValue::String("nobody".to_string())),
+            ("mode", ParamValue::String("0640".to_string())),
+        ],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-mtarget.conf").await,
+        "640 nobody:root"
+    );
+
+    // The check must read the target, not the link's own 777 root:root.
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run should be ok, got {status:?}"
+    );
+}

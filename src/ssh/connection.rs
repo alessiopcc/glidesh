@@ -792,11 +792,12 @@ impl SshSession {
     ) -> Result<Option<(String, String, String)>, GlideshError> {
         let escaped = shell_escape(path);
         // BSD stat fallback for macOS targets, like the shasum fallback in
-        // checksum_remote. Both forms print "owner group mode".
+        // checksum_remote. Both forms print "owner group mode". `-L` reads a
+        // symlink's target, which is what uploads, chown and chmod act on.
         let output = self
             .exec_as(
                 &format!(
-                    "stat -c '%U %G %a' {escaped} 2>/dev/null || stat -f '%Su %Sg %Lp' {escaped}"
+                    "stat -L -c '%U %G %a' {escaped} 2>/dev/null || stat -L -f '%Su %Sg %Lp' {escaped}"
                 ),
                 run_as,
             )
@@ -1192,7 +1193,13 @@ fn f_key_escape(n: u8) -> Vec<u8> {
 /// inheritance. Not atomic, as SFTP is not.
 fn place_staged_upload(tmp: &str, dest: &str) -> String {
     let t = shell_escape(tmp);
-    format!("cat {t} > {} && rm -f {t}", shell_escape(dest))
+    // `> dest` truncates before `cat` reads, so a staging file the escalated user cannot
+    // read (a non-root run-as user other than the login user) must fail first.
+    format!(
+        "{{ test -r {t} || {{ echo 'the run-as user cannot read the staged upload' >&2; false; }}; }} \
+         && cat {t} > {} && rm -f {t}",
+        shell_escape(dest)
+    )
 }
 
 #[cfg(test)]
@@ -1296,6 +1303,26 @@ mod tests {
         assert!(out.status.success(), "{:?}", out);
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
         assert_eq!(mode_of(&dest), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_staging_file_leaves_the_destination_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::process::Command::new("id").arg("-u").output().unwrap();
+        if String::from_utf8_lossy(&root.stdout).trim() == "0" {
+            return; // root reads any file, so the staging file cannot be made unreadable
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("app.conf");
+        std::fs::write(&dest, "keep me").unwrap();
+        let tmp = staged(dir.path(), "new");
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let out = place(&tmp, &dest);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read the staged upload"));
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
     }
 
     #[cfg(unix)]
