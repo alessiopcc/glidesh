@@ -134,9 +134,11 @@ pub fn shadowed<'a>(
     let scalars = plan_names
         .into_iter()
         .filter_map(|name| scopes.get(name).map(|found| (name, found.clone())));
+    // One file named two ways (`plan.kdl`, `sub/../plan.kdl`, a link) is one plan.
+    let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
     merged(scalars.chain(structured).map(|(name, scopes)| Shadow {
         plan: plan.name.clone(),
-        source: source.to_path_buf(),
+        source: source.clone(),
         name: name.to_string(),
         scopes,
     }))
@@ -361,5 +363,40 @@ host "lone" "10.0.2.1" {
             .find(|s| s.source == Path::new("other.kdl"))
             .unwrap();
         assert_eq!(scopes(other), [VarScope::Host("lone".to_string())]);
+    }
+
+    #[test]
+    fn one_plan_file_named_two_ways_warns_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("plan.kdl"), "").unwrap();
+        let inventory = parse_inventory(INVENTORY).unwrap();
+        let plan = parse_plan(
+            r#"plan "deploy" { vars { customer "x" }
+                step "s" { shell "true" } }"#,
+        )
+        .unwrap();
+        let secrets = SecretNames::default();
+        let direct = dir.path().join("plan.kdl");
+        let aliased = dir.path().join("sub/../plan.kdl");
+        let found = merged(
+            shadowed(&plan, &direct, Some(&inventory), &secrets, ["web-1"])
+                .into_iter()
+                .chain(shadowed(
+                    &plan,
+                    &aliased,
+                    Some(&inventory),
+                    &secrets,
+                    ["lone"],
+                )),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            scopes(&found[0]),
+            [
+                VarScope::Group("web".to_string()),
+                VarScope::Host("lone".to_string())
+            ]
+        );
     }
 }
