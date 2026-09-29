@@ -15,11 +15,20 @@ pub struct Answer {
 /// Every variable the plans ask for, each once: several group plans may declare the same
 /// name, and one answer serves them all. A name any of them marks `secret` is treated as
 /// secret, so a second declaration cannot make the answer echo or show in output.
+///
+/// A default is kept only when every declaration gives the same one. Otherwise which one
+/// applied — and whether a run without a terminal could go on at all — would depend on the
+/// order the inventory lists its groups in, so the answer must be given instead.
 pub fn distinct_prompts<'a>(plans: impl IntoIterator<Item = &'a Plan>) -> Vec<VarPrompt> {
     let mut prompts: Vec<VarPrompt> = Vec::new();
     for prompt in plans.into_iter().flat_map(|p| &p.prompts) {
         match prompts.iter_mut().find(|p| p.name == prompt.name) {
-            Some(seen) => seen.secret |= prompt.secret,
+            Some(seen) => {
+                seen.secret |= prompt.secret;
+                if seen.default != prompt.default {
+                    seen.default = None;
+                }
+            }
             None => prompts.push(prompt.clone()),
         }
     }
@@ -171,6 +180,22 @@ pub fn short_secret_problem() -> String {
     )
 }
 
+/// What a line typed at the terminal answers: the line itself, or the default when it is
+/// empty. `Err` holds why to ask again — nothing typed and no default, or a secret too short
+/// to mask. The default is applied first, so a default too short to mask is asked again
+/// rather than failing the run when the answers are checked.
+pub fn settle_typed_answer(prompt: &VarPrompt, typed: String) -> Result<String, String> {
+    let answer = match (&prompt.default, typed.is_empty()) {
+        (_, false) => typed,
+        (Some(default), true) => default.clone(),
+        (None, true) => return Err(format!("'{}' needs a value.", prompt.name)),
+    };
+    if too_short_to_mask(prompt, &answer) {
+        return Err(short_secret_problem());
+    }
+    Ok(answer)
+}
+
 /// Put each answer into the plan variables of the plans that asked for it — the same slot
 /// as plan `vars`, which `parse_plan` keeps from also naming a prompted variable.
 pub fn apply_answers(plan: &mut Plan, answers: &[Answer]) {
@@ -278,6 +303,53 @@ mod tests {
         }
         let plain = [prompt("pin", None, false)];
         assert!(resolve_answers(&plain, &flags(&["pin=1"]), false, never_ask).is_ok());
+    }
+
+    #[test]
+    fn a_typed_answer_takes_the_default_before_it_is_checked() {
+        let short_default = prompt("pin", Some("12"), true);
+        assert!(
+            settle_typed_answer(&short_default, String::new())
+                .unwrap_err()
+                .contains("at least 4"),
+            "pressing Enter on a default too short to mask asks again"
+        );
+        assert_eq!(
+            settle_typed_answer(&short_default, "1234".into()).unwrap(),
+            "1234"
+        );
+        let long_default = prompt("pin", Some("4321"), true);
+        assert_eq!(
+            settle_typed_answer(&long_default, String::new()).unwrap(),
+            "4321"
+        );
+        let no_default = prompt("release", None, false);
+        assert!(
+            settle_typed_answer(&no_default, String::new())
+                .unwrap_err()
+                .contains("needs a value")
+        );
+    }
+
+    /// Which default applied, and whether a run without a terminal could go on, must not
+    /// depend on the order the inventory lists its groups in.
+    #[test]
+    fn a_default_is_shared_only_when_every_plan_gives_the_same_one() {
+        let plan = |default: &str| {
+            parse_plan(&format!(
+                "plan \"p\" {{\n vars-prompt {{\n release \"Release\" {default}\n }}\n}}"
+            ))
+            .unwrap()
+        };
+        let (main, dev, none) = (plan("default=\"main\""), plan("default=\"dev\""), plan(""));
+        for plans in [[&main, &dev], [&dev, &main], [&main, &none], [&none, &main]] {
+            assert_eq!(distinct_prompts(plans)[0].default, None);
+        }
+        let again = plan("default=\"main\"");
+        assert_eq!(
+            distinct_prompts([&main, &again])[0].default.as_deref(),
+            Some("main")
+        );
     }
 
     #[test]

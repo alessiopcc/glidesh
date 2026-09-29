@@ -128,7 +128,9 @@ glidesh run -i inventory.kdl -p deploy.kdl --var release=v1.4.2 --var db-passwor
   undefined. A name that is both prompted for and set in `vars` (or a `vars-file`) is an
   error too.
 - With [inventory `plan=`](/concepts/inventory/#inline-plans) runs, several plans may
-  prompt; a name any of them declares is asked once and the answer shared.
+  prompt; a name any of them declares is asked once and the answer shared. It is secret if
+  any plan marks it so, and keeps a `default` only when every plan gives the same one —
+  otherwise it must be answered, so the result never depends on the order of the groups.
 
 ## Merge Order
 

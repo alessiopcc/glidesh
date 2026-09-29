@@ -193,6 +193,15 @@ const PROMPT_ATTRS: &[&str] = &["default", "secret"];
 /// `vars-prompt { name "Question" default="…" secret=#true }`, one child per variable.
 fn parse_vars_prompt(node: &kdl::KdlNode) -> Result<Vec<VarPrompt>, GlideshError> {
     let error = |message: String| GlideshError::ConfigParse { message };
+    // Ignored, `vars-prompt secret=#true { … }` would read as marking every answer secret
+    // while each one is still echoed and printed.
+    if !node.entries().is_empty() {
+        return Err(error(
+            "vars-prompt takes no arguments or attributes: put default= and secret= on each \
+             variable, e.g. vars-prompt { password \"Password\" secret=#true }"
+                .to_string(),
+        ));
+    }
     let Some(children) = node.children() else {
         return Err(error(
             "vars-prompt needs a block of variables, e.g. vars-prompt { release \"Release to \
@@ -1366,6 +1375,14 @@ plan "main" {
     fn malformed_vars_prompts_are_rejected() {
         for (body, needle) in [
             ("vars-prompt", "needs a block"),
+            (
+                "vars-prompt secret=#true {\n password \"Password\"\n}",
+                "takes no arguments or attributes",
+            ),
+            (
+                "vars-prompt \"x\" {\n release \"A\"\n}",
+                "takes no arguments or attributes",
+            ),
             ("vars-prompt {\n release\n}", "needs one question"),
             ("vars-prompt {\n release \"\"\n}", "needs one question"),
             ("vars-prompt {\n release 5\n}", "needs one question"),

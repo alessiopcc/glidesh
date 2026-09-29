@@ -172,7 +172,9 @@ PROMPTED VARIABLES (vars-prompt)
   default, or the run fails before connecting and names every missing --var.
   Only the plan you run may prompt: vars-prompt in an included plan is an error, as is a
   prompted name that is also in vars, or one with `=` or whitespace (--var could not name
-  it). --dry-run asks too; `validate` never asks.
+  it). Inventory plan= groups whose plans prompt for the same name share one answer; it
+  keeps a default only if every plan gives the same one. --dry-run asks too; `validate`
+  never asks.
 
 CONDITIONS (when=)
   ${a} == value   ${a} != value   ${a}   defined ${a}   undefined ${a}   !term   x && y   x || y
