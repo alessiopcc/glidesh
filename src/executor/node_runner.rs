@@ -142,9 +142,14 @@ impl Failure {
     }
 
     /// Bind `${@error.msg}` and `${@error.task}` for the step's `rescue` and `always` tasks.
-    fn expose(&self, vars: &mut HashMap<String, String>) {
-        vars.insert(Self::MSG.to_string(), self.message.clone());
-        vars.insert(Self::TASK.to_string(), self.task.clone());
+    ///
+    /// Both are passed through `redact` first. The error is raw executor text — a command
+    /// line with its variables interpolated, and the command's output — so it can hold a
+    /// decrypted secret, and a rescue that writes it to a file or sends it on would otherwise
+    /// store in plaintext what every log shows as `***`.
+    fn expose(&self, vars: &mut HashMap<String, String>, redact: impl Fn(&str) -> String) {
+        vars.insert(Self::MSG.to_string(), redact(&self.message));
+        vars.insert(Self::TASK.to_string(), redact(&self.task));
     }
 
     /// For a preview whose step did not fail: the real run might, so whether the variables
@@ -639,7 +644,10 @@ impl NodeRunner {
                 .await
                 .err();
             match &failure {
-                Some(failed) => failed.expose(&mut vars),
+                Some(failed) => {
+                    let secrets = self.secrets.registry();
+                    failed.expose(&mut vars, |text| secrets.redact(text));
+                }
                 None if self.dry_run => Failure::unknown(&mut progress),
                 None => {}
             }
@@ -1513,12 +1521,21 @@ mod tests {
     #[test]
     fn a_failure_is_readable_only_until_its_step_ends() {
         let mut vars = strings(&[("x", "1")]);
-        Failure::in_task("shell", "deploy.sh", "exit code 3").expose(&mut vars);
+        Failure::in_task("shell", "deploy.sh", "exit code 3").expose(&mut vars, str::to_string);
         assert_eq!(vars["@error.msg"], "exit code 3");
         assert_eq!(vars["@error.task"], "shell 'deploy.sh'");
         let mut progress = Progress::default();
         Failure::withdraw(&mut vars, &mut progress);
         assert_eq!(vars, strings(&[("x", "1")]));
+    }
+
+    #[test]
+    fn a_failure_is_redacted_before_a_rescue_can_read_it() {
+        let mut vars = HashMap::new();
+        Failure::in_task("shell", "login -p hunter2", "denied for hunter2")
+            .expose(&mut vars, |text| text.replace("hunter2", "***"));
+        assert_eq!(vars["@error.task"], "shell 'login -p ***'");
+        assert_eq!(vars["@error.msg"], "denied for ***");
     }
 
     /// A preview that did not fail cannot tell `always` whether the real run will: a
@@ -1556,7 +1573,7 @@ mod tests {
     #[test]
     fn a_step_failure_names_no_task() {
         let mut vars = HashMap::new();
-        Failure::in_step("until=: timed out").expose(&mut vars);
+        Failure::in_step("until=: timed out").expose(&mut vars, str::to_string);
         assert_eq!(vars["@error.task"], "");
         assert_eq!(vars["@error.msg"], "until=: timed out");
     }

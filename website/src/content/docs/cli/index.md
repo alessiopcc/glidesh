@@ -296,6 +296,10 @@ without contacting a host:
   directory of the plan the task is written in — an [included plan](/advanced/plan-includes/#path-resolution)'s
   own — as a run resolves it. Not checked: a `fetch` source, which is a path on the host, and
   a `src` containing `${…}`, which only a run can resolve.
+- **Templates read only what their block has.** A `file` template (`template #true`) in a
+  step's own tasks may not use `${@error.*}`, and one in its [`rescue` or
+  `always`](/advanced/rescue/) may not use `${@item}`: neither exists there, so the task
+  would fail when it runs.
 
 Every problem is listed, not only the first, and the command exits non-zero if there is any.
 

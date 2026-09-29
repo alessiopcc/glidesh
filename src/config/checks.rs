@@ -1,5 +1,6 @@
 //! Checks `glidesh validate` runs on a resolved plan without contacting any host.
 
+use crate::config::plan::{is_error_var, is_item_var};
 use crate::config::template::defined_references;
 use crate::config::types::{ParamValue, Plan, TaskDef};
 use std::path::{Path, PathBuf};
@@ -87,6 +88,65 @@ pub fn literal_reference_warnings(
         }
     }
     warnings
+}
+
+/// Tasks, the variables they cannot read, and why.
+type Block<'a> = (&'a [TaskDef], fn(&str) -> bool, &'a str);
+
+/// Variables a `file` template reads where they never exist: `${@error.*}` in a step's own
+/// tasks, which run before any failure, and `${@item}` in its `rescue` and `always`, which run
+/// after the loop. The parser rejects both in the plan; a template is only read here, and at
+/// run time would fail its task on the undefined variable.
+pub fn template_scope_problems(plan: &Plan, plan_dir: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    for step in plan.steps() {
+        let blocks: [Block; 3] = [
+            (
+                &step.tasks,
+                is_error_var,
+                "only rescue and always tasks can use it",
+            ),
+            (
+                &step.rescue,
+                is_item_var,
+                "rescue runs once per step, after the loop",
+            ),
+            (
+                &step.always,
+                is_item_var,
+                "always runs once per step, after the loop",
+            ),
+        ];
+        for (tasks, out_of_scope, why) in blocks {
+            for task in tasks {
+                if !matches!(task.args.get("template"), Some(ParamValue::Bool(true))) {
+                    continue;
+                }
+                let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) else {
+                    continue;
+                };
+                let mut files = Vec::new();
+                if resolved.is_dir() {
+                    files_under(&resolved, &mut files);
+                } else {
+                    files.push(resolved);
+                }
+                let names: std::collections::BTreeSet<String> = files
+                    .iter()
+                    .filter_map(|file| std::fs::read(file).ok())
+                    .flat_map(|content| defined_references(&content, out_of_scope))
+                    .collect();
+                for name in names {
+                    problems.push(format!(
+                        "step '{}': file '{}': template {} uses ${{{}}}, which is never \
+                         defined there: {}",
+                        step.name, task.resource, src, name, why
+                    ));
+                }
+            }
+        }
+    }
+    problems
 }
 
 /// `file` sources that are not given, or given but not found locally, one message each.
@@ -196,6 +256,52 @@ mod tests {
             }"#,
         );
         assert!(missing_file_sources(&p, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_template_reading_a_variable_its_block_never_has_is_a_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("body.txt"), "${@error.msg} ${@item}").unwrap();
+        std::fs::write(
+            dir.path().join("section.txt"),
+            "${@error.msg} ${@item.name}",
+        )
+        .unwrap();
+        let p = plan(
+            r#"step "s" loop="${xs}" {
+                file "/a" src="body.txt" template=#true
+                rescue { file "/b" src="section.txt" template=#true }
+                always { file "/c" src="section.txt" template=#true }
+            }"#,
+        );
+        let problems = template_scope_problems(&p, dir.path());
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(
+            problems[0].contains("file '/a': template body.txt uses ${@error.msg}")
+                && problems[0].contains("only rescue and always"),
+            "{}",
+            problems[0]
+        );
+        assert!(
+            problems[1].contains("file '/b': template section.txt uses ${@item.name}")
+                && problems[1].contains("rescue runs once per step"),
+            "{}",
+            problems[1]
+        );
+        assert!(
+            problems[2].contains("file '/c'") && problems[2].contains("always runs once"),
+            "{}",
+            problems[2]
+        );
+    }
+
+    /// Uploaded as-is, the text is never rendered, so nothing in it is read.
+    #[test]
+    fn an_untemplated_file_is_not_scope_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("body.txt"), "${@error.msg}").unwrap();
+        let p = plan(r#"step "s" { file "/a" src="body.txt" }"#);
+        assert!(template_scope_problems(&p, dir.path()).is_empty());
     }
 
     fn warnings_for(p: &Plan, dir: &Path, defined: &[&str]) -> Vec<String> {

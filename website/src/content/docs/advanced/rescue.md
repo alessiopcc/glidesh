@@ -70,7 +70,12 @@ always {
 ```
 
 The step's own tasks, `when=`, `until=` and `loop=` cannot use them — there is no failure yet
-— and a plan that tries is rejected when it is parsed.
+— and a plan that tries is rejected when it is parsed. A `file` template is read only when its
+task runs, so a run fails that task instead; [`glidesh validate`](/cli/#glidesh-validate)
+checks the templates too, and reports it before any host is touched.
+
+[Secrets](/concepts/secrets/) in the failure are redacted before a rescue sees it: a decrypted
+value in the failed command line or its output reads `***`, as it does in every log.
 
 ### Using them safely
 
@@ -135,7 +140,8 @@ plan "nginx" {
 - **A failed rescue fails the host**, as the step would have: `always` still runs, then the
   host stops. The same holds for a failed `always`, even when the step itself succeeded.
 - **Once per step.** `rescue` and `always` run after the step's loop, not per item, and do
-  not see `${@item}`: a plan whose `rescue` or `always` uses it is rejected when it is parsed.
+  not see `${@item}`: a plan whose `rescue` or `always` uses it is rejected when it is parsed,
+  and `glidesh validate` reports a `file` template in them that does.
 - **`register=`** works in both blocks. A rescue that does not run leaves its `register=`
   variables **undefined**, as a [skipped task](/advanced/conditionals/#what-a-skip-does)
   does — so a later `when="defined ${var}"` asks whether the rescue ran:

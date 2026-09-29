@@ -1002,6 +1002,9 @@ fn validate_plan_file(
     check
         .problems
         .extend(config::checks::missing_file_sources(&plan, plan_dir));
+    check
+        .problems
+        .extend(config::checks::template_scope_problems(&plan, plan_dir));
     check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, |name| {
         plan.vars.contains_key(name) || known_vars.contains(name) || is_builtin_var(name)
     });

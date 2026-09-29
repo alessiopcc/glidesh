@@ -647,7 +647,7 @@ fn find_reference(
         })
 }
 
-fn is_error_var(name: &str) -> bool {
+pub(crate) fn is_error_var(name: &str) -> bool {
     name == "@error" || name.starts_with("@error.")
 }
 
@@ -745,7 +745,7 @@ fn parse_until(node: &kdl::KdlNode, step: &str) -> Result<Option<UntilGate>, Gli
     }))
 }
 
-fn is_item_var(name: &str) -> bool {
+pub(crate) fn is_item_var(name: &str) -> bool {
     name == "@item" || name.starts_with("@item.")
 }
 

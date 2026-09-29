@@ -95,8 +95,29 @@ plan "gate-and-loop" {
             file "/root/g-cmd" src="task.txt" template=#true
         }
     }
+    step "Undefined loop" loop="${never-defined}" {
+        shell "touch /root/g-looped"
+        rescue {
+            file "/root/g-loop" src="task.txt" template=#true
+            shell "echo rescued >> /root/g-loop-count"
+        }
+    }
 }
 "#;
+
+/// The failed command prints a decrypted secret and has it in its command line.
+const SECRET_PLAN: &str = r#"
+plan "secret" {
+    step "Log in" {
+        shell "echo token=${api-token}; exit 3"
+        rescue {
+            file "/root/s-failure" src="failure.txt" template=#true
+        }
+    }
+}
+"#;
+
+const SECRET: &str = "hunter2-token";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rescued_failure_lets_the_host_go_on() {
@@ -251,6 +272,51 @@ async fn a_gate_timeout_and_a_failed_item_are_rescued_once() {
         "[shell 'echo ${never-defined}']",
         "named by its command, and written as text, not expanded again"
     );
+    assert_eq!(
+        ssh.exec("test -e /root/g-looped").await.unwrap().exit_code,
+        1,
+        "an undefined loop variable runs no item"
+    );
+    assert_eq!(
+        read("/root/g-loop").await,
+        "[]\n",
+        "a loop failure names no task"
+    );
+    assert_eq!(read("/root/g-loop-count").await, "rescued\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rescue_reads_the_failure_with_its_secrets_redacted() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let dir = tempfile::tempdir().unwrap();
+    write_inventory(dir.path(), &container);
+    std::fs::write(dir.path().join("plan.kdl"), SECRET_PLAN).unwrap();
+    write_templates(dir.path());
+    for args in [
+        &["secret", "init"][..],
+        &["secret", "set", "api-token", SECRET][..],
+    ] {
+        glidesh(dir.path()).args(args).assert().success();
+    }
+
+    let (ok, out) = run(dir.path(), &[]);
+    assert!(ok, "{out}");
+    let failure = ssh.exec("cat /root/s-failure").await.unwrap().stdout;
+    assert!(!failure.contains(SECRET), "{failure}");
+    assert!(
+        failure.starts_with("[shell 'echo token=***; exit 3']\n"),
+        "{failure}"
+    );
+    assert!(failure.contains("token=***"), "{failure}");
+}
+
+fn glidesh(dir: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("glidesh").unwrap();
+    cmd.current_dir(dir).env("GLIDESH_SECRET_PASS", "pw");
+    cmd
 }
 
 /// The recommended way to use a failure: render it into a file, never into a command.
@@ -260,9 +326,7 @@ fn write_templates(dir: &Path) {
 }
 
 fn run(dir: &Path, extra: &[&str]) -> (bool, String) {
-    let out = Command::cargo_bin("glidesh")
-        .unwrap()
-        .current_dir(dir)
+    let out = glidesh(dir)
         .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl"])
         .args(["--no-tui", "--no-host-key-check"])
         .args(extra)
