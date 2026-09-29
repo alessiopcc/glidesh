@@ -11,6 +11,7 @@ use russh_keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::OpenFlags;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +29,8 @@ pub struct CommandOutput {
     pub exit_code: u32,
     pub stdout: String,
     pub stderr: String,
+    /// `stdout` went over [`OUTPUT_LIMIT`] and lost its middle.
+    pub stdout_cut: bool,
 }
 
 /// Exit code reported for a command that did not exit with a status of its own, as the
@@ -50,6 +53,89 @@ fn exit_outcome(status: Option<u32>, signal: Option<&str>) -> (u32, Option<Strin
             NO_EXIT_STATUS,
             Some("connection closed before the command reported an exit status".into()),
         ),
+    }
+}
+
+/// Most bytes of one output stream (stdout or stderr) a command keeps in memory: the first
+/// half and the latest half. A command that prints without end — a `yes`, a chatty build, a
+/// log followed by an `until=` gate — would otherwise grow the controller's memory until the
+/// command exits, for every host at once.
+pub const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+
+/// One output stream, capped at a limit: it keeps the start, where a command says what it
+/// is doing, and the end, where it says how it failed.
+struct CappedStream {
+    limit: usize,
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    dropped: u64,
+}
+
+/// How much to reserve before adding `adding` bytes to a buffer holding `len` of `capacity`,
+/// if it must grow: double, as `Vec` would, but never past `max` — left to itself, the
+/// doubling could allocate up to twice the limit.
+fn growth(len: usize, capacity: usize, adding: usize, max: usize) -> Option<usize> {
+    let needed = len + adding;
+    (needed > capacity).then(|| (capacity * 2).max(needed).min(max) - len)
+}
+
+impl CappedStream {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            head: Vec::new(),
+            tail: VecDeque::new(),
+            dropped: 0,
+        }
+    }
+
+    fn push(&mut self, mut data: &[u8]) {
+        let head_limit = self.limit / 2;
+        let to_head = (head_limit - self.head.len()).min(data.len());
+        if let Some(more) = growth(self.head.len(), self.head.capacity(), to_head, head_limit) {
+            self.head.reserve_exact(more);
+        }
+        self.head.extend_from_slice(&data[..to_head]);
+        data = &data[to_head..];
+
+        // Evict before extending, so the deque never holds more than `tail_limit` bytes and
+        // never allocates past them (draining does not give capacity back).
+        let tail_limit = self.limit - head_limit;
+        if data.len() >= tail_limit {
+            self.dropped += (self.tail.len() + data.len() - tail_limit) as u64;
+            self.tail.clear();
+            data = &data[data.len() - tail_limit..];
+        } else {
+            let over = (self.tail.len() + data.len()).saturating_sub(tail_limit);
+            self.tail.drain(..over);
+            self.dropped += over as u64;
+        }
+        if let Some(more) = growth(
+            self.tail.len(),
+            self.tail.capacity(),
+            data.len(),
+            tail_limit,
+        ) {
+            self.tail.reserve_exact(more);
+        }
+        self.tail.extend(data);
+    }
+
+    /// The kept text, and whether anything was dropped.
+    fn finish(self) -> (String, bool) {
+        let mut bytes = self.head;
+        let cut = self.dropped > 0;
+        if cut {
+            bytes.extend_from_slice(
+                format!(
+                    "\n[glidesh: {} bytes of output dropped here]\n",
+                    self.dropped
+                )
+                .as_bytes(),
+            );
+        }
+        bytes.extend(self.tail);
+        (String::from_utf8_lossy(&bytes).into_owned(), cut)
     }
 }
 
@@ -383,8 +469,8 @@ impl SshSession {
             let _ = channel.eof().await;
         }
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        let mut stdout = CappedStream::new(OUTPUT_LIMIT);
+        let mut stderr = CappedStream::new(OUTPUT_LIMIT);
         let mut status: Option<u32> = None;
         let mut signal: Option<String> = None;
         let mut exited = false;
@@ -410,10 +496,10 @@ impl SshSession {
 
             match msg {
                 russh::ChannelMsg::Data { ref data } => {
-                    stdout.extend_from_slice(data);
+                    stdout.push(data);
                 }
                 russh::ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    stderr.extend_from_slice(data);
+                    stderr.push(data);
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     status = Some(exit_status);
@@ -428,17 +514,19 @@ impl SshSession {
         }
 
         let (exit_code, why) = exit_outcome(status, signal.as_deref());
-        let mut stderr = String::from_utf8_lossy(&stderr).to_string();
+        let (mut stderr, _) = stderr.finish();
         if let Some(why) = why {
             if !stderr.is_empty() && !stderr.ends_with('\n') {
                 stderr.push('\n');
             }
             stderr.push_str(&why);
         }
+        let (stdout, stdout_cut) = stdout.finish();
         Ok(CommandOutput {
             exit_code,
-            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stdout,
             stderr,
+            stdout_cut,
         })
     }
 
@@ -1130,5 +1218,67 @@ mod tests {
             why.unwrap()
                 .contains("before the command reported an exit status")
         );
+    }
+
+    fn capped(limit: usize, chunks: &[&[u8]]) -> (String, bool) {
+        let mut stream = CappedStream::new(limit);
+        for chunk in chunks {
+            stream.push(chunk);
+        }
+        stream.finish()
+    }
+
+    #[test]
+    fn output_within_the_limit_is_kept_whole() {
+        assert_eq!(
+            capped(8, &[b"abc", b"defgh"]),
+            ("abcdefgh".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn output_over_the_limit_keeps_its_start_and_its_end() {
+        let (text, cut) = capped(8, &[b"abc", b"defghij", b"klmn"]);
+        assert_eq!(
+            text,
+            "abcd\n[glidesh: 6 bytes of output dropped here]\nklmn"
+        );
+        assert!(cut);
+    }
+
+    /// Only a cut is a cut: output that prints the marker line itself is kept as it is.
+    #[test]
+    fn output_that_prints_the_marker_is_not_cut() {
+        let marker = b"a\n[glidesh: 42 bytes of output dropped here]\nb";
+        let (text, cut) = capped(1024, &[marker]);
+        assert_eq!(text.as_bytes(), marker);
+        assert!(!cut);
+    }
+
+    #[test]
+    fn a_chunk_larger_than_the_limit_keeps_only_its_end() {
+        let (text, _) = capped(4, &[b"a", b"bcdefghijklm", b"no"]);
+        assert_eq!(text, "ab\n[glidesh: 11 bytes of output dropped here]\nno");
+    }
+
+    #[test]
+    fn many_small_chunks_count_every_dropped_byte() {
+        let chunks: Vec<&[u8]> = std::iter::repeat_n(&b"x"[..], 1000).collect();
+        let (text, _) = capped(10, &chunks);
+        assert!(text.contains("[glidesh: 990 bytes of output dropped here]"));
+    }
+
+    /// The limit bounds memory, not just what is returned: neither buffer may allocate past
+    /// its half, whatever the chunk sizes.
+    #[test]
+    fn the_buffers_never_allocate_past_the_limit() {
+        let limit = 1000;
+        let mut stream = CappedStream::new(limit);
+        for size in (1..400).cycle().step_by(37).take(500) {
+            stream.push(&vec![b'x'; size]);
+            assert!(stream.head.capacity() <= limit / 2, "head");
+            assert!(stream.tail.capacity() <= limit - limit / 2, "tail");
+            assert!(stream.tail.len() <= limit - limit / 2);
+        }
     }
 }

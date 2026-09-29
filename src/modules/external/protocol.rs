@@ -110,6 +110,10 @@ pub struct ApplyResponse {
     pub output: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// The plugin says `output` lost its middle — typically because it passes on an `exec`
+    /// result whose `stdout_cut` was set — so `register=` must refuse it.
+    #[serde(default)]
+    pub output_cut: bool,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +154,9 @@ pub enum SshResponse {
         exit_code: u32,
         stdout: String,
         stderr: String,
+        /// `stdout` went over the output limit and lost its middle. Omitted when false.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stdout_cut: bool,
     },
     Upload {
         ok: bool,

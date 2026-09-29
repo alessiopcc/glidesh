@@ -203,6 +203,7 @@ mod tests {
             exit_code: 1,
             stdout: String::new(),
             stderr: "sudo: a password is required".to_string(),
+            stdout_cut: false,
         };
         assert!(classify_failure(&r, &out).is_some());
     }
@@ -233,6 +234,7 @@ mod tests {
             exit_code: 1,
             stdout: "su: Authentication failure".to_string(),
             stderr: String::new(),
+            stdout_cut: false,
         };
         match classify_failure(&r, &out) {
             Some(GlideshError::RunAs { message, .. }) => {
@@ -249,6 +251,7 @@ mod tests {
             exit_code: 2,
             stdout: String::new(),
             stderr: "mkfs: device not found".to_string(),
+            stdout_cut: false,
         };
         assert!(classify_failure(&r, &out).is_none());
     }
@@ -260,6 +263,7 @@ mod tests {
             exit_code: 0,
             stdout: "0".to_string(),
             stderr: String::new(),
+            stdout_cut: false,
         };
         assert!(classify_failure(&r, &out).is_none());
     }

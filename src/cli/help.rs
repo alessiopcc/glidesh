@@ -115,6 +115,9 @@ PLAN SYNTAX
     Booleans are #true / #false. Every task also accepts:
     when=\"<condition>\"          skip this task unless the condition holds
     register=\"var\"              store the task's trimmed output in ${var} for later steps
+                                (a command run on a host keeps only the first and last
+                                4 MiB of its output, so registering output over 8 MiB
+                                fails the task)
     run-as=\"<user>\"             escalate this task only; run-as=\"\" opts out
 
 VARIABLES
@@ -207,5 +210,12 @@ mod tests {
     fn the_help_examples_parse() {
         glidesh::config::parse_inventory(example_inventory!()).unwrap();
         glidesh::config::parse_plan(example_plan!()).unwrap();
+    }
+
+    #[test]
+    fn the_help_states_the_output_limit() {
+        let mib = glidesh::ssh::connection::OUTPUT_LIMIT / (1024 * 1024);
+        assert!(super::RUN.contains(&format!("output over {mib} MiB")));
+        assert!(super::RUN.contains(&format!("{} MiB of its output", mib / 2)));
     }
 }

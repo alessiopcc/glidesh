@@ -398,6 +398,7 @@ impl Module for SystemdModule {
                 output: format!("[dry-run] Would {}", actions.join(", ")),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -432,6 +433,7 @@ impl Module for SystemdModule {
                 output: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -453,6 +455,7 @@ impl Module for SystemdModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 }

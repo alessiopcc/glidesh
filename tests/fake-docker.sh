@@ -17,6 +17,8 @@
 #                         was reused rather than recreated
 #   c/<name>/health       present only when the run declared a healthcheck
 #   c/<name>/undeletable  when present, `rm` fails (models a stuck container)
+#   flood                 when present, `run -d`, `stop`, `start` and `unpause` print
+#                         9 MB first (models a runtime that outgrows the output limit)
 set -u
 
 # Overridable so the stub itself can be exercised outside the test container.
@@ -24,6 +26,7 @@ ROOT=${FAKE_DOCKER_ROOT:-/var/lib/fakedocker}
 mkdir -p "$ROOT/c" "$ROOT/net"
 
 cdir() { echo "$ROOT/c/$1"; }
+flood() { [ -e "$ROOT/flood" ] && yes flood | head -c 9000000; }
 
 cmd="${1:-}"
 [ $# -gt 0 ] && shift
@@ -149,6 +152,7 @@ run)
 
     if [ "$detach" = yes ]; then
         echo running >"$d/status"
+        flood
         echo "fakeid-$name-$gen"
         exit 0
     fi
@@ -171,6 +175,7 @@ stop | start | unpause)
     stop) echo exited >"$d/status" ;;
     *) echo running >"$d/status" ;;
     esac
+    flood
     echo "$name"
     ;;
 
