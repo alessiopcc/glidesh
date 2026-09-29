@@ -202,13 +202,20 @@ fn test_sandbox_runs_a_module_outside_the_allowed_dirs() {
     .unwrap();
     std::fs::set_permissions(&module, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let mut cmd = Command::new(&module);
-    apply_probe_sandbox(&mut cmd, Some(&module));
-    let output = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to spawn sandboxed module");
+    // A test running in parallel may fork while the script is still open for writing
+    // here; until that child execs, Linux refuses to run the script (ETXTBSY).
+    let mut attempts = 0;
+    let output = loop {
+        let mut cmd = Command::new(&module);
+        apply_probe_sandbox(&mut cmd, Some(&module));
+        match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => break result.expect("failed to spawn sandboxed module"),
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
