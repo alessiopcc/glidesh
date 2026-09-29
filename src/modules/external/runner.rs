@@ -231,7 +231,7 @@ impl crate::modules::Module for ExternalModule {
                 output: resp.output,
                 stderr: resp.stderr,
                 exit_code: resp.exit_code,
-                output_cut: false,
+                output_cut: resp.output_cut,
             }),
             PluginMessage::Error(e) => Err(GlideshError::Module {
                 module: self.info.name.clone(),
@@ -256,11 +256,13 @@ async fn handle_ssh_request(ctx: &ModuleContext<'_>, req: SshRequest) -> SshResp
                 exit_code: output.exit_code,
                 stdout: output.stdout,
                 stderr: output.stderr,
+                stdout_cut: output.stdout_cut,
             },
             Err(e) => SshResponse::Exec {
                 exit_code: 255,
                 stdout: String::new(),
                 stderr: e.to_string(),
+                stdout_cut: false,
             },
         },
         SshRequest::Upload {
@@ -465,7 +467,23 @@ mod tests {
     fn test_apply_response_deserialize() {
         let json = r#"{"changed":true,"output":"done","stderr":"","exit_code":0}"#;
         let msg: PluginMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, PluginMessage::ApplyResponse(_)));
+        assert!(matches!(
+            msg,
+            PluginMessage::ApplyResponse(ApplyResponse {
+                output_cut: false,
+                ..
+            })
+        ));
+
+        let json = r#"{"changed":true,"output":"big","stderr":"","exit_code":0,"output_cut":true}"#;
+        let msg: PluginMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            PluginMessage::ApplyResponse(ApplyResponse {
+                output_cut: true,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -501,10 +519,21 @@ mod tests {
             exit_code: 0,
             stdout: "root".to_string(),
             stderr: String::new(),
+            stdout_cut: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("ssh_result"));
         assert!(json.contains("exec"));
+        assert!(!json.contains("stdout_cut"), "omitted when false: {json}");
+
+        let resp = SshResponse::Exec {
+            exit_code: 0,
+            stdout: "start\n[glidesh: 9 bytes of output dropped here]\nend".to_string(),
+            stderr: String::new(),
+            stdout_cut: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""stdout_cut":true"#), "{json}");
     }
 
     #[test]

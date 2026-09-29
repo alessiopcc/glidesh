@@ -190,6 +190,8 @@ the [run log](/concepts/logs/) is cut much shorter still.
 
 A task whose output was cut cannot be [registered](/advanced/loops-register/#register): the
 task fails instead. Send large output to a file on the host and register something smaller.
+An [external module](/advanced/writing-plugins/#apply-response) writes its own output, so
+it is refused only when the plugin reports it as cut.
 
 ## Idempotency
 

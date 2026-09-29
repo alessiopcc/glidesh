@@ -377,3 +377,94 @@ plan "big" {
         "the host must stop at the failed register"
     );
 }
+
+/// A plugin that runs a command over the limit is told its `stdout` was cut, and a plugin
+/// that reports its own output as cut has it refused by `register=`.
+///
+/// The plugin reads the 8 MiB `exec` response with `head -n 1`: `read` goes byte by byte on a
+/// pipe, and glidesh sends nothing more until the plugin answers, so `head` cannot swallow a
+/// later message.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_learns_its_exec_output_was_cut_and_can_refuse_register() {
+    use std::os::unix::fs::PermissionsExt;
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = container.write_key_file(dir.path());
+    let modules = dir.path().join("modules");
+    std::fs::create_dir_all(&modules).unwrap();
+    let plugin = modules.join("glidesh-module-flood");
+    std::fs::write(
+        &plugin,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+    case "$line" in
+    *'"method":"describe"'*)
+        echo '{"name":"test/flood","version":"1.0.0","protocol_version":1}' ;;
+    *'"method":"check"'*)
+        echo '{"status":"pending","plan":"flood"}' ;;
+    *'"method":"apply"'*)
+        echo '{"ssh":"exec","command":"yes x | head -c 9000000"}'
+        result=$(head -n 1)
+        case "$result" in
+        *'"stdout_cut":true'*) cut=true ;;
+        *) cut=false ;;
+        esac
+        echo "{\"changed\":true,\"output\":\"x\",\"stderr\":\"\",\"exit_code\":0,\"output_cut\":$cut}" ;;
+    *'"method":"shutdown"'*)
+        exit 0 ;;
+    esac
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        r#"
+plan "plugin" {
+    step "Flood" {
+        external "test/flood" "x" register="out"
+    }
+    step "After" {
+        shell "touch /root/plugin-cut-after"
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        format!(
+            "host \"target\" \"127.0.0.1\" user=\"root\" port={} {{\n    vars {{\n        ssh-key {:?}\n    }}\n}}\n",
+            container.port,
+            key.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let out = assert_cmd::Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("HOME", home.path())
+        .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl"])
+        .args(["--no-tui", "--no-host-key-check"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("too long for register="), "{text}");
+    let after = ssh.exec("test -e /root/plugin-cut-after").await.unwrap();
+    assert_ne!(
+        after.exit_code, 0,
+        "the host must stop at the refused register"
+    );
+}

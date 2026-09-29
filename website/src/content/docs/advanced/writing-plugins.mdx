@@ -131,6 +131,11 @@ requests. Read a missing `triggered` as false.
 }
 ```
 
+`output` is what a task's [`register=`](/advanced/loops-register/#register) captures. Add
+`"output_cut": true` when it is incomplete — typically an `exec` `stdout` that came back with
+[`"stdout_cut": true`](#exec--run-a-command) — and `register=` fails the task instead of
+capturing it. Omitted, it is false.
+
 ### Error Response
 
 If something goes wrong, return an error at any point:
@@ -156,7 +161,13 @@ Response:
 ```
 
 `stdout` and `stderr` are each capped at 8 MiB, keeping the first and last 4 MiB (see
-[Output limit](/modules/shell/#output-limit)). To read something larger, use `download`.
+[Output limit](/modules/shell/#output-limit)). When `stdout` was cut, the response carries
+`"stdout_cut": true`; it is omitted otherwise. To read something larger, use `download`.
+
+A plugin that passes such a `stdout` on as its apply `output` should set
+[`"output_cut": true`](#apply-response), so that `register=` refuses it rather than hand later
+steps a value with its middle missing. glidesh cannot tell on its own: a plugin's `output` is
+whatever the plugin writes.
 
 ### upload — Write a file
 

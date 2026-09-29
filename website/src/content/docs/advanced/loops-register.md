@@ -31,7 +31,9 @@ What the variable holds depends on what happened to the task:
   4 MiB of the output of a command it runs on a host (see
   [Output limit](/modules/shell/#output-limit)), and a
   value with its middle missing would feed later steps the wrong data. Write large output to
-  a file on the host and register something smaller, such as its path.
+  a file on the host and register something smaller, such as its path. An external module
+  writes its own output, so this holds for it only when the plugin
+  [reports the cut](/advanced/writing-plugins/#apply-response).
 
 :::caution[`register` is empty under `--dry-run`]
 A preview never runs the task's own command — that is the change it is declining to make —
