@@ -26,23 +26,43 @@ pub fn distinct_prompts<'a>(plans: impl IntoIterator<Item = &'a Plan>) -> Vec<Va
 }
 
 /// Split `--var name=value` flags. A malformed flag, or a name given twice, is an error.
+///
+/// A malformed flag is described, never echoed: it may be a password typed without its
+/// `name=`, and nothing is registered for redaction yet.
 fn parse_var_flags(flags: &[String]) -> Result<Vec<(String, String)>, GlideshError> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for flag in flags {
         let Some((name, value)) = flag.split_once('=').filter(|(n, _)| !n.trim().is_empty()) else {
+            let problem = if flag.contains('=') {
+                "a --var has no name before '='"
+            } else {
+                "a --var has no '='"
+            };
             return Err(GlideshError::Other(format!(
-                "--var '{flag}' must be name=value, e.g. --var release=v1.2"
+                "{problem}: it must be name=value, e.g. --var release=v1.2"
             )));
         };
         let name = name.trim();
         if pairs.iter().any(|(n, _)| n == name) {
             return Err(GlideshError::Other(format!(
-                "--var '{name}' is given more than once"
+                "--var '{}' is given more than once",
+                shown_name(name)
             )));
         }
         pairs.push((name.to_string(), value.to_string()));
     }
     Ok(pairs)
+}
+
+/// A `--var` name as an error may show it. A name made only of the characters variable names
+/// use is shown, so a typo such as `relase` is visible; anything else may be the start of a
+/// password that itself contains `=`, and is not.
+fn shown_name(name: &str) -> &str {
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if plain { name } else { "<not a variable name>" }
 }
 
 /// Answer each prompt: from its `--var name=value` flag, else by `ask`ing when stdin is a
@@ -63,6 +83,7 @@ pub fn resolve_answers(
         .iter()
         .map(|(n, _)| n.as_str())
         .filter(|n| !prompts.iter().any(|p| p.name == *n))
+        .map(shown_name)
         .collect();
     if !unknown.is_empty() {
         let declared = if prompts.is_empty() {
@@ -231,6 +252,21 @@ mod tests {
         assert!(err.contains("declares no vars-prompt"), "{err}");
     }
 
+    /// A password containing `=` passed without its `name=` splits into a "name" that is the
+    /// start of the password: only a name that looks like one is echoed.
+    #[test]
+    fn an_undeclared_name_is_shown_only_when_it_looks_like_a_name() {
+        let prompts = [prompt("db-password", None, true)];
+        for (flag, shown) in [("relase=v1", true), ("hunter2!x=rest", false)] {
+            let err = resolve_answers(&prompts, &flags(&[flag]), false, never_ask)
+                .unwrap_err()
+                .to_string();
+            let name = flag.split_once('=').unwrap().0;
+            assert_eq!(err.contains(name), shown, "{flag}: {err}");
+            assert!(err.contains("does not ask for"), "{err}");
+        }
+    }
+
     #[test]
     fn a_malformed_or_repeated_var_flag_is_an_error() {
         let prompts = [prompt("release", None, false)];
@@ -239,6 +275,20 @@ mod tests {
                 resolve_answers(&prompts, &flags(bad), false, never_ask).is_err(),
                 "{bad:?} was accepted"
             );
+        }
+    }
+
+    /// A password typed without its `name=` must not end up on stderr before anything is
+    /// registered to mask it.
+    #[test]
+    fn a_malformed_var_flag_is_not_echoed() {
+        let prompts = [prompt("db-password", None, true)];
+        for bad in ["hunter2-secret", "=hunter2-secret"] {
+            let err = resolve_answers(&prompts, &flags(&[bad]), false, never_ask)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("name=value"), "{err}");
+            assert!(!err.contains("hunter2"), "{bad}: {err}");
         }
     }
 

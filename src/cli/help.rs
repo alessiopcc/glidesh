@@ -170,7 +170,8 @@ PROMPTED VARIABLES (vars-prompt)
   prompt for is an error). When stdin is not a terminal, a prompt without --var takes its
   default, or the run fails before connecting and names every missing --var.
   Only the plan you run may prompt: vars-prompt in an included plan is an error, as is a
-  prompted name that is also in vars. --dry-run asks too; `validate` never asks.
+  prompted name that is also in vars, or one with `=` or whitespace (--var could not name
+  it). --dry-run asks too; `validate` never asks.
 
 CONDITIONS (when=)
   ${a} == value   ${a} != value   ${a}   defined ${a}   undefined ${a}   !term   x && y   x || y

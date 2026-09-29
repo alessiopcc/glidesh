@@ -94,7 +94,8 @@ plan "deploy" {
 }
 ```
 
-Each child is a variable name, the question to ask, and optionally:
+Each child is a variable name (without `=` or whitespace, so `--var name=value` can always
+answer it), the question to ask, and optionally:
 
 - `default="…"` — taken when the answer is empty, and when there is no terminal to ask on
 - `secret=#true` — read without echo, and shown as `***` in the TUI, plain output and run
