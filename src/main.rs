@@ -620,6 +620,10 @@ fn ask_prompt(prompt: &config::types::VarPrompt) -> Result<String, GlideshError>
             }
             line.trim_end_matches(['\r', '\n']).to_string()
         };
+        if config::prompts::too_short_to_mask(prompt, &answer) {
+            eprintln!("{}", config::prompts::short_secret_problem());
+            continue;
+        }
         match (&prompt.default, answer.is_empty()) {
             (_, false) => return Ok(answer),
             (Some(default), true) => return Ok(default.clone()),

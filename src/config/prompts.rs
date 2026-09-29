@@ -2,6 +2,7 @@
 
 use crate::config::types::{Plan, VarPrompt};
 use crate::error::GlideshError;
+use crate::secrets::MIN_REDACTABLE_LEN;
 
 /// A prompted variable's value for this run.
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +140,13 @@ pub fn resolve_answers(
                 None if interactive => ask(p)?,
                 None => p.default.clone().unwrap_or_default(),
             };
+            if too_short_to_mask(p, &value) {
+                return Err(GlideshError::Other(format!(
+                    "{}: {}",
+                    p.name,
+                    short_secret_problem()
+                )));
+            }
             Ok(Answer {
                 name: p.name.clone(),
                 value,
@@ -146,6 +154,21 @@ pub fn resolve_answers(
             })
         })
         .collect()
+}
+
+/// A secret answer shorter than [`MIN_REDACTABLE_LEN`] would be shown as it is: redaction
+/// leaves values that short alone, since masking them would shred unrelated output. So such
+/// an answer is refused rather than printed. An empty one shows nothing and is allowed.
+pub fn too_short_to_mask(prompt: &VarPrompt, value: &str) -> bool {
+    prompt.secret && !value.is_empty() && value.len() < MIN_REDACTABLE_LEN
+}
+
+/// Why [`too_short_to_mask`] refuses an answer, for the error and the terminal.
+pub fn short_secret_problem() -> String {
+    format!(
+        "a secret answer needs at least {MIN_REDACTABLE_LEN} characters, or it could not be \
+         masked as *** in output and logs"
+    )
 }
 
 /// Put each answer into the plan variables of the plans that asked for it — the same slot
@@ -233,6 +256,28 @@ mod tests {
         assert_eq!(answers[0].value, "v2");
         assert_eq!(answers[1].value, "typed");
         assert!(answers[1].secret);
+    }
+
+    /// Redaction leaves values under `MIN_REDACTABLE_LEN` alone, so a short secret would be
+    /// printed; it is refused, from `--var` and from a default alike, and never echoed.
+    #[test]
+    fn a_secret_answer_too_short_to_mask_is_refused() {
+        let secret = [prompt("pin", None, true)];
+        let err = resolve_answers(&secret, &flags(&["pin=123"]), false, never_ask)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pin") && err.contains("at least 4"), "{err}");
+        assert!(!err.contains("123"), "{err}");
+
+        let with_default = [prompt("pin", Some("12"), true)];
+        assert!(resolve_answers(&with_default, &[], false, never_ask).is_err());
+
+        for ok in ["1234", ""] {
+            let flag = format!("pin={ok}");
+            assert!(resolve_answers(&secret, &flags(&[&flag]), false, never_ask).is_ok());
+        }
+        let plain = [prompt("pin", None, false)];
+        assert!(resolve_answers(&plain, &flags(&["pin=1"]), false, never_ask).is_ok());
     }
 
     #[test]
