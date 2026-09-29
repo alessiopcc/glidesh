@@ -57,21 +57,30 @@ fn join_and(items: &[String]) -> String {
     }
 }
 
+/// The names a secrets file defines: scalars, and structured (list) values.
+#[derive(Debug, Default)]
+pub struct SecretNames {
+    pub vars: HashSet<String>,
+    pub structured: HashSet<String>,
+}
+
 /// The plan's variables — its own, its includes', and the `vars-prompt` names that answer
 /// into them — that the inventory, or the secrets file, also sets for any of `hosts`.
+/// Structured variables only meet the secrets file's: the inventory has none.
 ///
 /// `inventory` is the inventory as written, before secrets-file values are merged into
-/// its global vars; `secret_names` are those values' names. Without an inventory, a run
-/// targets a host given on the command line, and only the secrets file can be shadowed.
+/// its global vars, and `plan` before the secrets file's structured values are merged into
+/// it — after that, whose they were is lost. Without an inventory, a run targets a host
+/// given on the command line, and only the secrets file can be shadowed.
 pub fn shadowed<'a>(
     plan: &Plan,
     inventory: Option<&Inventory>,
-    secret_names: &HashSet<String>,
+    secrets: &SecretNames,
     hosts: impl IntoIterator<Item = &'a str>,
 ) -> Vec<Shadow> {
     let hosts: HashSet<&str> = hosts.into_iter().collect();
     let mut scopes: BTreeMap<&str, BTreeSet<VarScope>> = BTreeMap::new();
-    for name in secret_names {
+    for name in &secrets.vars {
         scopes
             .entry(name.as_str())
             .or_default()
@@ -113,15 +122,34 @@ pub fn shadowed<'a>(
         .map(String::as_str)
         .chain(plan.prompts.iter().map(|p| p.name.as_str()))
         .collect();
-    plan_names
+    let structured = plan
+        .structured_vars
+        .keys()
+        .filter(|name| secrets.structured.contains(*name))
+        .map(|name| (name.as_str(), BTreeSet::from([VarScope::SecretsFile])));
+    let scalars = plan_names
         .into_iter()
-        .filter_map(|name| {
-            scopes.get(name).map(|found| Shadow {
-                plan: plan.name.clone(),
-                name: name.to_string(),
-                scopes: found.clone(),
-            })
-        })
+        .filter_map(|name| scopes.get(name).map(|found| (name, found.clone())));
+    merged(scalars.chain(structured).map(|(name, scopes)| Shadow {
+        plan: plan.name.clone(),
+        name: name.to_string(),
+        scopes,
+    }))
+}
+
+/// One shadow per plan and variable, with the scopes of all: a plan several inventory
+/// groups run is checked once per group.
+pub fn merged(shadows: impl IntoIterator<Item = Shadow>) -> Vec<Shadow> {
+    let mut by_name: BTreeMap<(String, String), BTreeSet<VarScope>> = BTreeMap::new();
+    for shadow in shadows {
+        by_name
+            .entry((shadow.plan, shadow.name))
+            .or_default()
+            .extend(shadow.scopes);
+    }
+    by_name
+        .into_iter()
+        .map(|((plan, name), scopes)| Shadow { plan, name, scopes })
         .collect()
 }
 
@@ -161,7 +189,10 @@ host "lone" "10.0.2.1" {
     fn shadows(plan: &str, secrets: &[&str], hosts: &[&str]) -> Vec<Shadow> {
         let inventory = parse_inventory(INVENTORY).unwrap();
         let plan = parse_plan(plan).unwrap();
-        let secrets = secrets.iter().map(|s| s.to_string()).collect();
+        let secrets = SecretNames {
+            vars: secrets.iter().map(|s| s.to_string()).collect(),
+            ..SecretNames::default()
+        };
         shadowed(&plan, Some(&inventory), &secrets, hosts.iter().copied())
     }
 
@@ -232,7 +263,10 @@ host "lone" "10.0.2.1" {
                 step "s" { shell "true" } }"#,
         )
         .unwrap();
-        let secrets = HashSet::from(["token".to_string()]);
+        let secrets = SecretNames {
+            vars: HashSet::from(["token".to_string()]),
+            ..SecretNames::default()
+        };
         let found = shadowed(&plan, None, &secrets, ["10.0.0.9"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "token");
@@ -253,5 +287,56 @@ host "lone" "10.0.2.1" {
              'lone': the plan's value wins, as plan vars merge last"
         );
         assert!(!warning.contains("default-customer") && !warning.contains("acme"));
+    }
+
+    #[test]
+    fn a_structured_plan_var_the_secrets_file_also_defines_counts() {
+        let plan = parse_plan(
+            r#"plan "p" {
+                vars {
+                    api-keys {
+                        - name="a" value="x"
+                    }
+                    other {
+                        - name="b"
+                    }
+                }
+                step "s" { shell "true" }
+            }"#,
+        )
+        .unwrap();
+        let secrets = SecretNames {
+            vars: HashSet::from(["other".to_string()]),
+            structured: HashSet::from(["api-keys".to_string()]),
+        };
+        let found = shadowed(&plan, None, &secrets, ["web-1"]);
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["api-keys"],
+            "a scalar and a list of one name do not meet"
+        );
+        assert_eq!(scopes(&found[0]), [VarScope::SecretsFile]);
+    }
+
+    #[test]
+    fn shadows_of_one_plan_from_several_groups_merge_into_one() {
+        let shadow = |scope: VarScope| Shadow {
+            plan: "deploy".to_string(),
+            name: "customer".to_string(),
+            scopes: BTreeSet::from([scope]),
+        };
+        let found = merged([
+            shadow(VarScope::Group("web".to_string())),
+            shadow(VarScope::Host("db-1".to_string())),
+        ]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            scopes(&found[0]),
+            [
+                VarScope::Group("web".to_string()),
+                VarScope::Host("db-1".to_string())
+            ]
+        );
     }
 }

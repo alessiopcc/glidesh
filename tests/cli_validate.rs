@@ -479,3 +479,39 @@ fn validate_inventory_warns_only_for_the_plans_own_hosts() {
         "db-1 does not run the plan:\n{text}"
     );
 }
+
+/// A list variable the plan and the secrets file both define: the plan's wins.
+#[test]
+fn a_structured_plan_variable_the_secrets_file_also_defines_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "inventory.kdl", "host \"web-1\" \"10.0.0.1\"\n");
+    write(
+        dir.path(),
+        "secrets.kdl",
+        "api-keys {\n    - name=\"a\" value=\"secret:v1:one\"\n}\n",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "deploy" {
+    vars {
+        api-keys {
+            - name="placeholder" value="x"
+        }
+    }
+    step "s" { shell "true" }
+}"#,
+    );
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["validate", "-p", "plan.kdl", "-i", "inventory.kdl"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("overrides 'api-keys', which is also set by the secrets file"),
+        "{text}"
+    );
+}

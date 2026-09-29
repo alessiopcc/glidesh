@@ -233,3 +233,57 @@ fn a_run_warns_when_a_plan_variable_overrides_the_inventory() {
     );
     assert!(!text.contains("acme"), "{text}");
 }
+
+/// Two groups running one plan give one warning with the scopes of both.
+#[test]
+fn a_plan_several_groups_run_warns_once_per_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        r#"plan "deploy" {
+    vars {
+        customer "default-customer"
+    }
+    step "s" { shell "echo ${customer}" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        r#"group "web" plan="plan.kdl" {
+    vars {
+        customer "acme"
+    }
+    host "web-1" "192.0.2.1" user="root"
+}
+group "db" plan="plan.kdl" {
+    host "db-1" "192.0.2.2" user="root" {
+        vars {
+            customer "globex"
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .args([
+            "run",
+            "-i",
+            "inventory.kdl",
+            "--no-tui",
+            "--no-host-key-check",
+        ])
+        .args(["--key", "absent-key"])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .unwrap();
+    let text = squash(&String::from_utf8_lossy(&out.stderr));
+    let warning = squash(
+        "warning: plan 'deploy' overrides 'customer', which is also set by group 'web' and \
+         host 'db-1'",
+    );
+    assert_eq!(text.matches(&warning).count(), 1, "{text}");
+}

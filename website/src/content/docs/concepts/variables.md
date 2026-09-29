@@ -174,7 +174,8 @@ plan "enroll" {
 
 Because that is easy to miss, glidesh warns whenever a plan variable — its own, an
 included plan's, or a `vars-prompt` name — is also set by the inventory or the secrets file
-for a host the plan runs on. `glidesh validate -i` reports it, and `glidesh run` prints it
+for a host the plan runs on, and when a [structured variable](#structured-variables) the
+plan defines is also in the secrets file. `glidesh validate -i` reports it, and `glidesh run` prints it
 before connecting to any host, once per plan and variable:
 
 ```
