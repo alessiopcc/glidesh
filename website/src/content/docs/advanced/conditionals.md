@@ -133,7 +133,7 @@ A skipped step or task:
 - runs nothing on the host — no `check`, no `apply`;
 - is reported as `skipped`, with the condition as written in the plan;
 - is counted separately from `changed` in the host and run summaries — a skipped step counts
-  each of its tasks;
+  each of its tasks (its [`always`](/advanced/rescue/) tasks too, not its `rescue` tasks);
 - **does not trigger [subscribers](/advanced/subscribe/)**: a skipped step made no change, so
   steps that `subscribe` to it do not run because of it;
 - **leaves its `register` variable undefined** — not empty. If it held a value from earlier,

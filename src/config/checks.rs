@@ -46,7 +46,7 @@ pub fn literal_reference_warnings(
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     for step in plan.steps() {
-        for task in &step.tasks {
+        for task in step.all_tasks() {
             let templated = matches!(task.args.get("template"), Some(ParamValue::Bool(true)));
             let Some((src, resolved)) =
                 local_source(task, step.base_dir(plan_dir)).filter(|_| !templated)
@@ -97,7 +97,7 @@ pub fn literal_reference_warnings(
 pub fn missing_file_sources(plan: &Plan, plan_dir: &Path) -> Vec<String> {
     let mut missing = Vec::new();
     for step in plan.steps() {
-        for task in &step.tasks {
+        for task in step.all_tasks() {
             if task.module == "file" && task.args.get("src").and_then(ParamValue::as_str).is_none()
             {
                 missing.push(format!(

@@ -5,7 +5,10 @@ Deploy nginx with a templated configuration file.
 ## What It Does
 
 1. Installs nginx via the system package manager
-2. Deploys a templated `nginx.conf` with variable interpolation (`${server-name}`, `${doc-root}`)
+2. Deploys a templated `nginx.conf` with variable interpolation (`${server-name}`, `${doc-root}`),
+   and checks it with `nginx -t`. If nginx rejects it, a
+   [`rescue`](https://glidesh.netlify.app/advanced/rescue/) block puts the previous config back
+   and fails the host; an `always` block removes the backup either way
 3. Starts and enables the nginx service
 4. Restarts nginx only when its configuration changed (`subscribe`)
 5. Runs a health check with retries

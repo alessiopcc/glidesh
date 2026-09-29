@@ -37,6 +37,21 @@ macro_rules! example_plan {
     };
 }
 
+macro_rules! example_rescue {
+    () => {
+        r#"  step "Deploy" {
+      shell "deploy.sh"
+      rescue {
+          shell "rollback.sh"
+          shell "logger -t deploy \"${@error.task} failed\""
+      }
+      always {
+          shell "rm -f /tmp/deploy.lock"
+      }
+  }"#
+    };
+}
+
 pub const TOP_LEVEL: &str = concat!(
     "\
 glidesh connects to hosts over SSH and applies a plan to them. Nothing is installed on the
@@ -76,7 +91,8 @@ With no command, glidesh opens the interactive console for ./inventory.kdl.
 Docs: https://glidesh.netlify.app"
 );
 
-pub const RUN: &str = "\
+pub const RUN: &str = concat!(
+    "\
 Examples:
   glidesh run -i inventory.kdl -p plan.kdl
   glidesh run -i inventory.kdl -p plan.kdl -t web --dry-run --diff
@@ -95,9 +111,10 @@ PLAN SYNTAX
       vars { name \"value\" }     variables for this plan (they override inventory variables)
       vars-file \"vars.kdl\"      more variables, from a file of `name \"value\"` lines
       include \"common.kdl\"      inline another plan's steps and variables here
-      step \"<name>\" [attributes] { <tasks> }
+      step \"<name>\" [attributes] { <tasks> [rescue { <tasks> }] [always { <tasks> }] }
   }
-  Steps run in order; tasks in a step run in order. A step stops the host on failure.
+  Steps run in order; tasks in a step run in order. A step stops the host on failure,
+  unless its rescue block handles it (see RESCUE AND ALWAYS).
   Step attributes:
     when=\"<condition>\"          skip the step unless the condition holds
     tags=\"web,deploy\"           select the step with --tags / --skip-tags (see TAGS)
@@ -127,6 +144,7 @@ VARIABLES
             ${@os.id} ${@os.version} ${@os.family} ${@os.pkg-manager} ${@os.init}
             ${@os.container-runtime} ${@os.nix-installed}
             ${@inventory.<host>.address|user|port|vars.<name>}
+            ${@error.msg} ${@error.task} (in rescue and always blocks only)
   In `file` templates: ${for h in @group.web}${h.address}${endfor}, and loops over list
   variables. An undefined variable fails the task.
 
@@ -148,6 +166,20 @@ UNTIL (wait for the host to be ready)
   tasks and loop, after when= and tags. Timing out fails the host with the command's last
   output. Waiting is not a change: it never triggers subscribers. --dry-run checks once and
   never waits. Prefer it to a polling shell with retries=, which counts as a change.
+
+RESCUE AND ALWAYS (handle a step's failure)
+",
+    example_rescue!(),
+    "
+  rescue runs only if the step failed: a task failed, its until= timed out, or its loop=
+  variable is undefined (an error in its when= is not rescued). The step's tasks stop at
+  the failure. If every rescue task succeeds, the failure is handled and the host goes on.
+  always runs after the step and any rescue, whether or not they failed.
+  Both run once per step, after its loop, not per item, and have no ${@item}. They can read
+  ${@error.msg} (the error) and ${@error.task} (module 'resource'; empty when the step
+  failed outside its tasks). A failed rescue or always fails the host. A rescue that does
+  not run leaves its register= variables undefined. A step's changed status, which
+  subscribe= reads, counts all three blocks. A skipped step skips all three.
 
 SUBSCRIBE
   A step with subscribe= is triggered when a step it names changed something. Triggered:
@@ -201,7 +233,8 @@ SSH
   keys are checked against ~/.ssh/known_hosts. Hosts behind a bastion use a `jump \"<addr>\"`
   child node on their group or host in the inventory.
 
-Docs: https://glidesh.netlify.app/cli/#glidesh-run";
+Docs: https://glidesh.netlify.app/cli/#glidesh-run"
+);
 
 #[cfg(test)]
 mod tests {
@@ -210,6 +243,14 @@ mod tests {
     fn the_help_examples_parse() {
         glidesh::config::parse_inventory(example_inventory!()).unwrap();
         glidesh::config::parse_plan(example_plan!()).unwrap();
+    }
+
+    #[test]
+    fn the_rescue_example_parses() {
+        let plan = format!("plan \"p\" {{\n{}\n}}", example_rescue!());
+        let plan = glidesh::config::parse_plan(&plan).unwrap();
+        let step = plan.steps()[0];
+        assert_eq!((step.rescue.len(), step.always.len()), (2, 1));
     }
 
     #[test]

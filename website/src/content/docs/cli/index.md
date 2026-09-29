@@ -175,6 +175,9 @@ Details worth knowing:
   succeeds.
 - A step's [`until=`](/advanced/until/) gate is checked once and never waited for; a gate
   that is not open yet is reported as `until not met yet`, and the preview goes on.
+- A step's [`rescue`](/advanced/rescue/) runs only if computing its preview failed. Whether
+  the real run will fail is unknown, so a `when=` that tests a rescue's `register=` variable
+  is reported as undetermined.
 - A step using [`subscribe`](/advanced/subscribe/) whose target changed is reported as it
   would run: a restart, recreate or command it would redo is `would change`, with a reason
   ending in `(triggered)`; a task with nothing to redo is `ok`.

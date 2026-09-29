@@ -512,11 +512,36 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
     }
 
     let mut tasks = Vec::new();
+    let mut rescue = None;
+    let mut always = None;
 
     if let Some(children) = node.children() {
-        for task_node in children.nodes() {
-            tasks.push(parse_task(task_node)?);
+        for child in children.nodes() {
+            let section = match child.name().value() {
+                "rescue" => &mut rescue,
+                "always" => &mut always,
+                _ => {
+                    tasks.push(parse_task(child)?);
+                    continue;
+                }
+            };
+            let kind = child.name().value();
+            if section.is_some() {
+                return Err(GlideshError::ConfigParse {
+                    message: format!("step '{name}': more than one {kind} block"),
+                });
+            }
+            *section = Some(parse_section(child, &name, kind)?);
         }
+    }
+
+    if let Some(var) = step_reads_error_var(&tasks, when.as_ref(), until.as_ref(), &loop_source) {
+        return Err(GlideshError::ConfigParse {
+            message: format!(
+                "step '{name}': only rescue and always tasks can use ${{{var}}}, which describes \
+                 the step's failure"
+            ),
+        });
     }
 
     let run_as = super::parse_run_as_attrs(node)?;
@@ -530,8 +555,87 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
         when,
         tags,
         until,
+        rescue: rescue.unwrap_or_default(),
+        always: always.unwrap_or_default(),
         source_dir: None,
     })
+}
+
+/// The tasks of a step's `rescue { }` or `always { }` block.
+fn parse_section(
+    node: &kdl::KdlNode,
+    step: &str,
+    kind: &str,
+) -> Result<Vec<TaskDef>, GlideshError> {
+    let err = |message: String| GlideshError::ConfigParse {
+        message: format!("step '{step}': {message}"),
+    };
+    if !node.entries().is_empty() {
+        return Err(err(format!(
+            "{kind} takes no arguments or attributes, only a block of tasks: {kind} {{ ... }}"
+        )));
+    }
+    let children = node.children().map(|c| c.nodes()).unwrap_or_default();
+    if children.is_empty() {
+        return Err(err(format!("{kind} needs at least one task")));
+    }
+    children
+        .iter()
+        .map(|child| match child.name().value() {
+            nested @ ("rescue" | "always") => Err(err(format!(
+                "{nested} cannot go inside {kind}; put it directly in the step"
+            ))),
+            _ => parse_task(child),
+        })
+        .collect()
+}
+
+/// A `${@error.*}` reference outside `rescue`/`always`, where no failure exists yet: the
+/// step's own tasks, its `when=`, `until=` and `loop=`.
+fn step_reads_error_var(
+    tasks: &[TaskDef],
+    when: Option<&Condition>,
+    until: Option<&UntilGate>,
+    loop_source: &Option<LoopSource>,
+) -> Option<String> {
+    let in_text = |text: &str| {
+        text.find("${@error").map(|at| {
+            text[at + 2..]
+                .split('}')
+                .next()
+                .unwrap_or("@error")
+                .to_string()
+        })
+    };
+    let in_condition = |cond: Option<&Condition>| {
+        cond.and_then(|c| c.variables().find(|v| is_error_var(v)).map(str::to_string))
+    };
+    let in_args = |task: &TaskDef| {
+        task.args.values().find_map(|value| match value {
+            ParamValue::String(s) => in_text(s),
+            ParamValue::List(items) => items.iter().find_map(|s| in_text(s)),
+            ParamValue::Map(map) => map.values().find_map(|s| in_text(s)),
+            _ => None,
+        })
+    };
+    let in_loop = match loop_source {
+        Some(LoopSource::Variable(var)) if is_error_var(var) => Some(var.clone()),
+        _ => None,
+    };
+    in_condition(when)
+        .or_else(|| until.and_then(|u| in_text(&u.command)))
+        .or(in_loop)
+        .or_else(|| {
+            tasks.iter().find_map(|task| {
+                in_text(&task.resource)
+                    .or_else(|| in_args(task))
+                    .or_else(|| in_condition(task.when.as_ref()))
+            })
+        })
+}
+
+fn is_error_var(name: &str) -> bool {
+    name == "@error" || name.starts_with("@error.")
 }
 
 const STEP_ATTRS: &[&str] = &[
@@ -1944,6 +2048,92 @@ plan "test" {
                 shell "echo"
             }"#,
         );
+    }
+
+    #[test]
+    fn rescue_and_always_hold_their_own_tasks() {
+        let step = one_step(
+            r#"step "s" {
+                shell "deploy.sh"
+                rescue {
+                    shell "rollback.sh" when="defined ${@error.task}"
+                    shell "echo ${@error.msg}" register="why"
+                }
+                always { shell "rm -f /tmp/lock" }
+                shell "verify.sh"
+            }"#,
+        );
+        let resources = |tasks: &[TaskDef]| -> Vec<String> {
+            tasks.iter().map(|t| t.resource.clone()).collect()
+        };
+        assert_eq!(resources(&step.tasks), ["deploy.sh", "verify.sh"]);
+        assert_eq!(
+            resources(&step.rescue),
+            ["rollback.sh", "echo ${@error.msg}"]
+        );
+        assert_eq!(resources(&step.always), ["rm -f /tmp/lock"]);
+        assert_eq!(step.all_tasks().count(), 5);
+    }
+
+    #[test]
+    fn a_step_without_rescue_or_always_has_none() {
+        let step = one_step(r#"step "s" { shell "echo" }"#);
+        assert!(step.rescue.is_empty() && step.always.is_empty());
+    }
+
+    #[test]
+    fn malformed_rescue_and_always_blocks_fail_to_parse() {
+        for (body, expected) in [
+            (
+                r#"step "s" { shell "a"; rescue { shell "b" }; rescue { shell "c" } }"#,
+                "more than one rescue block",
+            ),
+            (
+                r#"step "s" { shell "a"; always }"#,
+                "always needs at least one task",
+            ),
+            (
+                r#"step "s" { shell "a"; rescue { } }"#,
+                "rescue needs at least one task",
+            ),
+            (
+                r#"step "s" { shell "a"; rescue "x" { shell "b" } }"#,
+                "rescue takes no arguments or attributes",
+            ),
+            (
+                r#"step "s" { shell "a"; rescue when="${x}" { shell "b" } }"#,
+                "rescue takes no arguments or attributes",
+            ),
+            (
+                r#"step "s" { shell "a"; rescue { always { shell "b" } } }"#,
+                "always cannot go inside rescue",
+            ),
+        ] {
+            let err = plan_err(body);
+            assert!(err.contains(expected), "{body}: {err}");
+        }
+    }
+
+    /// No failure exists yet where the step's own work runs, so the reference could only
+    /// fail at run time.
+    #[test]
+    fn only_rescue_and_always_can_read_the_error() {
+        for body in [
+            r#"step "s" { shell "echo ${@error.msg}" }"#,
+            r#"step "s" { shell "echo" when="defined ${@error.msg}" }"#,
+            r#"step "s" { shell { cmd "a" "echo ${@error.task}" } }"#,
+            r#"step "s" { shell "a" { environment { WHY "${@error.msg}" } } }"#,
+            r#"step "s" when="defined ${@error.msg}" { shell "a" }"#,
+            r#"step "s" until="test -n '${@error.msg}'" { shell "a" }"#,
+            r#"step "s" loop="${@error.msg}" { shell "a" }"#,
+        ] {
+            let err = plan_err(body);
+            assert!(
+                err.contains("only rescue and always tasks can use ${@error."),
+                "{body}: {err}"
+            );
+        }
+        one_step(r#"step "s" { shell "a"; always { shell "echo" when="defined ${@error.msg}" } }"#);
     }
 
     fn rollout(body: &str) -> Result<Plan, String> {

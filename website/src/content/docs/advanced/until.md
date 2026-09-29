@@ -56,7 +56,7 @@ is ready. `until=` asks whether the host is ready for a whole step.
   skipped step does not wait.
 - **Timing out fails the host**, like any failing step: the host stops and the error names the
   command, its last exit code and the tail of its last output. Nothing after it runs on that
-  host. An attempt that is still running at the deadline is cut off and does not count, even
+  host, unless the step's [`rescue`](/advanced/rescue/) handles the failure. An attempt that is still running at the deadline is cut off and does not count, even
   if it would have succeeded — so a command that hangs cannot hold the step past
   `until-timeout`. glidesh stops trying once another attempt could not start before the
   deadline.

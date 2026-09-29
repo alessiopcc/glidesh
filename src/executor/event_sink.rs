@@ -128,6 +128,7 @@ impl EventSink {
             other @ (ExecutorEvent::NodeConnecting { .. }
             | ExecutorEvent::NodeConnected { .. }
             | ExecutorEvent::StepStarted { .. }
+            | ExecutorEvent::SectionStarted { .. }
             | ExecutorEvent::BatchStarted { .. }
             | ExecutorEvent::HostsAborted { .. }
             | ExecutorEvent::NodeComplete { .. }

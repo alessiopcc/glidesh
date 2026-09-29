@@ -1,6 +1,6 @@
 pub mod storage;
 
-use crate::executor::result::{ExecutorEvent, waiting_text};
+use crate::executor::result::{ExecutorEvent, Section, waiting_text};
 use chrono::Utc;
 use glidesh::error::GlideshError;
 use std::collections::HashMap;
@@ -274,6 +274,21 @@ impl RunLogger {
                         waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
                     ),
                 );
+            }
+            ExecutorEvent::SectionStarted {
+                host,
+                step,
+                section,
+            } => {
+                self.log_line(host, &format!("[{}] [step: {}]", section.label(), step));
+                // A rescue handles the failure just logged; if the rescue fails too, its own
+                // failure is recorded in its place.
+                if *section == Section::Rescue {
+                    if let Some(summary) = self.node_summaries.get_mut(host) {
+                        summary.failed_step = None;
+                        summary.error = None;
+                    }
+                }
             }
             ExecutorEvent::TaskSkipped {
                 host,
@@ -565,6 +580,51 @@ mod tests {
                 "[WAITING] [step: Wait] still waiting (30s of 300s) until: test -e /ready"
             ),
             "{log}"
+        );
+    }
+
+    fn failed(logger: &mut RunLogger, resource: &str) {
+        logger.handle_event(&ExecutorEvent::ModuleFailed {
+            host: "web-1".to_string(),
+            module: "shell".to_string(),
+            resource: resource.to_string(),
+            error: format!("{resource} failed"),
+        });
+    }
+
+    fn rescue(logger: &mut RunLogger) {
+        logger.handle_event(&ExecutorEvent::SectionStarted {
+            host: "web-1".to_string(),
+            step: "Deploy".to_string(),
+            section: Section::Rescue,
+        });
+    }
+
+    /// The failure stays in the log, but the host's summary does not report an error it
+    /// recovered from.
+    #[test]
+    fn a_rescued_failure_is_logged_but_not_left_as_the_hosts_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut logger = logger(tmp.path());
+        logger.handle_event(&ExecutorEvent::NodeConnecting {
+            host: "web-1".to_string(),
+        });
+        failed(&mut logger, "deploy.sh");
+        rescue(&mut logger);
+        logger.write_summary().unwrap();
+
+        let log = storage::read_node_log(logger.run_dir(), "web-1").unwrap();
+        assert!(log.contains("deploy.sh failed"), "{log}");
+        assert!(log.contains("[RESCUE] [step: Deploy]"), "{log}");
+        let saved = storage::read_summary(logger.run_dir()).unwrap();
+        assert_eq!(saved.nodes["web-1"].error, None);
+
+        failed(&mut logger, "rollback.sh");
+        logger.write_summary().unwrap();
+        let saved = storage::read_summary(logger.run_dir()).unwrap();
+        assert_eq!(
+            saved.nodes["web-1"].error.as_deref(),
+            Some("rollback.sh failed")
         );
     }
 

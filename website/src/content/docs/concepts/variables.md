@@ -84,7 +84,7 @@ When the same variable is defined at multiple levels, the most specific value wi
 Inventory global vars → Group vars → Host vars → Plan vars
 ```
 
-Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@item`, `@inventory`, `@group`) that user variables cannot collide with — a variable name may not begin with `@`.
+Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@item`, `@inventory`, `@group`, `@error`) that user variables cannot collide with — a variable name may not begin with `@`. `${@error.msg}` and `${@error.task}` describe a step's failure to its [`rescue` and `always`](/advanced/rescue/#reading-the-failure) tasks.
 
 ## Built-in Host Variables
 

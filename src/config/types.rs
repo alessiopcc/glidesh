@@ -367,6 +367,12 @@ pub struct Step {
     pub tags: Vec<String>,
     /// A command polled on the host before the step's tasks, until it exits 0.
     pub until: Option<UntilGate>,
+    /// Run when the step fails once it has started (its `until=` gate, loop or tasks). If
+    /// they succeed the failure is handled and the host goes on; they can read
+    /// `${@error.msg}` and `${@error.task}`.
+    pub rescue: Vec<TaskDef>,
+    /// Run after the step's tasks and any `rescue`, whether or not they failed.
+    pub always: Vec<TaskDef>,
     /// Directory of the included plan this step came from, set by `resolve_includes`;
     /// `None` for the top-level plan's own steps. Relative `file` sources resolve from here.
     pub source_dir: Option<std::path::PathBuf>,
@@ -395,6 +401,11 @@ impl Step {
     /// The directory this step's relative paths resolve from.
     pub fn base_dir<'a>(&'a self, plan_dir: &'a std::path::Path) -> &'a std::path::Path {
         self.source_dir.as_deref().unwrap_or(plan_dir)
+    }
+
+    /// Every task the step declares: its own, then its `rescue` and `always` tasks.
+    pub fn all_tasks(&self) -> impl Iterator<Item = &TaskDef> {
+        self.tasks.iter().chain(&self.rescue).chain(&self.always)
     }
 }
 

@@ -473,6 +473,8 @@ mod tests {
             "SUBSCRIBE",
             "until=",
             "until-timeout",
+            "RESCUE AND ALWAYS",
+            "${@error.msg}",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }
