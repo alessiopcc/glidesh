@@ -29,6 +29,8 @@ pub struct CommandOutput {
     pub exit_code: u32,
     pub stdout: String,
     pub stderr: String,
+    /// `stdout` went over [`OUTPUT_LIMIT`] and lost its middle.
+    pub stdout_cut: bool,
 }
 
 /// Exit code reported for a command that did not exit with a status of its own, as the
@@ -60,19 +62,6 @@ fn exit_outcome(status: Option<u32>, signal: Option<&str>) -> (u32, Option<Strin
 /// command exits, for every host at once.
 pub const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 
-const DROPPED_PREFIX: &str = "\n[glidesh: ";
-const DROPPED_SUFFIX: &str = " bytes of output dropped here]\n";
-
-/// Whether `text` is output [`OUTPUT_LIMIT`] cut in the middle: it holds the whole marker
-/// line, count included, so output that merely quotes its wording does not match.
-pub fn output_was_cut(text: &str) -> bool {
-    text.match_indices(DROPPED_PREFIX).any(|(at, _)| {
-        let rest = &text[at + DROPPED_PREFIX.len()..];
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        digits > 0 && rest[digits..].starts_with(DROPPED_SUFFIX)
-    })
-}
-
 /// One output stream, capped at a limit: it keeps the start, where a command says what it
 /// is doing, and the end, where it says how it failed.
 struct CappedStream {
@@ -80,6 +69,14 @@ struct CappedStream {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     dropped: u64,
+}
+
+/// How much to reserve before adding `adding` bytes to a buffer holding `len` of `capacity`,
+/// if it must grow: double, as `Vec` would, but never past `max` — left to itself, the
+/// doubling could allocate up to twice the limit.
+fn growth(len: usize, capacity: usize, adding: usize, max: usize) -> Option<usize> {
+    let needed = len + adding;
+    (needed > capacity).then(|| (capacity * 2).max(needed).min(max) - len)
 }
 
 impl CappedStream {
@@ -93,34 +90,52 @@ impl CappedStream {
     }
 
     fn push(&mut self, mut data: &[u8]) {
-        let head_room = (self.limit / 2).saturating_sub(self.head.len());
-        let to_head = head_room.min(data.len());
+        let head_limit = self.limit / 2;
+        let to_head = (head_limit - self.head.len()).min(data.len());
+        if let Some(more) = growth(self.head.len(), self.head.capacity(), to_head, head_limit) {
+            self.head.reserve_exact(more);
+        }
         self.head.extend_from_slice(&data[..to_head]);
         data = &data[to_head..];
 
-        let tail_limit = self.limit - self.limit / 2;
+        // Evict before extending, so the deque never holds more than `tail_limit` bytes and
+        // never allocates past them (draining does not give capacity back).
+        let tail_limit = self.limit - head_limit;
         if data.len() >= tail_limit {
             self.dropped += (self.tail.len() + data.len() - tail_limit) as u64;
             self.tail.clear();
             data = &data[data.len() - tail_limit..];
-        }
-        self.tail.extend(data);
-        let over = self.tail.len().saturating_sub(tail_limit);
-        if over > 0 {
+        } else {
+            let over = (self.tail.len() + data.len()).saturating_sub(tail_limit);
             self.tail.drain(..over);
             self.dropped += over as u64;
         }
+        if let Some(more) = growth(
+            self.tail.len(),
+            self.tail.capacity(),
+            data.len(),
+            tail_limit,
+        ) {
+            self.tail.reserve_exact(more);
+        }
+        self.tail.extend(data);
     }
 
-    fn into_string(self) -> String {
+    /// The kept text, and whether anything was dropped.
+    fn finish(self) -> (String, bool) {
         let mut bytes = self.head;
-        if self.dropped > 0 {
+        let cut = self.dropped > 0;
+        if cut {
             bytes.extend_from_slice(
-                format!("{DROPPED_PREFIX}{}{DROPPED_SUFFIX}", self.dropped).as_bytes(),
+                format!(
+                    "\n[glidesh: {} bytes of output dropped here]\n",
+                    self.dropped
+                )
+                .as_bytes(),
             );
         }
         bytes.extend(self.tail);
-        String::from_utf8_lossy(&bytes).into_owned()
+        (String::from_utf8_lossy(&bytes).into_owned(), cut)
     }
 }
 
@@ -499,17 +514,19 @@ impl SshSession {
         }
 
         let (exit_code, why) = exit_outcome(status, signal.as_deref());
-        let mut stderr = stderr.into_string();
+        let (mut stderr, _) = stderr.finish();
         if let Some(why) = why {
             if !stderr.is_empty() && !stderr.ends_with('\n') {
                 stderr.push('\n');
             }
             stderr.push_str(&why);
         }
+        let (stdout, stdout_cut) = stdout.finish();
         Ok(CommandOutput {
             exit_code,
-            stdout: stdout.into_string(),
+            stdout,
             stderr,
+            stdout_cut,
         })
     }
 
@@ -1203,52 +1220,65 @@ mod tests {
         );
     }
 
-    fn capped(limit: usize, chunks: &[&[u8]]) -> String {
+    fn capped(limit: usize, chunks: &[&[u8]]) -> (String, bool) {
         let mut stream = CappedStream::new(limit);
         for chunk in chunks {
             stream.push(chunk);
         }
-        stream.into_string()
+        stream.finish()
     }
 
     #[test]
     fn output_within_the_limit_is_kept_whole() {
-        let text = capped(8, &[b"abc", b"defgh"]);
-        assert_eq!(text, "abcdefgh");
-        assert!(!output_was_cut(&text));
+        assert_eq!(
+            capped(8, &[b"abc", b"defgh"]),
+            ("abcdefgh".to_string(), false)
+        );
     }
 
     #[test]
     fn output_over_the_limit_keeps_its_start_and_its_end() {
-        let text = capped(8, &[b"abc", b"defghij", b"klmn"]);
+        let (text, cut) = capped(8, &[b"abc", b"defghij", b"klmn"]);
         assert_eq!(
             text,
             "abcd\n[glidesh: 6 bytes of output dropped here]\nklmn"
         );
-        assert!(output_was_cut(&text));
+        assert!(cut);
     }
 
+    /// Only a cut is a cut: output that prints the marker line itself is kept as it is.
     #[test]
-    fn quoting_the_marker_wording_is_not_a_cut() {
-        assert!(!output_was_cut("docs: bytes of output dropped here]"));
-        assert!(!output_was_cut(
-            "a\n[glidesh: N bytes of output dropped here]\nb"
-        ));
-        assert!(!output_was_cut(
-            "a\n[glidesh:  bytes of output dropped here]\nb"
-        ));
+    fn output_that_prints_the_marker_is_not_cut() {
+        let marker = b"a\n[glidesh: 42 bytes of output dropped here]\nb";
+        let (text, cut) = capped(1024, &[marker]);
+        assert_eq!(text.as_bytes(), marker);
+        assert!(!cut);
     }
 
     #[test]
     fn a_chunk_larger_than_the_limit_keeps_only_its_end() {
-        let text = capped(4, &[b"a", b"bcdefghijklm", b"no"]);
+        let (text, _) = capped(4, &[b"a", b"bcdefghijklm", b"no"]);
         assert_eq!(text, "ab\n[glidesh: 11 bytes of output dropped here]\nno");
     }
 
     #[test]
     fn many_small_chunks_count_every_dropped_byte() {
         let chunks: Vec<&[u8]> = std::iter::repeat_n(&b"x"[..], 1000).collect();
-        let text = capped(10, &chunks);
+        let (text, _) = capped(10, &chunks);
         assert!(text.contains("[glidesh: 990 bytes of output dropped here]"));
+    }
+
+    /// The limit bounds memory, not just what is returned: neither buffer may allocate past
+    /// its half, whatever the chunk sizes.
+    #[test]
+    fn the_buffers_never_allocate_past_the_limit() {
+        let limit = 1000;
+        let mut stream = CappedStream::new(limit);
+        for size in (1..400).cycle().step_by(37).take(500) {
+            stream.push(&vec![b'x'; size]);
+            assert!(stream.head.capacity() <= limit / 2, "head");
+            assert!(stream.tail.capacity() <= limit - limit / 2, "tail");
+            assert!(stream.tail.len() <= limit - limit / 2);
+        }
     }
 }

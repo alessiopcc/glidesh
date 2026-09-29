@@ -162,6 +162,7 @@ impl Module for DiskModule {
                 output: format!("[dry-run] Would manage disk {} -> {}", device, mount_point),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -286,6 +287,7 @@ impl DiskModule {
             output: actions.join("; "),
             stderr: String::new(),
             exit_code: 0,
+            output_cut: false,
         })
     }
 
@@ -329,6 +331,7 @@ impl DiskModule {
             output: actions.join("; "),
             stderr: String::new(),
             exit_code: 0,
+            output_cut: false,
         })
     }
 }

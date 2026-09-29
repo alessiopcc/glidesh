@@ -14,7 +14,7 @@ use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
-use glidesh::ssh::connection::{CommandOutput, OUTPUT_LIMIT, output_was_cut};
+use glidesh::ssh::connection::{CommandOutput, OUTPUT_LIMIT};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
@@ -270,10 +270,10 @@ fn task_output(
 ///
 /// Output cut at [`OUTPUT_LIMIT`] is refused rather than registered: its middle is gone, and
 /// a later `loop=` would iterate over the marker line as if it were an item.
-fn captured_output(dry_run: bool, output: &str) -> Result<String, String> {
+fn captured_output(dry_run: bool, output: &str, cut: bool) -> Result<String, String> {
     if dry_run {
         Ok(String::new())
-    } else if output_was_cut(output) {
+    } else if cut {
         Err(format!(
             "output is over {} MiB, too long for register= (only its start and end were kept)",
             OUTPUT_LIMIT / (1024 * 1024)
@@ -981,7 +981,11 @@ impl NodeRunner {
                             any_changed = true;
                         }
                         if let Some(ref var_name) = task.register {
-                            let value = match captured_output(self.dry_run, &result.output) {
+                            let value = match captured_output(
+                                self.dry_run,
+                                &result.output,
+                                result.output_cut,
+                            ) {
                                 Ok(value) => value,
                                 Err(error) => {
                                     let _ = self.event_tx.send(ExecutorEvent::ModuleFailed {
@@ -1100,9 +1104,8 @@ impl NodeRunner {
             .await;
 
         let result = result.and_then(|out| match &task.register {
-            Some(name) => {
-                captured_output(self.dry_run, &out.stdout).map(|value| (out, Some((name, value))))
-            }
+            Some(name) => captured_output(self.dry_run, &out.stdout, out.stdout_cut)
+                .map(|value| (out, Some((name, value)))),
             None => Ok((out, None)),
         });
         match result {
@@ -1160,6 +1163,7 @@ mod tests {
             exit_code: 7,
             stdout: "partial\n".into(),
             stderr: "connection refused\n".into(),
+            stdout_cut: false,
         };
         let err = gate_timeout_error(&until_gate(), Some(&out), false);
         assert!(
@@ -1179,6 +1183,7 @@ mod tests {
             exit_code: 1,
             stdout,
             stderr: String::new(),
+            stdout_cut: false,
         };
         let err = gate_timeout_error(&until_gate(), Some(&out), false);
         assert!(
@@ -1219,6 +1224,7 @@ mod tests {
             exit_code: 7,
             stdout: String::new(),
             stderr: "connection refused\n".into(),
+            stdout_cut: false,
         };
         let err = gate_timeout_error(&until_gate(), Some(&out), true);
         assert_eq!(
@@ -1234,6 +1240,7 @@ mod tests {
             exit_code: 1,
             stdout: String::new(),
             stderr: " \n".into(),
+            stdout_cut: false,
         };
         assert!(!gate_timeout_error(&until_gate(), Some(&out), false).contains("last output"));
     }
@@ -1359,17 +1366,25 @@ mod tests {
     #[test]
     fn a_preview_registers_nothing() {
         assert_eq!(
-            captured_output(true, "[dry-run] Would run: lsblk -dn -o NAME").unwrap(),
+            captured_output(true, "[dry-run] Would run: lsblk -dn -o NAME", false).unwrap(),
             ""
         );
-        assert_eq!(captured_output(false, "  sda\nsdb\n").unwrap(), "sda\nsdb");
+        assert_eq!(
+            captured_output(false, "  sda\nsdb\n", false).unwrap(),
+            "sda\nsdb"
+        );
     }
 
     #[test]
     fn output_cut_at_the_limit_cannot_be_registered() {
-        let cut = "sda\n[glidesh: 42 bytes of output dropped here]\nsdz";
-        let err = captured_output(false, cut).unwrap_err();
+        let err = captured_output(false, "sda\nsdz", true).unwrap_err();
         assert!(err.contains("too long for register="), "{err}");
+        let marker = "sda\n[glidesh: 42 bytes of output dropped here]\nsdz";
+        assert_eq!(
+            captured_output(false, marker, false).unwrap(),
+            marker,
+            "only an actual cut is refused, not output that prints the marker"
+        );
     }
 
     #[test]

@@ -310,6 +310,7 @@ async fn output_over_the_limit_keeps_its_start_and_its_end() {
         .await
         .unwrap();
     assert_eq!(out.exit_code, 0);
+    assert!(out.stdout_cut);
     for (name, text, first, last) in [
         ("stdout", &out.stdout, "first\n", "last\n"),
         ("stderr", &out.stderr, "err-first\n", "err-last\n"),
@@ -317,6 +318,9 @@ async fn output_over_the_limit_keeps_its_start_and_its_end() {
         assert!(text.len() < limit + 100, "{name}: {} bytes", text.len());
         assert!(text.starts_with(first), "{name} lost its start");
         assert!(text.ends_with(last), "{name} lost its end");
-        assert!(glidesh::ssh::connection::output_was_cut(text), "{name}");
+        assert!(text.contains(" bytes of output dropped here]"), "{name}");
     }
+
+    let small = ssh.exec("echo small").await.unwrap();
+    assert!(!small.stdout_cut);
 }

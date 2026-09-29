@@ -225,6 +225,7 @@ impl NixModule {
                 output: format!("[dry-run] Would {} Nix package {}", desired_state, package),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -248,6 +249,7 @@ impl NixModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 
@@ -305,6 +307,7 @@ impl NixModule {
                 output: format!("[dry-run] Would run '{}' in Nix shell", command),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -327,6 +330,7 @@ impl NixModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 
@@ -375,6 +379,7 @@ impl NixModule {
                 output: format!("[dry-run] Would build {}", derivation),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -400,6 +405,7 @@ impl NixModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 
@@ -454,6 +460,7 @@ impl NixModule {
                 output: format!("[dry-run] Would {} channel {}", desired_state, channel_name),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -524,6 +531,7 @@ impl NixModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 
@@ -549,6 +557,7 @@ impl NixModule {
                 output: format!("[dry-run] Would update flake in {}", flake_dir),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -579,6 +588,7 @@ impl NixModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 
@@ -601,6 +611,7 @@ impl NixModule {
                 output: "[dry-run] Would garbage collect Nix store".to_string(),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -630,6 +641,7 @@ impl NixModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 }

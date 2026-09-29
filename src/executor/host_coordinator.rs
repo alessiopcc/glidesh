@@ -106,6 +106,7 @@ mod tests {
                         stdout: "shared".into(),
                         stderr: String::new(),
                         exit_code: 0,
+                        stdout_cut: false,
                     })
                 })
                 .await
@@ -172,6 +173,7 @@ mod tests {
                     stdout: String::new(),
                     stderr: String::new(),
                     exit_code: 0,
+                    stdout_cut: false,
                 })
             })
             .await;
@@ -193,6 +195,7 @@ mod tests {
                         stdout: String::new(),
                         stderr: String::new(),
                         exit_code: 0,
+                        stdout_cut: false,
                     })
                 })
                 .await;

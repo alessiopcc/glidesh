@@ -231,6 +231,7 @@ impl crate::modules::Module for ExternalModule {
                 output: resp.output,
                 stderr: resp.stderr,
                 exit_code: resp.exit_code,
+                output_cut: false,
             }),
             PluginMessage::Error(e) => Err(GlideshError::Module {
                 module: self.info.name.clone(),

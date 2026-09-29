@@ -55,6 +55,10 @@ pub struct ModuleResult {
     pub output: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// `output` is a command's stdout that went over
+    /// [`OUTPUT_LIMIT`](crate::ssh::connection::OUTPUT_LIMIT) and lost its middle, so
+    /// `register=` must not capture it.
+    pub output_cut: bool,
 }
 
 #[derive(Debug, Clone)]

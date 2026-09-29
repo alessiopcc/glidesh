@@ -321,6 +321,7 @@ impl FileModule {
                 output: format!("[dry-run] Would {} {} -> {}", mode_str, src, dest),
                 stderr: warning,
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -360,6 +361,7 @@ impl FileModule {
             output: output_msg,
             stderr: warning,
             exit_code: 0,
+            output_cut: false,
         })
     }
 
@@ -375,6 +377,7 @@ impl FileModule {
                 output: format!("[dry-run] Would fetch {} -> {}", src, dest),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -403,6 +406,7 @@ impl FileModule {
             output: format!("fetch {} -> {} ({} bytes)", src, dest, data.len()),
             stderr: String::new(),
             exit_code: 0,
+            output_cut: false,
         })
     }
 
@@ -624,6 +628,7 @@ impl FileModule {
                 ),
                 stderr: warnings,
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -711,6 +716,7 @@ impl FileModule {
             ),
             stderr: warnings,
             exit_code: 0,
+            output_cut: false,
         })
     }
 }

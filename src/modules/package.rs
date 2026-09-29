@@ -58,6 +58,7 @@ impl Module for PackageModule {
                 output: format!("[dry-run] Would {} package {}", desired_state, package),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -98,6 +99,7 @@ impl Module for PackageModule {
             output: output.stdout,
             stderr: output.stderr,
             exit_code: output.exit_code as i32,
+            output_cut: output.stdout_cut,
         })
     }
 }

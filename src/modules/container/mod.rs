@@ -161,6 +161,7 @@ impl Module for ContainerModule {
                 output: format!("[dry-run] {}{}", prefix, planned),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -173,6 +174,7 @@ impl Module for ContainerModule {
                     output: String::new(),
                     stderr: String::new(),
                     exit_code: 0,
+                    output_cut: false,
                 });
             }
             self.install_runtime(ctx, &runtime).await?;
@@ -499,6 +501,7 @@ impl ContainerModule {
             output,
             stderr: String::new(),
             exit_code: 0,
+            output_cut: false,
         })
     }
 
@@ -544,6 +547,7 @@ impl ContainerModule {
                         output: out.stdout,
                         stderr: out.stderr,
                         exit_code: out.exit_code as i32,
+                        output_cut: out.stdout_cut,
                     });
                 }
                 Some(out) => {
@@ -646,6 +650,7 @@ impl ContainerModule {
                 output: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -655,6 +660,7 @@ impl ContainerModule {
             output,
             stderr: String::new(),
             exit_code: 0,
+            output_cut: false,
         })
     }
 
@@ -669,6 +675,7 @@ impl ContainerModule {
                 output: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                output_cut: false,
             });
         }
 
@@ -678,6 +685,7 @@ impl ContainerModule {
             output: String::new(),
             stderr: String::new(),
             exit_code: 0,
+            output_cut: false,
         })
     }
 }

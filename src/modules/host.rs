@@ -19,6 +19,9 @@ pub struct HostOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// `stdout` went over [`OUTPUT_LIMIT`](crate::ssh::connection::OUTPUT_LIMIT) and lost
+    /// its middle. Only a remote (`on=`) command's output is capped.
+    pub stdout_cut: bool,
 }
 
 /// Execute a `host` task. Intended to be invoked exactly once per TaskKey
@@ -63,6 +66,7 @@ pub async fn run_host_task(
             stdout: format!("[dry-run] Would run on {}: {}", where_, command),
             stderr: String::new(),
             exit_code: 0,
+            stdout_cut: false,
         });
     }
 
@@ -119,6 +123,7 @@ async fn run_local(command: &str) -> Result<HostOutput, GlideshError> {
         stdout,
         stderr,
         exit_code,
+        stdout_cut: false,
     })
 }
 
@@ -170,6 +175,7 @@ async fn run_on_named_host(
     let stdout = output.stdout;
     let stderr = output.stderr;
     let exit_code = output.exit_code as i32;
+    let stdout_cut = output.stdout_cut;
 
     if exit_code != 0 {
         return Err(GlideshError::Module {
@@ -185,6 +191,7 @@ async fn run_on_named_host(
         stdout,
         stderr,
         exit_code,
+        stdout_cut,
     })
 }
 
