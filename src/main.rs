@@ -344,6 +344,8 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         vars: secret_vars,
         structured: secret_structured,
     } = parse_secrets(&args.secrets, inv_base_dir)?;
+    // As written, for telling which scope sets a variable a plan overrides.
+    let written_inventory = inventory.clone();
     let inventory = inventory.map(|mut inv| {
         add_secret_vars(&mut inv, &secret_vars);
         inv
@@ -540,6 +542,15 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     }
     let tags = TagFilter::from_args(args.tags.as_deref(), args.skip_tags.as_deref())?;
     tags.check_known(group_plans.iter().map(|gp| gp.plan.as_ref()))?;
+    // A host given with --host takes no inventory variables.
+    let shadowable = written_inventory.as_ref().filter(|_| args.host.is_none());
+    let secret_names: std::collections::HashSet<String> = secret_vars.keys().cloned().collect();
+    for gp in &group_plans {
+        let hosts = gp.targets.iter().map(|h| h.name.as_str());
+        for shadow in config::shadow::shadowed(&gp.plan, shadowable, &secret_names, hosts) {
+            eprintln!("warning: {}", shadow.warning());
+        }
+    }
     let answers = answer_prompts(&mut group_plans, &args.vars)?;
     let secrets = open_secrets(
         &args.secrets,
@@ -1043,6 +1054,7 @@ fn validate_plan_file(
     plan_path: &std::path::Path,
     inv_dir: Option<&std::path::Path>,
     known_vars: &std::collections::HashSet<String>,
+    shadows: impl Fn(&config::types::Plan) -> Vec<String>,
 ) -> PlanCheck {
     let fatal = |e: String| PlanCheck {
         problems: vec![e],
@@ -1084,7 +1096,27 @@ fn validate_plan_file(
             || known_vars.contains(name)
             || is_builtin_var(name)
     });
+    check.warnings.extend(shadows(&plan));
     check
+}
+
+/// `validate`'s warnings for `plan`'s variables that the inventory or the secrets file
+/// also sets for one of `hosts`.
+fn shadow_warnings(
+    plan: &config::types::Plan,
+    inventory: Option<&Inventory>,
+    secret_names: &std::collections::HashSet<String>,
+    hosts: &[String],
+) -> Vec<String> {
+    config::shadow::shadowed(
+        plan,
+        inventory,
+        secret_names,
+        hosts.iter().map(String::as_str),
+    )
+    .iter()
+    .map(config::shadow::Shadow::warning)
+    .collect()
 }
 
 /// A name in a namespace glidesh injects at run time, whatever the host.
@@ -1146,8 +1178,17 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
         for host in inventory.iter().flat_map(|inv| inv.resolve_targets(None)) {
             known_vars.extend(host.vars.into_keys());
         }
+        // `run -p` may target any of the inventory's hosts.
+        let hosts: Vec<String> = inventory
+            .iter()
+            .flat_map(|inv| inv.resolve_targets(None))
+            .map(|h| h.name)
+            .collect();
+        let shadows = |plan: &config::types::Plan| {
+            shadow_warnings(plan, inventory.as_ref(), &secret_vars, &hosts)
+        };
         print!("Validating plan '{}'... ", fp_path.display());
-        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars));
+        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars, shadows));
     }
 
     if let Some(ref inv_path) = args.inventory {
@@ -1193,7 +1234,11 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
                 hosts.len(),
                 if hosts.len() == 1 { "" } else { "s" }
             );
-            valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars));
+            let hosts: Vec<String> = hosts.into_iter().map(|h| h.name).collect();
+            let shadows = |plan: &config::types::Plan| {
+                shadow_warnings(plan, Some(inventory), &secret_vars, &hosts)
+            };
+            valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars, shadows));
         }
     }
 

@@ -489,6 +489,7 @@ mod tests {
             "refuses a destination others could redirect",
             "sudo and doas work for any user",
             "resolve from the plan file's directory",
+            "beats the host's value",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

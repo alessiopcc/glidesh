@@ -150,6 +150,8 @@ PLAN SYNTAX
 VARIABLES
   ${name} expands in resources, parameters and `file` templates (template=#true). Sources,
   last wins: secrets file < inventory global vars < group vars < host vars < plan vars.
+  A plan var (or vars-prompt name) the inventory also sets for a host the plan runs on
+  beats the host's value: `validate -i` and `run` warn, naming the variable and scopes.
   Built in: ${@host.name} ${@host.address} ${@host.user} ${@host.port}
             ${@os.id} ${@os.version} ${@os.family} ${@os.pkg-manager} ${@os.init}
             ${@os.container-runtime} ${@os.nix-installed}
