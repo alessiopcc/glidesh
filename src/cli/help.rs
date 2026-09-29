@@ -236,7 +236,8 @@ MODULES (each checks the host first and changes only what differs)
                               new one gets the umask mode (usually 0644).
                               With run-as, refuses a destination others could redirect:
                               a directory on its path writable by others or by a group
-                              other than root's (sticky /tmp only above an existing dir:
+                              other than root's or a trusted user's private group
+                              (sticky /tmp only above an existing dir:
                               /tmp/app/x, not /tmp/x), or a symlink owned by neither
                               root, the run-as or login user, nor its directory's owner.
   package \"<name>\"            state=present|absent (apt, dnf, yum, pacman, apk, zypper, nix)

@@ -189,6 +189,12 @@ every symlink on the way:
   mode bits do not show — or an ACL glidesh cannot read as macOS lists it (`ls -le`),
   which on FreeBSD is any ACL. A deny-only ACL, like the `everyone deny delete` of a
   macOS home, is fine;
+- a directory writable by a user's private group is accepted, where the user is root,
+  the `run-as` user, the login user or the directory's owner: the group has that user's
+  name, is their primary group, and lists no other member. Distributions with
+  user-private groups (Debian, Ubuntu, Fedora) give such users a `002` umask, so every
+  directory they create is group-writable. glidesh does not look for other accounts an
+  administrator gave the same primary group;
 - a directory writable by others is accepted when it is sticky, like `/tmp`, and what
   sits in it already exists as a directory or link: others cannot rename that. A file or
   a missing entry right under it is refused, since anyone could create it first — so

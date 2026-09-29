@@ -1556,7 +1556,11 @@ fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
 /// applied whether that sysctl is on or not:
 ///
 /// - a directory must not be writable by others, nor by a group other than root's, nor
-///   carry an ACL that may grant writing: on Linux one on a group-writable directory
+///   carry an ACL that may grant writing. A group may be the private group of a trusted
+///   user or of the directory's owner (the user-private-group scheme, whose umask `002`
+///   makes every new directory group-writable): named after that user, its primary group,
+///   and listing no other member — another account given the same primary group is not
+///   seen. Of ACLs, on Linux one on a group-writable directory
 ///   (the group bits show its mask); on macOS/BSD, where the mode bits do not show it, an
 ///   entry allowing `add_file`, `add_subdirectory`, `delete_child`, `writesecurity` or
 ///   `chown`, or one not listed in macOS's `ls -le` form (FreeBSD's, say) — not any ACL,
@@ -1577,6 +1581,16 @@ trusted() { [ "$1" = 0 ] || [ "$1" = "$u" ] || [ "$1" = LOGIN ]; }
 owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || fail "cannot inspect $1"; }
 dir_owner() { stat -L -c %u "$1" 2>/dev/null || stat -L -f %u "$1" 2>/dev/null || fail "cannot inspect $1"; }
 up() { up=$(dirname "$1" && echo .) || fail "cannot resolve $1"; up=${up%??}; }
+private_group() {
+  gr=$(getent group "$1" 2>/dev/null) || return 1
+  gn=${gr%%:*}; gm=${gr##*:}
+  for pu in "$u" LOGIN "$2"; do
+    pw=$(getent passwd "$pu" 2>/dev/null) || continue
+    pn=${pw%%:*}; pg=${pw#*:*:*:}; pg=${pg%%:*}
+    [ "$gn" = "$pn" ] && [ "$pg" = "$1" ] && { [ -z "$gm" ] || [ "$gm" = "$pn" ]; } && return 0
+  done
+  return 1
+}
 bsd=
 acl_writable() {
   case $(ls -ld "$1" 2>/dev/null) in ??????????+*) ;; *) return 1 ;; esac
@@ -1601,10 +1615,11 @@ entry() {
     return 0
   fi
   kind=dir
-  a=$(stat -c '%g %a' "$1" 2>/dev/null) || { a=$(stat -f '%g %Mp%Lp' "$1" 2>/dev/null) && bsd=1; } ||
+  a=$(stat -c '%u %g %a' "$1" 2>/dev/null) || { a=$(stat -f '%u %g %Mp%Lp' "$1" 2>/dev/null) && bsd=1; } ||
     fail "cannot inspect $1"
-  g=${a%% *}; m=$((0${a#* }))
-  if [ $((m & 02)) -ne 0 ] || { [ $((m & 020)) -ne 0 ] && [ "$g" != 0 ]; }; then
+  du=${a%% *}; a=${a#* }; g=${a%% *}; m=$((0${a#* }))
+  if [ $((m & 02)) -ne 0 ] ||
+    { [ $((m & 020)) -ne 0 ] && [ "$g" != 0 ] && ! private_group "$g" "$du"; }; then
     { [ $((m & 01000)) -ne 0 ] && [ "$2" = ancestor ]; } || fail "refusing: other users can write to $1"; fi
   if acl_writable "$1"; then
     fail "refusing: $1 has an ACL, which may let other users write to it"; fi

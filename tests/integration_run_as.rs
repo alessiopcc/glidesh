@@ -873,6 +873,22 @@ async fn hex_of(session: &glidesh::ssh::SshSession, path: &str) -> String {
     out.stdout.trim().to_string()
 }
 
+/// The modes of a file and a directory `app` creates itself through deploy's sudo: its
+/// session's umask, `002` where pam_umask gives user-private groups one.
+async fn app_creates(deploy: &glidesh::ssh::SshSession) -> (String, String) {
+    let out = deploy
+        .exec(
+            "sudo -n -u app sh -c 'd=$(mktemp -d /srv/app/ref.XXXXXX) && : > \"$d/f\" && \
+             mkdir \"$d/d\" && stat -c %a \"$d/f\" \"$d/d\"; rm -rf \"$d\"'",
+        )
+        .await
+        .unwrap();
+    let mut modes = out.stdout.split_whitespace().map(str::to_string);
+    let file = modes.next().expect("the file mode");
+    let dir = modes.next().expect("the directory mode");
+    (file, dir)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -896,7 +912,11 @@ async fn test_run_as_a_non_root_user_uploads_a_new_file() {
 
     let root = container.ssh_session().await;
     assert_eq!(hex_of(&root, "/srv/app/data.bin").await, hex(BINARY));
-    assert_eq!(stat(&root, "/srv/app/data.bin").await, "644 app:app");
+    let (file, _) = app_creates(&deploy).await;
+    assert_eq!(
+        stat(&root, "/srv/app/data.bin").await,
+        format!("{file} app:app")
+    );
     let status = FileModule.check(&ctx, &params).await.unwrap();
     assert!(
         matches!(status, ModuleStatus::Satisfied),
@@ -989,11 +1009,66 @@ async fn test_run_as_a_non_root_user_copies_a_tree() {
     let root = container.ssh_session().await;
     let content = root.exec("cat /srv/app/tree/conf/a.conf").await.unwrap();
     assert_eq!(content.stdout, "a");
-    assert_eq!(stat(&root, "/srv/app/tree/conf").await, "755 app:app");
+    let (file, dir) = app_creates(&deploy).await;
+    assert_eq!(
+        stat(&root, "/srv/app/tree/conf").await,
+        format!("{dir} app:app")
+    );
     assert_eq!(
         stat(&root, "/srv/app/tree/conf/a.conf").await,
-        "644 app:app"
+        format!("{file} app:app")
     );
+}
+
+#[tokio::test]
+async fn test_run_as_a_group_writable_directory_of_a_shared_group_is_refused() {
+    skip_unless_integration!();
+
+    // `app` is a private group until it lists another member.
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("install -d -o app -g app -m 0775 /srv/app/shared && usermod -aG app deploy")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"x").unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/shared/app.conf", &[]);
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("other users can write to /srv/app/shared"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_root_uploads_into_a_directory_of_the_owners_private_group() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("install -d -o app -g app -m 0775 /srv/app/private")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"x").unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/private/app.conf", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let content = root.exec("cat /srv/app/private/app.conf").await.unwrap();
+    assert_eq!(content.stdout, "x");
 }
 
 #[tokio::test]
@@ -1071,7 +1146,12 @@ async fn test_run_as_upload_with_a_sudo_password_writes_only_the_content() {
 
     let root = container.ssh_session().await;
     assert_eq!(hex_of(&root, "/srv/app/sudo-pass.bin").await, hex(BINARY));
-    assert_eq!(stat(&root, "/srv/app/sudo-pass.bin").await, "644 app:app");
+    let deploy = container.ssh_session_as("deploy").await;
+    let (file, _) = app_creates(&deploy).await;
+    assert_eq!(
+        stat(&root, "/srv/app/sudo-pass.bin").await,
+        format!("{file} app:app")
+    );
 }
 
 #[tokio::test]
