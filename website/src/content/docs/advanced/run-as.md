@@ -146,9 +146,13 @@ distinct error, not confused with a command that failed on its own.
 ## File uploads to root-owned paths
 
 SFTP writes as the login user, so it cannot create files in directories like `/etc`
-directly. With `run-as` set, the `file` module stages the upload in `/tmp`, then moves
-it into place and hands ownership to the escalation target using the elevated shell.
-Any explicit `owner`/`group`/`mode` you set is applied afterwards.
+directly. With `run-as` set, the `file` module stages the upload in a private (`0600`)
+file in `/tmp`, then moves it into place with the elevated shell. The staging file's
+mode and owner never reach the result: a file that already existed keeps its owner,
+group, and mode, and a new one belongs to the escalation target with `0666` minus its
+umask (`0644` usually) — the same as a plain upload
+([Owner and Mode](/modules/file/#owner-and-mode)). Any explicit `owner`/`group`/`mode`
+you set is applied afterwards.
 
 ## How it differs from the SSH user
 

@@ -670,9 +670,7 @@ impl SshSession {
         // Any early return past this point must clean up the staged temp file,
         // so the SFTP write and the escalated move are wrapped and the temp file
         // is removed on every error path (not only on a non-zero `mv`/`chown`).
-        let result = self
-            .stage_upload(content, &tmp, remote_path, r, run_as)
-            .await;
+        let result = self.stage_upload(content, &tmp, remote_path, r).await;
         if result.is_err() {
             let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
         }
@@ -685,21 +683,11 @@ impl SshSession {
         tmp: &str,
         remote_path: &str,
         r: &ResolvedRunAs,
-        run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
         self.upload_file(content, tmp).await?;
-        // Move into place and hand ownership to the escalation target — `mv` alone
-        // would preserve the staging file's login-user ownership. Any explicit
-        // owner/group from the module is applied afterwards by set_file_attrs.
-        let dest = shell_escape(remote_path);
-        let place = format!(
-            "mv -f {} {} && chown {} {}",
-            shell_escape(tmp),
-            dest,
-            shell_escape(&r.user),
-            dest,
-        );
-        let out = self.exec_as(&place, run_as).await?;
+        let out = self
+            .exec_as(&place_staged_upload(tmp, remote_path), Some(r))
+            .await?;
         if out.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
@@ -1193,9 +1181,109 @@ fn f_key_escape(n: u8) -> Vec<u8> {
     }
 }
 
+/// The escalated command that moves a staged upload from `tmp` to `dest` so the result
+/// matches a plain SFTP upload: a replaced file keeps its owner, group and mode, a new
+/// one belongs to the escalated user with `0666` minus its umask. `mktemp` staged the
+/// content `0600`, which `mv` would otherwise carry over. Attributes are set after the
+/// move, never on the staging file, so the content is not readable in `/tmp` by anyone
+/// the destination's directory keeps out. Run under an explicit `sh`, since `su` uses
+/// the target's login shell.
+fn place_staged_upload(tmp: &str, dest: &str) -> String {
+    let d = shell_escape(dest);
+    // A non-root escalation target cannot give a file back to another owner; the
+    // content and mode still land, as they would for a plain upload by that user.
+    let script = format!(
+        "a=$(stat -c '%a %u:%g' {d} 2>/dev/null || stat -f '%Lp %u:%g' {d} 2>/dev/null); \
+         mv -f {t} {d} && if [ -n \"$a\" ]; then \
+         {{ chown \"${{a#* }}\" {d} 2>/dev/null || [ \"$(id -u)\" != 0 ]; }} && chmod \"${{a%% *}}\" {d}; \
+         else chown \"$(id -u):$(id -g)\" {d} && chmod \"$(printf '%o' $((0666 & ~0$(umask))))\" {d}; fi",
+        t = shell_escape(tmp),
+    );
+    format!("sh -c {}", shell_escape(&script))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn place(tmp: &std::path::Path, dest: &std::path::Path) -> std::process::Output {
+        let cmd = place_staged_upload(tmp.to_str().unwrap(), dest.to_str().unwrap());
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn staged(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = dir.join("glidesh.staged");
+        std::fs::write(&tmp, content).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        tmp
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_keeps_its_mode_not_the_staging_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("run.sh");
+        std::fs::write(&dest, "old").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tmp = staged(dir.path(), "new");
+
+        let out = place(&tmp, &dest);
+        assert!(out.status.success(), "{:?}", out);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        assert_eq!(mode_of(&dest), 0o755);
+        assert!(!tmp.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_file_gets_the_umask_mode_not_the_staging_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("new.conf");
+        let tmp = staged(dir.path(), "content");
+
+        let cmd = place_staged_upload(tmp.to_str().unwrap(), dest.to_str().unwrap());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("umask 027 && {cmd}"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{:?}", out);
+        assert_eq!(mode_of(&dest), 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_with_quotes_and_spaces_is_placed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("it's a $file");
+        std::fs::write(&dest, "old").unwrap();
+        let before = mode_of(&dest);
+        let tmp = staged(dir.path(), "new");
+
+        let out = place(&tmp, &dest);
+        assert!(out.status.success(), "{:?}", out);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        assert_eq!(mode_of(&dest), before);
+    }
+
+    #[test]
+    fn a_staged_upload_runs_under_an_explicit_sh() {
+        assert!(place_staged_upload("/tmp/glidesh.x", "/etc/app.conf").starts_with("sh -c '"));
+    }
 
     #[test]
     fn an_exit_status_is_the_commands_own() {

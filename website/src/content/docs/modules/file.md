@@ -104,6 +104,17 @@ file "backups/${@host.name}-dump.sql" {
 | `mode` | string | Remote file permissions (e.g., `"0644"`) |
 | `diff` | boolean | `#false` keeps this task's content out of [`--diff`](#--diff) (default `#true`) |
 
+## Owner and Mode
+
+`owner`, `group`, and `mode` always win. Without them, an upload gives the same result
+with or without [`run-as`](/advanced/run-as/):
+
+- **A file that already exists** keeps its owner, group, and mode — only its content
+  changes. Re-uploading a `0755` script keeps it executable.
+- **A new file** belongs to the user writing it (the login user, or the `run-as` user)
+  and gets `0666` minus that user's umask: `0644` with the usual `022`.
+- **A new directory** of a recursive copy gets `0777` minus the umask: `0755` usually.
+
 ## Path Resolution
 
 The `src` path is resolved **relative to the plan file's directory**, not the current working directory. Absolute paths are used as-is.

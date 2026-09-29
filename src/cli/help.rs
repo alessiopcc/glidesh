@@ -229,7 +229,9 @@ MODULES (each checks the host first and changes only what differs)
                               Runs every time unless check= says the work is done.
   file \"<dest>\"               src= (required)  template=#true  recurse=#true  fetch=#true
                               owner= group= mode=\"0644\"  diff=#false
-                              Compares SHA256, then owner/group/mode.
+                              Compares SHA256, then owner/group/mode. Without them a
+                              replaced file keeps its owner/group/mode (run-as too), a
+                              new one gets the umask mode (usually 0644).
   package \"<name>\"            state=present|absent (apt, dnf, yum, pacman, apk, zypper, nix)
   user \"<name>\"               uid= shell= groups=\"a,b\" state=present|absent
   systemd \"<unit>\"            state=started|stopped|restarted  enabled=#true|#false

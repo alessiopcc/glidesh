@@ -3,7 +3,7 @@ mod common;
 use glidesh::config::types::{ParamValue, ResolvedRunAs, RunAsMethod};
 use glidesh::modules::file::FileModule;
 use glidesh::modules::shell::ShellModule;
-use glidesh::modules::{Module, ModuleParams};
+use glidesh::modules::{Module, ModuleParams, ModuleStatus};
 use std::collections::HashMap;
 
 /// Escalate to root via passwordless sudo (the test container's `deploy` user has a
@@ -130,5 +130,156 @@ async fn test_no_run_as_cannot_write_root_owned_dir() {
     assert!(
         result.is_err(),
         "writing to a root-owned dir as deploy without run-as should fail"
+    );
+}
+
+fn upload_params(src: &std::path::Path, dest: &str, extra: &[(&str, ParamValue)]) -> ModuleParams {
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String(src.to_string_lossy().to_string()),
+    );
+    for (key, value) in extra {
+        args.insert(key.to_string(), value.clone());
+    }
+    ModuleParams {
+        resource_name: dest.to_string(),
+        args,
+    }
+}
+
+async fn stat(session: &glidesh::ssh::SshSession, path: &str) -> String {
+    let out = session
+        .exec(&format!("stat -c '%a %U:%G' {path}"))
+        .await
+        .unwrap();
+    out.stdout.trim().to_string()
+}
+
+#[tokio::test]
+async fn test_run_as_upload_of_a_new_file_gets_the_plain_upload_mode() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new file").unwrap();
+    let params = upload_params(tmp.path(), "/etc/glidesh-runas-new.conf", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    // Staging goes through a `mktemp` file, which is 0600 and owned by the login
+    // user's group; neither may leak into the result.
+    let root = container.ssh_session().await;
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-new.conf").await,
+        "644 root:root"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_upload_keeps_the_replaced_files_owner_and_mode() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf old > /etc/glidesh-runas-kept.sh &&          chown nobody:nogroup /etc/glidesh-runas-kept.sh &&          chmod 0755 /etc/glidesh-runas-kept.sh",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new").unwrap();
+    let params = upload_params(tmp.path(), "/etc/glidesh-runas-kept.sh", &[]);
+    let result = FileModule.apply(&ctx, &params).await.unwrap();
+    assert!(result.changed);
+
+    let content = root.exec("cat /etc/glidesh-runas-kept.sh").await.unwrap();
+    assert_eq!(content.stdout, "new");
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-kept.sh").await,
+        "755 nobody:nogroup"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_upload_mode_still_wins_and_a_second_run_is_ok() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf old > /etc/glidesh-runas-mode.conf && chmod 0755 /etc/glidesh-runas-mode.conf",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new").unwrap();
+    let params = upload_params(
+        tmp.path(),
+        "/etc/glidesh-runas-mode.conf",
+        &[("mode", ParamValue::String("0640".to_string()))],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-mode.conf").await,
+        "640 root:root"
+    );
+
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run should be ok, got {status:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_recursive_upload_gets_the_plain_upload_modes() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::create_dir(src.path().join("sub")).unwrap();
+    std::fs::write(src.path().join("top.conf"), b"top").unwrap();
+    std::fs::write(src.path().join("sub").join("inner.conf"), b"inner").unwrap();
+    let params = upload_params(
+        src.path(),
+        "/etc/glidesh-runas-tree",
+        &[("recurse", ParamValue::Bool(true))],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let root = container.ssh_session().await;
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-tree/top.conf").await,
+        "644 root:root"
+    );
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-tree/sub/inner.conf").await,
+        "644 root:root"
+    );
+    assert_eq!(
+        stat(&root, "/etc/glidesh-runas-tree/sub").await,
+        "755 root:root"
     );
 }

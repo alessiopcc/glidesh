@@ -485,6 +485,7 @@ mod tests {
             "vars-prompt",
             "secret=#true",
             "--var NAME=VALUE",
+            "keeps its owner/group/mode",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }
