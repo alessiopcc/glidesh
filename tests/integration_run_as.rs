@@ -729,3 +729,39 @@ async fn test_run_as_recursive_owner_through_a_symlinked_destination() {
         "a second run should be ok, got {status:?}"
     );
 }
+
+#[tokio::test]
+async fn test_run_as_recursive_attributes_on_root_are_refused_before_uploading() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("glidesh-root.conf"), b"x").unwrap();
+    let params = upload_params(
+        src.path(),
+        "/",
+        &[
+            ("recurse", ParamValue::Bool(true)),
+            ("owner", ParamValue::String("nobody".to_string())),
+        ],
+    );
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(
+        err.to_string().contains("recursively on /"),
+        "unexpected error: {err}"
+    );
+
+    let root = container.ssh_session().await;
+    let owner = root.exec("stat -c %U /").await.unwrap();
+    assert_eq!(owner.stdout.trim(), "root");
+    let uploaded = root
+        .exec("test -e /glidesh-root.conf && echo yes")
+        .await
+        .unwrap();
+    assert_eq!(uploaded.stdout.trim(), "");
+}

@@ -30,6 +30,17 @@ impl FileModule {
             .unwrap_or(false)
     }
 
+    /// An empty destination would name the host's `/` once a path is joined to it.
+    fn get_dest(params: &ModuleParams) -> Result<&str, GlideshError> {
+        match params.resource_name.as_str() {
+            "" => Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: "the destination path is empty".to_string(),
+            }),
+            dest => Ok(dest),
+        }
+    }
+
     fn get_src(params: &ModuleParams) -> Result<&str, GlideshError> {
         params
             .args
@@ -150,7 +161,7 @@ impl Module for FileModule {
         params: &ModuleParams,
     ) -> Result<ModuleStatus, GlideshError> {
         let src = Self::get_src(params)?;
-        let dest = &params.resource_name;
+        let dest = Self::get_dest(params)?;
 
         if Self::is_fetch(params) {
             if Self::is_recurse(params) {
@@ -255,7 +266,7 @@ impl Module for FileModule {
         params: &ModuleParams,
     ) -> Result<ModuleResult, GlideshError> {
         let src = Self::get_src(params)?;
-        let dest = &params.resource_name;
+        let dest = Self::get_dest(params)?;
 
         if Self::is_fetch(params) {
             return self.apply_fetch(ctx, src, dest).await;
@@ -632,6 +643,17 @@ impl FileModule {
         }
 
         let dest_trimmed = dest.trim_end_matches('/');
+        let owner = params.args.get("owner").and_then(|v| v.as_str());
+        let group = params.args.get("group").and_then(|v| v.as_str());
+        let mode = params.args.get("mode").and_then(|v| v.as_str());
+        let attrs_changed = owner.is_some() || group.is_some() || mode.is_some();
+        // Refused before anything is uploaded, rather than by the attribute change after.
+        if attrs_changed && dest_trimmed.is_empty() {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: "refusing to change owner, group or mode recursively on /".to_string(),
+            });
+        }
         let mut uploaded = 0usize;
 
         let mut remote_dirs: Vec<String> = local_files
@@ -688,11 +710,6 @@ impl FileModule {
             }
         }
 
-        let owner = params.args.get("owner").and_then(|v| v.as_str());
-        let group = params.args.get("group").and_then(|v| v.as_str());
-        let mode = params.args.get("mode").and_then(|v| v.as_str());
-
-        let attrs_changed = owner.is_some() || group.is_some() || mode.is_some();
         if attrs_changed {
             ctx.set_file_attrs_recursive(dest_trimmed, owner, group, mode)
                 .await?;
@@ -761,6 +778,16 @@ mod tests {
             args: std::collections::HashMap::new(),
         };
         assert!(FileModule::get_src(&params).is_err());
+    }
+
+    #[test]
+    fn an_empty_destination_is_rejected() {
+        let params = |dest: &str| ModuleParams {
+            resource_name: dest.to_string(),
+            args: std::collections::HashMap::new(),
+        };
+        assert!(FileModule::get_dest(&params("")).is_err());
+        assert_eq!(FileModule::get_dest(&params("/")).unwrap(), "/");
     }
 
     #[test]

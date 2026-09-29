@@ -828,11 +828,13 @@ impl SshSession {
     /// sticky world-writable directory `fs.protected_regular` (on under systemd) refuses
     /// even root an `O_CREAT` open of another user's file, which a shell's `>` is.
     async fn mktemp_dir_remote(&self) -> Result<String, GlideshError> {
+        // An explicit `sh`: the login shell may not be POSIX. A failure after `mktemp -d`
+        // removes the directory here, since the caller never learns its path.
+        const SCRIPT: &str = r#"d=$(mktemp -d /tmp/glidesh.XXXXXX) || exit 1
+{ : > "$d/content" && chmod 0600 "$d/content"; } || { rm -rf "$d"; exit 1; }
+printf '%s' "$d""#;
         let out = self
-            .exec(
-                "d=$(mktemp -d /tmp/glidesh.XXXXXX) && : > \"$d/content\" && \
-                 chmod 0600 \"$d/content\" && printf '%s' \"$d\"",
-            )
+            .exec(&format!("sh -c {}", shell_escape(SCRIPT)))
             .await?;
         let dir = out.stdout.trim();
         if out.exit_code != 0 || dir.is_empty() {
@@ -1034,10 +1036,19 @@ impl SshSession {
         mode: Option<&str>,
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
+        let changes = owner.is_some() || group.is_some() || mode.is_some();
+        let root = path.trim_end_matches('/');
+        if changes && root.is_empty() {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "refusing to change owner, group or mode recursively on / (destination {path:?})"
+                ),
+            });
+        }
         // The trailing slash resolves a root that is a symlink to the directory it points
         // to, as uploads through it do; `-h` would otherwise change only that link.
-        let escaped = shell_escape(&format!("{}/", path.trim_end_matches('/')));
-        let changes = owner.is_some() || group.is_some() || mode.is_some();
+        let escaped = shell_escape(&format!("{root}/"));
         if let Some(r) = run_as.filter(|_| changes) {
             self.ensure_trusted_destination(path, r).await?;
         }

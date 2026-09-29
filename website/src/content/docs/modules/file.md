@@ -75,7 +75,8 @@ Recursive copy supports:
 - **Template mode** — combine with `template=#true` to interpolate all files in the directory
 - **Attributes** — `owner`, `group`, and `mode` are applied recursively to all files and directories,
   behind the destination when it is a symlink to a directory too. A symlink inside the tree gets
-  `owner`/`group` itself, never what it points to; `mode` skips it.
+  `owner`/`group` itself, never what it points to; `mode` skips it. A copy to `/` itself is
+  refused with any of them, before anything is uploaded: it would change the whole filesystem.
 
 :::note
 `fetch=#true` and `recurse=#true` cannot be combined.
