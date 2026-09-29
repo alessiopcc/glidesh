@@ -68,7 +68,8 @@ The `os_info` values are the same ones a plan sees as [`${@os.*}`](/concepts/var
 `family` is one of `debian`, `redhat`, `arch`, `alpine`, `suse`, `nixos` (an unrecognised OS
 arrives as `{"unknown": "<ID>"}`), `pkg_manager` one of `apt`, `dnf`, `yum`, `pacman`, `apk`,
 `zypper`, `nix`, and `init_system` one of `systemd`, `openrc`, `unknown`. A `nix_installed: true`
-field is added on hosts where Nix is present.
+field is added on hosts where Nix is present. [Host facts](/concepts/variables/#host-facts)
+are not part of `os_info`; read them from `vars` (`@fact.cpu.count`, `@fact.mem.total-mb`, …).
 
 :::note[`vars` never carries the vault]
 Any variable whose value holds a decrypted secret is stripped from `vars` before the request is

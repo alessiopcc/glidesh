@@ -22,7 +22,8 @@ plan "web" {
 
 Conditions are evaluated on the controller, from variables glidesh already has — no command
 runs on the host to decide them. The [OS facts](/concepts/variables/#built-in-os-facts)
-(`${@os.*}`) are the most common thing to branch on; any variable a module argument can use
+(`${@os.*}`) and [host facts](/concepts/variables/#host-facts) (`${@fact.*}`) are the most
+common thing to branch on; any variable a module argument can use
 works too. [`@inventory.*` references](/concepts/variables/#inventory-references) are the
 exception: they exist only while a `file` template is rendered, so a condition that uses one is
 rejected when the plan is parsed.

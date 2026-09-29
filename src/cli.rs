@@ -467,6 +467,7 @@ mod tests {
             "PLAN SYNTAX",
             "CONDITIONS",
             "${@os.family}",
+            "${@fact.cpu.count}",
             "TAGS",
             "tags=",
             "--skip-tags",

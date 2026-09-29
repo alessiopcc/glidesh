@@ -84,7 +84,7 @@ When the same variable is defined at multiple levels, the most specific value wi
 Inventory global vars → Group vars → Host vars → Plan vars
 ```
 
-Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@item`, `@inventory`, `@group`, `@error`) that user variables cannot collide with — a variable name may not begin with `@`. `${@error.msg}` and `${@error.task}` describe a step's failure to its [`rescue` and `always`](/advanced/rescue/#reading-the-failure) tasks.
+Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@fact`, `@item`, `@inventory`, `@group`, `@error`) that user variables cannot collide with — a variable name may not begin with `@`. `${@error.msg}` and `${@error.task}` describe a step's failure to its [`rescue` and `always`](/advanced/rescue/#reading-the-failure) tasks.
 
 ## Built-in Host Variables
 
@@ -147,7 +147,38 @@ step "Render config" {
 Inside `templates/platform.conf`, `${@os.family}` and the rest resolve like any other
 variable.
 
-OS facts are per host and only exist once glidesh has connected, so they resolve wherever
+### Host facts
+
+The same exec that reads `/etc/os-release` also asks the host a few questions about its
+hardware and network, exposed under `@fact` — no extra round trip, and nothing to install on
+the host (plain POSIX `sh`, so busybox hosts work too).
+
+| Variable | Description | Source |
+|---|---|---|
+| `${@fact.hostname}` | Host name as the host reports it | `hostname` (or `uname -n`) |
+| `${@fact.kernel}` | Kernel release, e.g. `6.1.0-18-amd64` | `uname -r` |
+| `${@fact.arch}` | Machine architecture, e.g. `x86_64`, `aarch64` | `uname -m` |
+| `${@fact.cpu.count}` | Online CPUs, e.g. `8` | `nproc` (or `getconf _NPROCESSORS_ONLN`) |
+| `${@fact.mem.total-mb}` | Total memory in MiB, rounded down to an integer, e.g. `15935` | `MemTotal` in `/proc/meminfo` |
+| `${@fact.ip.default}` | Source address of the default route, e.g. `10.0.0.12` | the `src` field of `ip route get 1.1.1.1` |
+
+Every fact is always defined. A fact the host cannot report — `ip` not installed, no default
+route, no `/proc/meminfo` — expands to an empty string; it never fails the connection or the
+task. Guard a fact that may be missing with `when="${@fact.ip.default}"`.
+
+```kdl
+step "Size the worker pool" {
+    file "/etc/app/workers.conf" src="templates/workers.conf" template=#true
+}
+
+step "Listen on the primary address" when="${@fact.ip.default}" {
+    shell "app-ctl bind ${@fact.ip.default}"
+}
+```
+
+with `templates/workers.conf` holding `workers = ${@fact.cpu.count}`.
+
+OS and host facts are per host and only exist once glidesh has connected, so they resolve wherever
 `${@host.*}` does — module arguments and `file` templates — but not in `include` or
 `vars-file` paths, which are read before any host is contacted.
 

@@ -18,6 +18,116 @@ pub struct OsInfo {
     // non-NixOS hosts — only hosts with Nix present emit this new field.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nix_installed: bool,
+    // Plugins already receive these as `@fact.*` in `vars`; keeping them off `os_info`
+    // leaves the protocol v1 wire format unchanged.
+    #[serde(skip)]
+    pub facts: Facts,
+}
+
+/// Host facts gathered on connect, exposed to plans as `@fact.*`. A fact the host cannot
+/// report (missing tool, no default route) is the empty string, never an error.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Facts {
+    pub hostname: String,
+    pub kernel: String,
+    pub arch: String,
+    pub cpu_count: String,
+    pub mem_total_mb: String,
+    pub ip_default: String,
+}
+
+const SECTION_MARKER: &str = "@@glidesh-fact ";
+
+/// One exec for everything detection reads, so facts cost no extra round trip. POSIX sh
+/// only, every probe silenced and allowed to fail: busybox hosts may lack `nproc` or `ip`.
+/// `/etc/os-release` comes first, unmarked, so its parser stops at the first marker.
+const PROBE_SCRIPT: &str = "cat /etc/os-release 2>/dev/null || echo 'ID=unknown'
+echo '@@glidesh-fact hostname'
+hostname 2>/dev/null || uname -n 2>/dev/null
+echo '@@glidesh-fact kernel'
+uname -r 2>/dev/null
+echo '@@glidesh-fact arch'
+uname -m 2>/dev/null
+echo '@@glidesh-fact cpu-count'
+nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null
+echo '@@glidesh-fact meminfo'
+grep '^MemTotal:' /proc/meminfo 2>/dev/null
+echo '@@glidesh-fact route'
+ip -4 route get 1.1.1.1 2>/dev/null || ip route get 1.1.1.1 2>/dev/null
+true";
+
+/// What the probe script reported, split into the `/etc/os-release` text and the facts.
+struct Probe<'a> {
+    os_release: &'a str,
+    facts: Facts,
+}
+
+fn parse_probe(stdout: &str) -> Probe<'_> {
+    let (os_release, rest) = match stdout.find(SECTION_MARKER) {
+        Some(at) => stdout.split_at(at),
+        None => (stdout, ""),
+    };
+    let mut sections: Vec<(&str, &str)> = Vec::new();
+    for chunk in rest.split(SECTION_MARKER).filter(|c| !c.is_empty()) {
+        let (name, body) = chunk.split_once('\n').unwrap_or((chunk, ""));
+        sections.push((name.trim(), body));
+    }
+    let section = |name: &str| {
+        sections
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or("", |(_, body)| *body)
+    };
+    Probe {
+        os_release,
+        facts: Facts {
+            hostname: first_line(section("hostname")),
+            kernel: first_line(section("kernel")),
+            arch: first_line(section("arch")),
+            cpu_count: parse_cpu_count(section("cpu-count")),
+            mem_total_mb: parse_mem_total_mb(section("meminfo")),
+            ip_default: parse_route_src(section("route")),
+        },
+    }
+}
+
+fn first_line(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn parse_cpu_count(body: &str) -> String {
+    match first_line(body).parse::<u32>() {
+        Ok(n) if n > 0 => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// `MemTotal:  16318412 kB` → `15935`. The kernel always reports kB (KiB).
+fn parse_mem_total_mb(body: &str) -> String {
+    body.lines()
+        .find_map(|l| l.trim().strip_prefix("MemTotal:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|kb| kb.parse::<u64>().ok())
+        .map_or(String::new(), |kb| (kb / 1024).to_string())
+}
+
+/// The address after `src` in `ip route get` output (iproute2 and busybox alike).
+fn parse_route_src(body: &str) -> String {
+    let mut tokens = body.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "src" {
+            if let Some(addr) = tokens.next() {
+                if addr.parse::<std::net::IpAddr>().is_ok() {
+                    return addr.to_string();
+                }
+            }
+        }
+    }
+    String::new()
 }
 
 // The explicit renames, here and on `InitSystem`, keep the plugin wire on the same vocabulary
@@ -184,15 +294,14 @@ impl PkgManager {
 }
 
 pub async fn detect_os(ssh: &SshSession) -> Result<OsInfo, GlideshError> {
-    let output = ssh
-        .exec("cat /etc/os-release 2>/dev/null || echo 'ID=unknown'")
-        .await?;
+    let output = ssh.exec(PROBE_SCRIPT).await?;
+    let Probe { os_release, facts } = parse_probe(&output.stdout);
 
     let mut id = String::from("unknown");
     let mut version = String::new();
     let mut id_like = String::new();
 
-    for line in output.stdout.lines() {
+    for line in os_release.lines() {
         if let Some(val) = line.strip_prefix("ID=") {
             id = val.trim_matches('"').to_string();
         } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
@@ -217,6 +326,7 @@ pub async fn detect_os(ssh: &SshSession) -> Result<OsInfo, GlideshError> {
         init_system,
         container_runtime,
         nix_installed,
+        facts,
     })
 }
 
@@ -351,6 +461,120 @@ mod tests {
         for rt in [ContainerRuntime::Podman, ContainerRuntime::Docker] {
             assert_eq!(wire(&rt), rt.as_str());
         }
+    }
+
+    const UBUNTU_PROBE: &str = "PRETTY_NAME=\"Ubuntu 22.04.4 LTS\"
+NAME=\"Ubuntu\"
+VERSION_ID=\"22.04\"
+ID=ubuntu
+ID_LIKE=debian
+@@glidesh-fact hostname
+web-1
+@@glidesh-fact kernel
+5.15.0-105-generic
+@@glidesh-fact arch
+x86_64
+@@glidesh-fact cpu-count
+8
+@@glidesh-fact meminfo
+MemTotal:       16318412 kB
+@@glidesh-fact route
+1.1.1.1 via 10.0.0.1 dev eth0 src 10.0.0.12 uid 0
+    cache
+";
+
+    #[test]
+    fn a_full_probe_yields_every_fact() {
+        let probe = parse_probe(UBUNTU_PROBE);
+        assert!(probe.os_release.contains("ID=ubuntu"));
+        assert!(!probe.os_release.contains("@@glidesh-fact"));
+        assert_eq!(
+            probe.facts,
+            Facts {
+                hostname: "web-1".into(),
+                kernel: "5.15.0-105-generic".into(),
+                arch: "x86_64".into(),
+                cpu_count: "8".into(),
+                mem_total_mb: "15935".into(),
+                ip_default: "10.0.0.12".into(),
+            }
+        );
+    }
+
+    /// A minimal busybox host: no `nproc`, no `ip`, no route, `getconf` answering instead.
+    #[test]
+    fn missing_tools_leave_facts_empty_not_failing() {
+        let stdout = "ID=alpine
+VERSION_ID=3.19.1
+@@glidesh-fact hostname
+tiny
+@@glidesh-fact kernel
+6.6.14-0-virt
+@@glidesh-fact arch
+aarch64
+@@glidesh-fact cpu-count
+@@glidesh-fact meminfo
+@@glidesh-fact route
+";
+        let facts = parse_probe(stdout).facts;
+        assert_eq!(facts.hostname, "tiny");
+        assert_eq!(facts.arch, "aarch64");
+        assert_eq!(facts.cpu_count, "");
+        assert_eq!(facts.mem_total_mb, "");
+        assert_eq!(facts.ip_default, "");
+    }
+
+    #[test]
+    fn busybox_route_output_gives_its_source_address() {
+        let body = "1.1.1.1 via 172.17.0.1 dev eth0  src 172.17.0.5\n";
+        assert_eq!(parse_route_src(body), "172.17.0.5");
+        assert_eq!(
+            parse_route_src("RTNETLINK answers: Network is unreachable"),
+            ""
+        );
+        assert_eq!(parse_route_src("1.1.1.1 dev eth0 src"), "");
+    }
+
+    #[test]
+    fn nonsense_counts_are_dropped() {
+        assert_eq!(parse_cpu_count("0\n"), "");
+        assert_eq!(parse_cpu_count("nproc: not found\n"), "");
+        assert_eq!(parse_cpu_count(" 4 \n"), "4");
+        assert_eq!(parse_mem_total_mb("MemTotal: lots kB"), "");
+        assert_eq!(parse_mem_total_mb("MemTotal:  2048 kB\n"), "2");
+    }
+
+    /// No marker at all (a shell that died after `cat`): os-release still parses and every
+    /// fact is simply empty.
+    #[test]
+    fn output_without_markers_is_all_os_release() {
+        let probe = parse_probe("ID=unknown\n");
+        assert_eq!(probe.os_release, "ID=unknown\n");
+        assert_eq!(probe.facts, Facts::default());
+    }
+
+    /// An `/etc/os-release` with no final newline glues the first marker onto its last line.
+    #[test]
+    fn a_marker_glued_to_os_release_still_splits() {
+        let probe = parse_probe("ID=alpine\nVERSION_ID=3.19@@glidesh-fact arch\nx86_64\n");
+        assert_eq!(probe.os_release, "ID=alpine\nVERSION_ID=3.19");
+        assert_eq!(probe.facts.arch, "x86_64");
+    }
+
+    #[test]
+    fn facts_stay_off_the_plugin_wire() {
+        let os = OsInfo {
+            id: "ubuntu".into(),
+            version: "22.04".into(),
+            family: OsFamily::Debian,
+            pkg_manager: PkgManager::Apt,
+            init_system: InitSystem::Systemd,
+            container_runtime: None,
+            nix_installed: false,
+            facts: parse_probe(UBUNTU_PROBE).facts,
+        };
+        let json = serde_json::to_string(&os).unwrap();
+        assert!(!json.contains("facts") && !json.contains("web-1"), "{json}");
     }
 
     #[test]
