@@ -1480,11 +1480,17 @@ fn write_fed_upload(dest: &str, login_uid: &str, mark: &str) -> String {
 /// time, so each leaves what follows its line in the pipe.
 fn feed_staged_upload(tmp: &str, mark: &str, escalated: &str) -> String {
     let t = shell_escape(tmp);
-    // Only the escalated side's status survives the pipe, and it would truncate the
-    // destination even if `cat` could not read the staged file.
+    // Only the escalated side's status survives a pipe, and it succeeds on whatever part
+    // of the content arrived; the reading side's status comes out on fd 3 instead. Checked
+    // up front too, so an unreadable file does not truncate the destination.
     let script = format!(
         "test -r {t} || {{ echo 'cannot read the staged upload' >&2; rm -f {t}; exit 1; }}\n\
-         {{ cat; printf '%s\\n' {}; cat {t}; }} | {escalated}\ns=$?\nrm -f {t}\nexit $s",
+         exec 4>&1\n\
+         r=$({{ {{ cat; printf '%s\\n' {}; cat {t}; echo $? >&3; }} | {escalated} >&4 3>&-; }} 3>&1)\n\
+         s=$?\n\
+         rm -f {t}\n\
+         [ \"$s\" = 0 ] || exit \"$s\"\n\
+         [ \"$r\" = 0 ] || {{ echo 'reading the staged upload failed' >&2; exit 1; }}",
         shell_escape(mark)
     );
     format!("sh -c {}", shell_escape(&script))
@@ -2018,6 +2024,27 @@ mod tests {
         let (out, _) = feed(dir.path(), &dest, BINARY, b"", r#"exec sh -c "$0""#);
         assert!(out.status.success(), "{:?}", out);
         assert_eq!(std::fs::read(&dest).unwrap(), BINARY);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_upload_that_fails_to_read_is_not_a_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("app.conf");
+        // A directory passes `test -r`, then `cat` fails on it.
+        let tmp = dir.path().join("glidesh.staged");
+        std::fs::create_dir(&tmp).unwrap();
+        let inner = write_fed_upload(dest.to_str().unwrap(), "0", MARK);
+        let escalated = format!("sh -c {}", shell_escape(&inner));
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(feed_staged_upload(tmp.to_str().unwrap(), MARK, &escalated))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{:?}", out);
+        assert!(String::from_utf8_lossy(&out.stderr).contains("reading the staged upload failed"));
     }
 
     #[cfg(unix)]
