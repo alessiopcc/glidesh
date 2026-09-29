@@ -113,6 +113,7 @@ All relative paths in a plan are resolved **relative to the plan file's director
 - **`include`** directives — paths to other plan files
 - **`vars-file`** — paths to external variable files
 - **`file` module `src`** — local files to upload or use as templates
+- **`file` module fetch destination** — where `fetch=#true` writes the file it downloads
 
 Given this layout:
 

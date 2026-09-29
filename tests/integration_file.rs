@@ -398,6 +398,52 @@ async fn test_file_fetch() {
     assert_eq!(content.trim(), "fetched content");
 }
 
+#[tokio::test]
+async fn test_file_fetch_to_a_relative_path_lands_beside_the_plan() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    // The test runs from the crate root; the plan lives elsewhere.
+    let plan_dir = tempfile::tempdir().unwrap();
+    let mut ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ctx.plan_base_dir = plan_dir.path();
+
+    ssh.exec("printf 'db dump' > /root/glidesh-fetch-rel.sql")
+        .await
+        .unwrap();
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String("/root/glidesh-fetch-rel.sql".to_string()),
+    );
+    args.insert("fetch".to_string(), ParamValue::Bool(true));
+    let params = ModuleParams {
+        resource_name: "backups/db.sql".to_string(),
+        args,
+    };
+
+    let expected = plan_dir.path().join("backups/db.sql");
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        format!("{status:?}").contains(&expected.display().to_string()),
+        "the preview names the absolute path: {status:?}"
+    );
+    let result = FileModule.apply(&ctx, &params).await.unwrap();
+    assert!(
+        result.output.contains(&expected.display().to_string()),
+        "the output names the absolute path: {}",
+        result.output
+    );
+    assert_eq!(std::fs::read_to_string(&expected).unwrap(), "db dump");
+    assert!(
+        !std::path::Path::new("backups/db.sql").exists(),
+        "nothing is written relative to the working directory"
+    );
+}
+
 /// A file whose remote content has drifted must preview as pending while the host stays
 /// untouched. The executor derives "would change" from `check` precisely because a
 /// dry-run `apply` reports `changed: false`.

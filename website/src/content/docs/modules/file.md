@@ -70,6 +70,10 @@ file "/etc/myapp/" src="configs/" recurse=#true owner="deploy" mode="0644"
 
 All files under the local `configs/` directory are uploaded to `/etc/myapp/`, preserving the directory structure. Remote directories are created automatically.
 
+A recursive copy only adds and updates: a file on the host that is not in the local
+directory stays, even one you deleted or renamed locally. Remove it with another task, such
+as `shell "rm -f /etc/myapp/old.conf"`.
+
 Recursive copy supports:
 - **Idempotency** — each file is compared by SHA256 checksum; only changed files are uploaded
 - **Template mode** — combine with `template=#true` to interpolate all files in the directory
@@ -93,6 +97,22 @@ file "backups/${@host.name}-dump.sql" {
     fetch #true
 }
 ```
+
+A relative destination resolves from the plan file's directory — the same place an upload's
+`src` resolves from, so a plan that fetches a file and a plan that uploads it agree on where
+it is, from whatever directory you run glidesh. In an [included](/advanced/plan-includes/)
+plan, that is the included plan's own directory. An absolute path is used as given. The
+task's output names the absolute path written:
+
+```
+fetch /var/backups/db.sql -> /home/me/project/plans/backups/web-1-dump.sql (48213 bytes)
+```
+
+:::caution[Earlier versions]
+Earlier versions resolved a relative fetch destination from the directory glidesh ran in.
+A plan run from its own directory writes where it did; one run from elsewhere now writes
+beside the plan file.
+:::
 
 ## Parameters
 
@@ -134,7 +154,7 @@ uploaded can see it partly written.
 
 ## Path Resolution
 
-The `src` path is resolved **relative to the plan file's directory**, not the current working directory. Absolute paths are used as-is.
+The `src` path of an upload, and the destination of a [fetch](#fetch), are resolved **relative to the plan file's directory**, not the current working directory. Absolute paths are used as-is.
 
 Given this layout:
 
