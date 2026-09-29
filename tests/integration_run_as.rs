@@ -350,3 +350,33 @@ async fn test_run_as_upload_of_a_new_file_takes_a_setgid_directorys_group() {
         "644 root:nogroup"
     );
 }
+
+#[tokio::test]
+async fn test_run_as_upload_keeps_a_setuid_mode_with_an_owner() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"#!/bin/sh\n").unwrap();
+    let params = upload_params(
+        tmp.path(),
+        "/usr/local/bin/glidesh-setuid",
+        &[
+            ("owner", ParamValue::String("nobody".to_string())),
+            ("mode", ParamValue::String("4755".to_string())),
+        ],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    // chown clears setuid, so a mode applied before the owner would not survive.
+    let root = container.ssh_session().await;
+    assert_eq!(
+        stat(&root, "/usr/local/bin/glidesh-setuid").await,
+        "4755 nobody:root"
+    );
+}

@@ -109,13 +109,18 @@ file "backups/${@host.name}-dump.sql" {
 `owner`, `group`, and `mode` always win. Without them, an upload gives the same result
 with or without [`run-as`](/advanced/run-as/):
 
-- **A file that already exists** keeps its owner, group, and mode — only its content
-  changes. Re-uploading a `0755` script keeps it executable.
-- **A new file** belongs to the user writing it (the login user, or the `run-as` user)
-  and that user's group — the directory's group when the directory is setgid — and gets
-  `0666` minus that user's umask: `0644` with the usual `022`.
+- **A file that already exists** is rewritten in place: it keeps its owner, group, mode
+  and ACL, and every hard link to it sees the new content. Re-uploading a `0755` script
+  keeps it executable.
+- **A new file** is created by the user writing it (the login user, or the `run-as`
+  user), so the usual rules apply: that user's group — the directory's group when the
+  directory is setgid — a default ACL if the directory has one, and `0666` minus that
+  user's umask: `0644` with the usual `022`.
 - **A symlink** is written through: the file it points to gets the new content and
   keeps its attributes; the link stays a link.
+
+The write is not atomic: a program reading the file while it is uploaded can see it
+partly written.
 - **A new directory** of a recursive copy gets `0777` minus the umask: `0755` usually.
 
 ## Path Resolution

@@ -656,7 +656,7 @@ impl SshSession {
 
     /// Upload to a destination the login user may not be able to write directly.
     /// Without escalation this is a plain SFTP write; with escalation the content is
-    /// staged in `/tmp` over SFTP and moved into place with the escalated shell.
+    /// staged in `/tmp` over SFTP and written into place with the escalated shell.
     pub async fn upload_file_as(
         &self,
         content: &[u8],
@@ -668,8 +668,8 @@ impl SshSession {
         };
         let tmp = self.mktemp_remote().await?;
         // Any early return past this point must clean up the staged temp file,
-        // so the SFTP write and the escalated move are wrapped and the temp file
-        // is removed on every error path (not only on a non-zero `mv`/`chown`).
+        // so the SFTP write and the escalated write are wrapped and the temp file
+        // is removed on every error path (not only on a failed escalated write).
         let result = self.stage_upload(content, &tmp, remote_path, r).await;
         if result.is_err() {
             let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
@@ -692,7 +692,7 @@ impl SshSession {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
                 message: format!(
-                    "failed to place staged upload at {} (write, owner or mode): {}",
+                    "failed to write staged upload to {}: {}",
                     remote_path,
                     out.stderr.trim()
                 ),
@@ -841,18 +841,6 @@ impl SshSession {
     ) -> Result<(), GlideshError> {
         let escaped = shell_escape(path);
 
-        if let Some(mode) = mode {
-            let output = self
-                .exec_as(&format!("chmod {} {}", shell_escape(mode), escaped), run_as)
-                .await?;
-            if output.exit_code != 0 {
-                return Err(GlideshError::Module {
-                    module: "file".to_string(),
-                    message: format!("chmod failed: {}", output.stderr),
-                });
-            }
-        }
-
         match (owner, group) {
             (Some(o), Some(g)) => {
                 let output = self
@@ -893,6 +881,19 @@ impl SshSession {
             (None, None) => {}
         }
 
+        // Last, because chown and chgrp clear setuid/setgid bits.
+        if let Some(mode) = mode {
+            let output = self
+                .exec_as(&format!("chmod {} {}", shell_escape(mode), escaped), run_as)
+                .await?;
+            if output.exit_code != 0 {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("chmod failed: {}", output.stderr),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -905,21 +906,6 @@ impl SshSession {
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
         let escaped = shell_escape(path);
-
-        if let Some(mode) = mode {
-            let output = self
-                .exec_as(
-                    &format!("chmod -R {} {}", shell_escape(mode), escaped),
-                    run_as,
-                )
-                .await?;
-            if output.exit_code != 0 {
-                return Err(GlideshError::Module {
-                    module: "file".to_string(),
-                    message: format!("chmod -R failed: {}", output.stderr),
-                });
-            }
-        }
 
         match (owner, group) {
             (Some(o), Some(g)) => {
@@ -964,6 +950,22 @@ impl SshSession {
                 }
             }
             (None, None) => {}
+        }
+
+        // Last, because chown and chgrp clear setuid/setgid bits.
+        if let Some(mode) = mode {
+            let output = self
+                .exec_as(
+                    &format!("chmod -R {} {}", shell_escape(mode), escaped),
+                    run_as,
+                )
+                .await?;
+            if output.exit_code != 0 {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("chmod -R failed: {}", output.stderr),
+                });
+            }
         }
 
         Ok(())
@@ -1181,31 +1183,16 @@ fn f_key_escape(n: u8) -> Vec<u8> {
     }
 }
 
-/// The escalated command that moves a staged upload from `tmp` to `dest` so the result
-/// matches a plain SFTP upload: a replaced file keeps its owner, group and mode, a new
-/// one belongs to the escalated user and its group (the directory's, when the directory
-/// is setgid) with `0666` minus its umask. `mktemp` staged the content `0600`, which
-/// `mv` would otherwise carry over. Attributes are set after the move, never on the
-/// staging file, so the content is not readable in `/tmp` by anyone the destination's
-/// directory keeps out. A symlink destination is written through, as
-/// SFTP does: moving over it would replace the link with a file carrying the link's own
-/// `0777` mode and leave the target unchanged. Run under an explicit `sh`, since `su`
-/// uses the target's login shell.
+/// The escalated command that writes a staged upload from `tmp` into `dest` the way a
+/// plain SFTP upload does: truncate and write, never replace. An existing file keeps its
+/// inode — owner, group, mode, ACL and hard links — and a symlink is written through;
+/// a new file is created by the escalated user, so the filesystem applies its umask, a
+/// setgid directory's group and a default ACL. Moving the `mktemp` file (`0600`) into
+/// place instead would carry its mode and ownership over, replace links, and skip
+/// inheritance. Not atomic, as SFTP is not.
 fn place_staged_upload(tmp: &str, dest: &str) -> String {
-    let d = shell_escape(dest);
     let t = shell_escape(tmp);
-    // A non-root escalation target cannot give a file back to another owner; the
-    // content and mode still land, as they would for a plain upload by that user.
-    let script = format!(
-        "if [ -L {d} ]; then cat {t} > {d} && rm -f {t}; else \
-         a=$(stat -c '%a %u:%g' {d} 2>/dev/null || stat -f '%Lp %u:%g' {d} 2>/dev/null); \
-         mv -f {t} {d} && if [ -n \"$a\" ]; then \
-         {{ chown \"${{a#* }}\" {d} 2>/dev/null || [ \"$(id -u)\" != 0 ]; }} && chmod \"${{a%% *}}\" {d}; \
-         else p=$(dirname {d}); g=$(id -g); \
-         if [ -g \"$p\" ]; then g=$(stat -c %g \"$p\" 2>/dev/null || stat -f %g \"$p\"); fi; \
-         chown \"$(id -u):$g\" {d} && chmod \"$(printf '%o' $((0666 & ~0$(umask))))\" {d}; fi; fi",
-    );
-    format!("sh -c {}", shell_escape(&script))
+    format!("cat {t} > {} && rm -f {t}", shell_escape(dest))
 }
 
 #[cfg(test)]
@@ -1311,9 +1298,19 @@ mod tests {
         assert_eq!(mode_of(&dest), before);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_staged_upload_runs_under_an_explicit_sh() {
-        assert!(place_staged_upload("/tmp/glidesh.x", "/etc/app.conf").starts_with("sh -c '"));
+    fn a_hard_linked_destination_is_rewritten_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("app.conf");
+        std::fs::write(&dest, "old").unwrap();
+        let peer = dir.path().join("peer.conf");
+        std::fs::hard_link(&dest, &peer).unwrap();
+        let tmp = staged(dir.path(), "new");
+
+        let out = place(&tmp, &dest);
+        assert!(out.status.success(), "{:?}", out);
+        assert_eq!(std::fs::read_to_string(&peer).unwrap(), "new");
     }
 
     #[test]
