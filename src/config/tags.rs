@@ -27,6 +27,17 @@ pub fn parse_list(list: &str, what: &str) -> Result<Vec<String>, GlideshError> {
     Ok(tags)
 }
 
+/// `own` followed by the tags of `extra` it lacks, in order.
+pub fn merge(own: &[String], extra: &[String]) -> Vec<String> {
+    let mut tags = own.to_vec();
+    for tag in extra {
+        if !tags.contains(tag) {
+            tags.push(tag.clone());
+        }
+    }
+    tags
+}
+
 /// Which steps a run selects. Empty selects every step.
 #[derive(Debug, Clone, Default)]
 pub struct TagFilter {

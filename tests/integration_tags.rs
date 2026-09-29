@@ -28,6 +28,26 @@ plan "tags" {
 }
 "#;
 
+const INCLUDING_PLAN: &str = r#"
+plan "main" {
+    step "Top" tags="web" {
+        shell "touch /root/inc-top"
+    }
+    include "roles/db.kdl" tags="db"
+}
+"#;
+
+const INCLUDED_PLAN: &str = r#"
+plan "db" {
+    step "Db" {
+        shell "touch /root/inc-db"
+    }
+    step "Db slow" tags="slow" {
+        shell "touch /root/inc-db-slow"
+    }
+}
+"#;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tags_select_the_steps_that_run() {
     skip_unless_integration!();
@@ -35,7 +55,7 @@ async fn tags_select_the_steps_that_run() {
     let container = common::TestContainer::start();
     let ssh = container.ssh_session().await;
     let dir = tempfile::tempdir().unwrap();
-    write_fixtures(dir.path(), container.port, &container);
+    write_fixtures(dir.path(), container.port, &container, PLAN);
 
     let preview = glidesh(dir.path(), &["--tags", "config", "--dry-run"])
         .assert()
@@ -127,6 +147,56 @@ fn an_unknown_tag_fails_before_connecting() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_includes_tags_select_the_steps_it_brings_in() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let dir = tempfile::tempdir().unwrap();
+    write_fixtures(dir.path(), container.port, &container, INCLUDING_PLAN);
+    write_included(dir.path());
+
+    let out = glidesh(dir.path(), &["--tags", "db", "--skip-tags", "slow"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+
+    let touched = ssh.exec("ls /root/inc-* 2>/dev/null").await.unwrap();
+    assert_eq!(
+        touched.stdout.split_whitespace().collect::<Vec<_>>(),
+        ["/root/inc-db"],
+        "only the included step without its own excluded tag runs:\n{out}"
+    );
+    assert!(out.contains("1 changed, 2 skipped"), "{out}");
+}
+
+/// Tags an include adds count as in use, so `--tags` naming one is not rejected as a typo.
+#[test]
+fn an_includes_tags_are_known_to_the_unknown_tag_check() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("plan.kdl"), INCLUDING_PLAN).unwrap();
+    write_included(dir.path());
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        "host \"target\" \"192.0.2.1\" user=\"root\"\n",
+    )
+    .unwrap();
+    let out = glidesh(dir.path(), &["--tags", "db,dbb"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no step is tagged 'dbb'") && err.contains("tags in use: db, slow, web"),
+        "{err}"
+    );
+}
+
 fn glidesh(dir: &Path, extra: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("glidesh").unwrap();
     cmd.current_dir(dir)
@@ -136,9 +206,14 @@ fn glidesh(dir: &Path, extra: &[&str]) -> Command {
     cmd
 }
 
-fn write_fixtures(dir: &Path, port: u16, container: &common::TestContainer) {
+fn write_included(dir: &Path) {
+    std::fs::create_dir_all(dir.join("roles")).unwrap();
+    std::fs::write(dir.join("roles/db.kdl"), INCLUDED_PLAN).unwrap();
+}
+
+fn write_fixtures(dir: &Path, port: u16, container: &common::TestContainer, plan: &str) {
     let key = container.write_key_file(dir);
-    std::fs::write(dir.join("plan.kdl"), PLAN).unwrap();
+    std::fs::write(dir.join("plan.kdl"), plan).unwrap();
     std::fs::write(
         dir.join("inventory.kdl"),
         format!(

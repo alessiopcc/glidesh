@@ -8,6 +8,8 @@ A multi-group infrastructure setup using plan includes for shared configuration.
 2. Installs and starts nginx on the web tier
 
 This example demonstrates how to use `include` to share common configuration across multiple plans.
+The include carries `tags="base"`, which tags every step it brings in, so the base setup can
+run on its own with `--tags base`.
 
 ## Structure
 
@@ -24,4 +26,5 @@ multi-tier/
 
 ```bash
 glidesh run -i examples/multi-tier/inventory.kdl -p examples/multi-tier/plan.kdl
+glidesh run -i examples/multi-tier/inventory.kdl -p examples/multi-tier/plan.kdl --tags base
 ```

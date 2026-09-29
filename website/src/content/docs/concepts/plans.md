@@ -154,7 +154,7 @@ plan "main" {
         package "nginx" state="present"
     }
 
-    include "common/security.kdl"
+    include "common/security.kdl" tags="security"
 
     step "Deploy" {
         shell "deploy.sh"
@@ -162,6 +162,7 @@ plan "main" {
 }
 ```
 
+`tags="..."` on an `include` adds those [tags](/advanced/tags/) to every step it brings in.
 See [Plan Includes](/advanced/plan-includes/) for details.
 
 ## Conditions

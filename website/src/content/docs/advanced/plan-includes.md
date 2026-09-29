@@ -102,6 +102,33 @@ plan "security" {
 
 If the parent plan also defines `ssh-port`, the parent's value wins.
 
+## Tagging Included Steps
+
+`tags="a,b"` on an `include` adds those [tags](/advanced/tags/) to every step the included
+plan brings in, including the steps of plans it includes in turn. Each step keeps its own
+tags first, followed by the include's, then those of any include further out; a tag appears
+once.
+
+```kdl
+// main.kdl
+plan "main" {
+    include "common/security.kdl" tags="security"
+}
+```
+
+```kdl
+// common/security.kdl
+plan "security" {
+    step "Install fail2ban" tags="packages" {   // tags: packages, security
+        package "fail2ban" state="present"
+    }
+    include "ssh.kdl" tags="ssh"               // its steps: ..., ssh, security
+}
+```
+
+`glidesh run --tags security` then runs every step of `security.kdl` and `ssh.kdl`, without
+tagging each one. `tags` is the only attribute an `include` takes; any other is an error.
+
 ## Circular Include Detection
 
 glidesh detects circular includes and reports an error. If `a.kdl` includes `b.kdl` and `b.kdl` includes `a.kdl`, the parser will fail with a clear error message.
