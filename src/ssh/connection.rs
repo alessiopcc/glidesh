@@ -800,7 +800,17 @@ impl SshSession {
             // A wrong password makes `sudo -S` retry, reading the content that follows it
             // as more attempts: into the PAM stack and toward an account lockout.
             if r.password.is_some() {
-                self.exec_as("true", Some(r)).await?;
+                let out = self.exec_as("true", Some(r)).await?;
+                if out.exit_code != 0 {
+                    return Err(GlideshError::RunAs {
+                        user: r.user.clone(),
+                        method: escalation::method_name(r.method).to_string(),
+                        message: format!(
+                            "the password check failed, so the upload was not sent: {}",
+                            out.failure()
+                        ),
+                    });
+                }
             }
             let mark = format!("glidesh-content-{}", uuid::Uuid::new_v4().simple());
             self.exec_as_within(&write_fed_upload(remote_path, uid, &mark), r, |escalated| {
