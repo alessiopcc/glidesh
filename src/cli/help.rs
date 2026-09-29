@@ -43,7 +43,7 @@ macro_rules! example_rescue {
       shell "deploy.sh"
       rescue {
           shell "rollback.sh"
-          shell "logger -t deploy \"${@error.task} failed\""
+          file "/var/log/deploy-failure.txt" src="failure.txt" template=#true
       }
       always {
           shell "rm -f /tmp/deploy.lock"
@@ -175,11 +175,13 @@ RESCUE AND ALWAYS (handle a step's failure)
   variable is undefined (an error in its when= is not rescued). The step's tasks stop at
   the failure. If every rescue task succeeds, the failure is handled and the host goes on.
   always runs after the step and any rescue, whether or not they failed.
-  Both run once per step, after its loop, not per item, and cannot use ${@item}. They can read
-  ${@error.msg} (the error) and ${@error.task} (module 'resource'; empty when the step
-  failed outside its tasks). A failed rescue or always fails the host. A rescue that does
-  not run leaves its register= variables undefined. A step's changed status, which
-  subscribe= reads, counts all three blocks. A skipped step skips all three.
+  Both run once per step, after its loop, not per item, and cannot use ${@item}.
+  They can read ${@error.msg} (the error) and ${@error.task} (module 'resource'; empty when
+  the step failed outside its tasks). Never put them in a shell command: they hold command
+  output and would run as shell. Render them with a file template, as above, or test them
+  in when=. A failed rescue or always fails the host. A rescue that does not run leaves its
+  register= variables undefined. A step's changed status, which subscribe= reads, counts
+  all three blocks. A skipped step skips all three.
 
 SUBSCRIBE
   A step with subscribe= is triggered when a step it names changed something. Triggered:

@@ -14,7 +14,7 @@ plan "deploy" {
         shell "/opt/app/deploy.sh"
         rescue {
             shell "/opt/app/rollback.sh"
-            shell "logger -t deploy \"${@error.task} failed\""
+            file "/var/log/deploy-failure.txt" src="templates/failure.txt" template=#true
         }
         always {
             shell "rm -f /tmp/deploy.lock"
@@ -72,8 +72,37 @@ always {
 The step's own tasks, `when=`, `until=` and `loop=` cannot use them — there is no failure yet
 — and a plan that tries is rejected when it is parsed.
 
-An error message is several lines and may contain quotes, so pass it through a file or a
-heredoc rather than inside a quoted shell argument.
+### Using them safely
+
+**Never write `${@error.msg}` or `${@error.task}` into a shell command.** The message holds
+the failed command's output, and the task its interpolated command line: text a host or a
+variable controls. Inside a command it is run as shell — no quoting or heredoc is safe
+against every value it can hold.
+
+Render them into a file with a [`file`](/modules/file/) template instead, and let a fixed
+command read that file. A template writes each value as text: it is never run, nor expanded
+again. The first example above does this, with this `templates/failure.txt` beside the plan:
+
+```text
+${@error.task} failed:
+${@error.msg}
+```
+
+A later task can then pass it on without the text ever reaching a command line:
+
+```kdl
+plan "deploy" {
+    step "Deploy" {
+        shell "/opt/app/deploy.sh"
+        rescue {
+            file "/var/log/deploy-failure.txt" src="templates/failure.txt" template=#true
+            shell "logger -t deploy -f /var/log/deploy-failure.txt"
+        }
+    }
+}
+```
+
+`when=` is safe too: a condition compares values, and runs nothing.
 
 ## Undo, then still fail
 

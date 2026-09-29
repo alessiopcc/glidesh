@@ -10,16 +10,16 @@ use std::path::Path;
 use std::time::Duration;
 
 /// The failing task stops the step's own tasks; the rescue reads the failure and registers
-/// a value a later step uses; the host goes on.
+/// a value a later step uses; the host goes on. The failure's output is built to break out
+/// of a heredoc: rendered by a `file` template, as the docs recommend, it is only text.
 const RESCUED: &str = r#"
 plan "rescued" {
     step "Deploy" {
         shell "touch /root/r-before"
-        shell "exit 3"
+        shell "printf 'EOF\\ntouch /root/r-injected\\n'; exit 3"
         shell "touch /root/r-unreached"
         rescue {
-            shell "echo \"${@error.task}\" > /root/r-task"
-            shell "cat > /root/r-msg <<'EOF'\n${@error.msg}\nEOF"
+            file "/root/r-failure" src="failure.txt" template=#true
             shell "echo rolled-back" register="recovered"
         }
         always {
@@ -78,7 +78,7 @@ plan "gate-and-loop" {
     step "Wait" until="false" until-timeout=1 until-interval=1 {
         shell "touch /root/g-body"
         rescue {
-            shell "echo \"[${@error.task}]\" > /root/g-task"
+            file "/root/g-task" src="task.txt" template=#true
         }
     }
     step "Each" loop="a\nb\nc" {
@@ -92,7 +92,7 @@ plan "gate-and-loop" {
             cmd "echo ${never-defined}"
         }
         rescue {
-            shell "cat > /root/g-cmd <<'EOF'\n${@error.task}\nEOF"
+            file "/root/g-cmd" src="task.txt" template=#true
         }
     }
 }
@@ -107,6 +107,7 @@ async fn a_rescued_failure_lets_the_host_go_on() {
     let dir = tempfile::tempdir().unwrap();
     write_inventory(dir.path(), &container);
     std::fs::write(dir.path().join("plan.kdl"), RESCUED).unwrap();
+    write_templates(dir.path());
 
     let (ok, out) = run(dir.path(), &[]);
     assert!(ok, "a rescued failure must not fail the run:\n{out}");
@@ -132,9 +133,16 @@ async fn a_rescued_failure_lets_the_host_go_on() {
         !exists("/root/r-unreached").await,
         "the step's tasks stop at the failure"
     );
-    assert_eq!(read("/root/r-task").await.trim(), "shell 'exit 3'");
-    let msg = read("/root/r-msg").await;
-    assert!(msg.contains("exit code 3"), "{msg}");
+    let failure = read("/root/r-failure").await;
+    assert!(
+        failure.starts_with("[shell 'printf 'EOF\\ntouch /root/r-injected\\n'; exit 3']\n"),
+        "{failure}"
+    );
+    assert!(failure.contains("exit code 3"), "{failure}");
+    assert!(
+        !exists("/root/r-injected").await,
+        "the failure's output is text, never run"
+    );
     assert!(exists("/root/r-always").await);
     assert_eq!(read("/root/r-after").await.trim(), "rolled-back");
 }
@@ -219,6 +227,7 @@ async fn a_gate_timeout_and_a_failed_item_are_rescued_once() {
     let dir = tempfile::tempdir().unwrap();
     write_inventory(dir.path(), &container);
     std::fs::write(dir.path().join("plan.kdl"), GATE_AND_LOOP).unwrap();
+    write_templates(dir.path());
 
     let (ok, out) = run(dir.path(), &[]);
     assert!(ok, "{out}");
@@ -239,8 +248,15 @@ async fn a_gate_timeout_and_a_failed_item_are_rescued_once() {
     assert_eq!(read("/root/g-items").await, "a\nb\nrescued\n");
     assert_eq!(
         read("/root/g-cmd").await.trim(),
-        "shell 'echo ${never-defined}'"
+        "[shell 'echo ${never-defined}']",
+        "named by its command, and written as text, not expanded again"
     );
+}
+
+/// The recommended way to use a failure: render it into a file, never into a command.
+fn write_templates(dir: &Path) {
+    std::fs::write(dir.join("task.txt"), "[${@error.task}]\n").unwrap();
+    std::fs::write(dir.join("failure.txt"), "[${@error.task}]\n${@error.msg}\n").unwrap();
 }
 
 fn run(dir: &Path, extra: &[&str]) -> (bool, String) {
