@@ -324,3 +324,29 @@ async fn test_run_as_upload_writes_through_a_symlink_destination() {
         "640 root:root"
     );
 }
+
+#[tokio::test]
+async fn test_run_as_upload_of_a_new_file_takes_a_setgid_directorys_group() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("mkdir -p /srv/glidesh-shared && chgrp nogroup /srv/glidesh-shared && chmod 2775 /srv/glidesh-shared")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"shared").unwrap();
+    let params = upload_params(tmp.path(), "/srv/glidesh-shared/new.conf", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    assert_eq!(
+        stat(&root, "/srv/glidesh-shared/new.conf").await,
+        "644 root:nogroup"
+    );
+}

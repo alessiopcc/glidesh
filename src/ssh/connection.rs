@@ -1183,10 +1183,11 @@ fn f_key_escape(n: u8) -> Vec<u8> {
 
 /// The escalated command that moves a staged upload from `tmp` to `dest` so the result
 /// matches a plain SFTP upload: a replaced file keeps its owner, group and mode, a new
-/// one belongs to the escalated user with `0666` minus its umask. `mktemp` staged the
-/// content `0600`, which `mv` would otherwise carry over. Attributes are set after the
-/// move, never on the staging file, so the content is not readable in `/tmp` by anyone
-/// the destination's directory keeps out. A symlink destination is written through, as
+/// one belongs to the escalated user and its group (the directory's, when the directory
+/// is setgid) with `0666` minus its umask. `mktemp` staged the content `0600`, which
+/// `mv` would otherwise carry over. Attributes are set after the move, never on the
+/// staging file, so the content is not readable in `/tmp` by anyone the destination's
+/// directory keeps out. A symlink destination is written through, as
 /// SFTP does: moving over it would replace the link with a file carrying the link's own
 /// `0777` mode and leave the target unchanged. Run under an explicit `sh`, since `su`
 /// uses the target's login shell.
@@ -1200,7 +1201,9 @@ fn place_staged_upload(tmp: &str, dest: &str) -> String {
          a=$(stat -c '%a %u:%g' {d} 2>/dev/null || stat -f '%Lp %u:%g' {d} 2>/dev/null); \
          mv -f {t} {d} && if [ -n \"$a\" ]; then \
          {{ chown \"${{a#* }}\" {d} 2>/dev/null || [ \"$(id -u)\" != 0 ]; }} && chmod \"${{a%% *}}\" {d}; \
-         else chown \"$(id -u):$(id -g)\" {d} && chmod \"$(printf '%o' $((0666 & ~0$(umask))))\" {d}; fi; fi",
+         else p=$(dirname {d}); g=$(id -g); \
+         if [ -g \"$p\" ]; then g=$(stat -c %g \"$p\" 2>/dev/null || stat -f %g \"$p\"); fi; \
+         chown \"$(id -u):$g\" {d} && chmod \"$(printf '%o' $((0666 & ~0$(umask))))\" {d}; fi; fi",
     );
     format!("sh -c {}", shell_escape(&script))
 }
