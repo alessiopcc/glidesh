@@ -320,3 +320,60 @@ plan "web" {
     let uploaded = ssh.exec("cat /root/include-app.conf").await.unwrap().stdout;
     assert_eq!(uploaded, "port=8080 name=web\n");
 }
+
+/// Output cut at the limit has lost its middle: registering it would hand later steps a
+/// wrong value, so the task fails instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn register_refuses_output_cut_at_the_limit() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = container.write_key_file(dir.path());
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        r#"
+plan "big" {
+    step "Capture" {
+        shell "seq 1 3000000" register="lines"
+    }
+    step "After" {
+        shell "touch /root/register-cut-after"
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        format!(
+            "host \"target\" \"127.0.0.1\" user=\"root\" port={} {{\n    vars {{\n        ssh-key {:?}\n    }}\n}}\n",
+            container.port,
+            key.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let out = assert_cmd::Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("HOME", home.path())
+        .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl"])
+        .args(["--no-tui", "--no-host-key-check"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("too long for register="), "{text}");
+    let after = ssh.exec("test -e /root/register-cut-after").await.unwrap();
+    assert_ne!(
+        after.exit_code, 0,
+        "the host must stop at the failed register"
+    );
+}

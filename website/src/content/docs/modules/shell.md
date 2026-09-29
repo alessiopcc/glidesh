@@ -171,6 +171,24 @@ Use this whenever the tool lives in a user profile or uses shims (`~/.nix-profil
 
 See also the [nix module](/modules/nix/) for higher-level package/shell/build operations that set up their own Nix environment.
 
+## Output limit
+
+glidesh keeps at most 8 MiB of each output stream (stdout and stderr) of a command: its
+first 4 MiB and its last 4 MiB, joined by a line that says how much was dropped:
+
+```text
+[glidesh: 12582912 bytes of output dropped here]
+```
+
+The command itself runs to the end and its exit code is unaffected. The limit applies to
+every command glidesh runs on a host — tasks, `check` guards, [`until=`](/advanced/until/)
+gates, container probes — so a command that prints without end cannot exhaust the
+controller's memory. Output shown in the run and kept in the [run log](/concepts/logs/) is
+cut much shorter still.
+
+A task whose output was cut cannot be [registered](/advanced/loops-register/#register): the
+task fails instead. Send large output to a file on the host and register something smaller.
+
 ## Idempotency
 
 Without a `check` parameter, the shell module always reports `Pending` — it has no way to know if the command needs to run. Use `check` to make shell steps idempotent, or use the module for commands that are safe to repeat.

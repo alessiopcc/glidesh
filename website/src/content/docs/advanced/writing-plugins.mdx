@@ -155,6 +155,9 @@ Response:
 {"ssh_result":"exec","exit_code":0,"stdout":"syntax ok\n","stderr":""}
 ```
 
+`stdout` and `stderr` are each capped at 8 MiB, keeping the first and last 4 MiB (see
+[Output limit](/modules/shell/#output-limit)). To read something larger, use `download`.
+
 ### upload — Write a file
 
 Request:

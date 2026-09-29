@@ -289,3 +289,34 @@ async fn a_command_killed_by_a_signal_does_not_succeed() {
     let guard = ssh.exec("true").await.unwrap();
     assert_eq!(guard.exit_code, 0, "the session must still work afterwards");
 }
+
+/// A command that prints more than [`OUTPUT_LIMIT`] keeps its start and its end, on each
+/// stream, instead of holding all of it in memory.
+///
+/// [`OUTPUT_LIMIT`]: glidesh::ssh::connection::OUTPUT_LIMIT
+#[tokio::test]
+async fn output_over_the_limit_keeps_its_start_and_its_end() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let limit = glidesh::ssh::connection::OUTPUT_LIMIT;
+
+    let out = ssh
+        .exec(
+            "echo first; yes x | head -c 20000000; echo last; \
+             echo err-first >&2; yes y | head -c 20000000 >&2; echo err-last >&2",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    for (name, text, first, last) in [
+        ("stdout", &out.stdout, "first\n", "last\n"),
+        ("stderr", &out.stderr, "err-first\n", "err-last\n"),
+    ] {
+        assert!(text.len() < limit + 100, "{name}: {} bytes", text.len());
+        assert!(text.starts_with(first), "{name} lost its start");
+        assert!(text.ends_with(last), "{name} lost its end");
+        assert!(glidesh::ssh::connection::output_was_cut(text), "{name}");
+    }
+}

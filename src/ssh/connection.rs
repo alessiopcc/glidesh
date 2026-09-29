@@ -11,6 +11,7 @@ use russh_keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::OpenFlags;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -50,6 +51,76 @@ fn exit_outcome(status: Option<u32>, signal: Option<&str>) -> (u32, Option<Strin
             NO_EXIT_STATUS,
             Some("connection closed before the command reported an exit status".into()),
         ),
+    }
+}
+
+/// Most bytes of one output stream (stdout or stderr) a command keeps in memory: the first
+/// half and the latest half. A command that prints without end — a `yes`, a chatty build, a
+/// log followed by an `until=` gate — would otherwise grow the controller's memory until the
+/// command exits, for every host at once.
+pub const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+
+const DROPPED_PREFIX: &str = "\n[glidesh: ";
+const DROPPED_SUFFIX: &str = " bytes of output dropped here]\n";
+
+/// Whether `text` is output [`OUTPUT_LIMIT`] cut in the middle: it holds the whole marker
+/// line, count included, so output that merely quotes its wording does not match.
+pub fn output_was_cut(text: &str) -> bool {
+    text.match_indices(DROPPED_PREFIX).any(|(at, _)| {
+        let rest = &text[at + DROPPED_PREFIX.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0 && rest[digits..].starts_with(DROPPED_SUFFIX)
+    })
+}
+
+/// One output stream, capped at a limit: it keeps the start, where a command says what it
+/// is doing, and the end, where it says how it failed.
+struct CappedStream {
+    limit: usize,
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    dropped: u64,
+}
+
+impl CappedStream {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            head: Vec::new(),
+            tail: VecDeque::new(),
+            dropped: 0,
+        }
+    }
+
+    fn push(&mut self, mut data: &[u8]) {
+        let head_room = (self.limit / 2).saturating_sub(self.head.len());
+        let to_head = head_room.min(data.len());
+        self.head.extend_from_slice(&data[..to_head]);
+        data = &data[to_head..];
+
+        let tail_limit = self.limit - self.limit / 2;
+        if data.len() >= tail_limit {
+            self.dropped += (self.tail.len() + data.len() - tail_limit) as u64;
+            self.tail.clear();
+            data = &data[data.len() - tail_limit..];
+        }
+        self.tail.extend(data);
+        let over = self.tail.len().saturating_sub(tail_limit);
+        if over > 0 {
+            self.tail.drain(..over);
+            self.dropped += over as u64;
+        }
+    }
+
+    fn into_string(self) -> String {
+        let mut bytes = self.head;
+        if self.dropped > 0 {
+            bytes.extend_from_slice(
+                format!("{DROPPED_PREFIX}{}{DROPPED_SUFFIX}", self.dropped).as_bytes(),
+            );
+        }
+        bytes.extend(self.tail);
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 }
 
@@ -383,8 +454,8 @@ impl SshSession {
             let _ = channel.eof().await;
         }
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        let mut stdout = CappedStream::new(OUTPUT_LIMIT);
+        let mut stderr = CappedStream::new(OUTPUT_LIMIT);
         let mut status: Option<u32> = None;
         let mut signal: Option<String> = None;
         let mut exited = false;
@@ -410,10 +481,10 @@ impl SshSession {
 
             match msg {
                 russh::ChannelMsg::Data { ref data } => {
-                    stdout.extend_from_slice(data);
+                    stdout.push(data);
                 }
                 russh::ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    stderr.extend_from_slice(data);
+                    stderr.push(data);
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     status = Some(exit_status);
@@ -428,7 +499,7 @@ impl SshSession {
         }
 
         let (exit_code, why) = exit_outcome(status, signal.as_deref());
-        let mut stderr = String::from_utf8_lossy(&stderr).to_string();
+        let mut stderr = stderr.into_string();
         if let Some(why) = why {
             if !stderr.is_empty() && !stderr.ends_with('\n') {
                 stderr.push('\n');
@@ -437,7 +508,7 @@ impl SshSession {
         }
         Ok(CommandOutput {
             exit_code,
-            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stdout: stdout.into_string(),
             stderr,
         })
     }
@@ -1130,5 +1201,54 @@ mod tests {
             why.unwrap()
                 .contains("before the command reported an exit status")
         );
+    }
+
+    fn capped(limit: usize, chunks: &[&[u8]]) -> String {
+        let mut stream = CappedStream::new(limit);
+        for chunk in chunks {
+            stream.push(chunk);
+        }
+        stream.into_string()
+    }
+
+    #[test]
+    fn output_within_the_limit_is_kept_whole() {
+        let text = capped(8, &[b"abc", b"defgh"]);
+        assert_eq!(text, "abcdefgh");
+        assert!(!output_was_cut(&text));
+    }
+
+    #[test]
+    fn output_over_the_limit_keeps_its_start_and_its_end() {
+        let text = capped(8, &[b"abc", b"defghij", b"klmn"]);
+        assert_eq!(
+            text,
+            "abcd\n[glidesh: 6 bytes of output dropped here]\nklmn"
+        );
+        assert!(output_was_cut(&text));
+    }
+
+    #[test]
+    fn quoting_the_marker_wording_is_not_a_cut() {
+        assert!(!output_was_cut("docs: bytes of output dropped here]"));
+        assert!(!output_was_cut(
+            "a\n[glidesh: N bytes of output dropped here]\nb"
+        ));
+        assert!(!output_was_cut(
+            "a\n[glidesh:  bytes of output dropped here]\nb"
+        ));
+    }
+
+    #[test]
+    fn a_chunk_larger_than_the_limit_keeps_only_its_end() {
+        let text = capped(4, &[b"a", b"bcdefghijklm", b"no"]);
+        assert_eq!(text, "ab\n[glidesh: 11 bytes of output dropped here]\nno");
+    }
+
+    #[test]
+    fn many_small_chunks_count_every_dropped_byte() {
+        let chunks: Vec<&[u8]> = std::iter::repeat_n(&b"x"[..], 1000).collect();
+        let text = capped(10, &chunks);
+        assert!(text.contains("[glidesh: 990 bytes of output dropped here]"));
     }
 }
