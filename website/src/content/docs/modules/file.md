@@ -187,6 +187,10 @@ file that is already in place. Instead of a diff, a one-line note says why none 
   `diff hidden (not readable by other users)`. Matching secrets cannot catch a value the plan
   no longer uses — it is not registered, yet the host's copy still holds it — so a file kept
   private is treated as sensitive whatever it contains.
+- **With `run-as`, a destination another user could redirect**
+  ([the rule](/advanced/run-as/#destinations-other-users-control)): they could swap the
+  checked file for a link to a private one before it is read. `diff not shown (could not
+  read it: …)`, naming the entry; the upload itself is refused for the same reason.
 - **A task written with `diff=#false`**: `diff off for this task (diff=#false)`.
 
 That leaves one case glidesh cannot catch: a world-readable file whose host copy still holds

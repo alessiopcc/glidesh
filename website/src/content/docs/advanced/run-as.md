@@ -178,6 +178,12 @@ every symlink on the way:
   checked the same way;
 - a directory that does not exist yet is skipped: its parent decides who can create it.
 
+For a recursive copy the rule covers the path to the destination and each file uploaded;
+`owner` and `group` over the tree change a symlink found in it, never what it points
+to, and `mode` skips symlinks. A `--diff` read is checked the same way: a destination
+that fails shows no diff in the preview, and the upload itself is refused for the same
+reason.
+
 A directory's owner is trusted with what is in it, as the kernel trusts it: uploading
 as root into `/var/www/html` owned by `www-data` works, and `www-data` could redirect
 that write — the same holds for any tool that writes there as root. To deploy into a

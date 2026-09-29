@@ -541,3 +541,149 @@ async fn test_run_as_upload_into_a_group_writable_directory_is_refused() {
         .unwrap();
     assert_eq!(exists.stdout.trim(), "");
 }
+
+#[tokio::test]
+async fn test_run_as_recursive_owner_does_not_follow_a_link_in_the_tree() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "printf secret > /etc/glidesh-rvictim && \
+         mkdir -p /srv/glidesh-rtree/uploads && chmod 0777 /srv/glidesh-rtree/uploads && \
+         ln -s /etc/glidesh-rvictim /srv/glidesh-rtree/uploads/evil && \
+         chown -h nobody /srv/glidesh-rtree/uploads/evil",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("app.conf"), b"app").unwrap();
+    let params = upload_params(
+        src.path(),
+        "/srv/glidesh-rtree",
+        &[
+            ("recurse", ParamValue::Bool(true)),
+            ("owner", ParamValue::String("nobody".to_string())),
+        ],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    // `chown -R` over the tree reaches the planted link; it must change the link only.
+    // GNU already does; this guards against a `chown` that dereferences (busybox).
+    assert_eq!(stat(&root, "/etc/glidesh-rvictim").await, "644 root:root");
+    assert_eq!(
+        stat(&root, "/srv/glidesh-rtree/app.conf").await,
+        "644 nobody:root"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_diff_is_not_shown_for_a_path_others_could_redirect() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "mkdir -p /srv/glidesh-dteam && chgrp nogroup /srv/glidesh-dteam && \
+         chmod 0775 /srv/glidesh-dteam && printf 'port=80\n' > /srv/glidesh-dteam/app.conf && \
+         chmod 0644 /srv/glidesh-dteam/app.conf",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let mut ctx = container.module_context_run_as(&deploy, &os_info, &vars, true, run_as_root());
+    ctx.diff = true;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"port=8080\n").unwrap();
+    let params = upload_params(tmp.path(), "/srv/glidesh-dteam/app.conf", &[]);
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    let ModuleStatus::Pending { diff, .. } = status else {
+        panic!("expected Pending, got {status:?}");
+    };
+    // A group member could swap the file for a link to a private one between the
+    // world-readable check and the read.
+    let diff = diff.unwrap();
+    assert!(diff.contains("diff not shown"), "{diff}");
+    assert!(diff.contains("other users can write"), "{diff}");
+}
+
+#[tokio::test]
+async fn test_run_as_fetch_reads_a_root_only_file() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("printf 'root only' > /etc/glidesh-fetch.conf && chmod 0600 /etc/glidesh-fetch.conf")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    // Staged in /tmp, where fs.protected_regular (on under systemd) refuses root an
+    // O_CREAT open of the login user's file; the staging must not depend on it.
+    let local = tempfile::tempdir().unwrap();
+    let dest = local.path().join("fetched.conf");
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String("/etc/glidesh-fetch.conf".to_string()),
+    );
+    args.insert("fetch".to_string(), ParamValue::Bool(true));
+    let params = ModuleParams {
+        resource_name: dest.to_string_lossy().to_string(),
+        args,
+    };
+    FileModule.apply(&ctx, &params).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "root only");
+
+    let leftovers = deploy
+        .exec("ls -d /tmp/glidesh.* 2>/dev/null | wc -l")
+        .await
+        .unwrap();
+    assert_eq!(
+        leftovers.stdout.trim(),
+        "0",
+        "the staging directory is removed"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_diff_of_a_root_owned_file_shows_its_content() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec("printf 'port=80\n' > /etc/glidesh-diff.conf && chmod 0644 /etc/glidesh-diff.conf")
+        .await
+        .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let mut ctx = container.module_context_run_as(&deploy, &os_info, &vars, true, run_as_root());
+    ctx.diff = true;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"port=8080\n").unwrap();
+    let params = upload_params(tmp.path(), "/etc/glidesh-diff.conf", &[]);
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    let ModuleStatus::Pending { diff, .. } = status else {
+        panic!("expected Pending, got {status:?}");
+    };
+    let diff = diff.unwrap();
+    assert!(diff.contains("-port=80"), "{diff}");
+    assert!(diff.contains("+port=8080"), "{diff}");
+}

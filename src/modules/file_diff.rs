@@ -24,7 +24,7 @@ pub enum Remote {
     TooLarge(u64),
     /// Other users on the host cannot read it, so it was not downloaded.
     Private,
-    /// The size or mode could not be read, so the file was not downloaded.
+    /// The file could not be inspected, or the read was refused or failed on the host.
     Unreadable(String),
 }
 
@@ -56,7 +56,15 @@ pub async fn fetch_remote(ctx: &ModuleContext<'_>, path: &str) -> Result<Remote,
     if size > MAX_DIFF_BYTES {
         return Ok(Remote::TooLarge(size));
     }
-    Ok(Remote::Content(ctx.download_file(path).await?))
+    // Escalated, the path is re-resolved by the read: another user able to swap it for a
+    // link to a private file after the `stat` would get that file into the diff, so the
+    // read refuses such a path. That refusal, like a read the host fails, only drops the
+    // diff; a lost connection or a denied escalation still fails the check.
+    match ctx.download_trusted(path).await {
+        Ok(content) => Ok(Remote::Content(content)),
+        Err(GlideshError::Module { message, .. }) => Ok(Remote::Unreadable(message)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether the plan's `mode` could leave the file unreadable by other users. Only an octal
@@ -94,7 +102,7 @@ pub fn content_diff(
         Remote::TooLarge(size) => return too_large(path, *size),
         Remote::Private => return hidden_private(path),
         Remote::Unreadable(reason) => {
-            return format!("{path}: diff not shown (could not read its size and mode: {reason})");
+            return format!("{path}: diff not shown (could not read it: {reason})");
         }
         Remote::Content(bytes) => match as_text(bytes) {
             Some(text) => text,
@@ -253,7 +261,7 @@ mod tests {
         );
         assert_eq!(
             diff,
-            "/x: diff not shown (could not read its size and mode: permission denied)"
+            "/x: diff not shown (could not read it: permission denied)"
         );
     }
 

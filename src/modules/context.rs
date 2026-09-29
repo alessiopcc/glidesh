@@ -63,6 +63,12 @@ impl ModuleContext<'_> {
             .await
     }
 
+    pub async fn download_trusted(&self, remote_path: &str) -> Result<Vec<u8>, GlideshError> {
+        self.ssh
+            .download_trusted_as(remote_path, self.run_as.as_ref())
+            .await
+    }
+
     pub async fn checksum_remote(&self, remote_path: &str) -> Result<Option<String>, GlideshError> {
         self.ssh
             .checksum_remote(remote_path, self.run_as.as_ref())

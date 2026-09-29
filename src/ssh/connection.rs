@@ -574,7 +574,7 @@ impl SshSession {
     }
 
     /// Create a fresh temporary file as the login user (writable for SFTP) and
-    /// return its path. Used to stage privileged uploads/downloads.
+    /// return its path. Used to stage privileged uploads.
     async fn mktemp_remote(&self) -> Result<String, GlideshError> {
         let out = self.exec("mktemp /tmp/glidesh.XXXXXX").await?;
         if out.exit_code != 0 {
@@ -784,39 +784,81 @@ impl SshSession {
     }
 
     /// Download a source the login user may not be able to read directly. Without
-    /// escalation this is a plain SFTP read; with escalation the file is copied to a
-    /// world-readable temp path with the escalated shell, then read over SFTP.
+    /// escalation this is a plain SFTP read; with escalation the escalated shell copies
+    /// the file into the login user's private staging file, then it is read over SFTP.
     pub async fn download_file_as(
         &self,
         remote_path: &str,
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<Vec<u8>, GlideshError> {
-        if run_as.is_none() {
+        self.download_staged(remote_path, run_as, false).await
+    }
+
+    /// [`Self::download_file_as`], refusing with escalation a path another user could
+    /// redirect ([`trusted_paths`]) — for reads whose content must not leave the host
+    /// unless it is the file that was checked, as `--diff` checks it is world-readable.
+    pub async fn download_trusted_as(
+        &self,
+        remote_path: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<Vec<u8>, GlideshError> {
+        self.download_staged(remote_path, run_as, true).await
+    }
+
+    async fn download_staged(
+        &self,
+        remote_path: &str,
+        run_as: Option<&ResolvedRunAs>,
+        trusted: bool,
+    ) -> Result<Vec<u8>, GlideshError> {
+        let Some(r) = run_as else {
             return self.download_file(remote_path).await;
-        }
-        let tmp = self.mktemp_remote().await?;
-        // The staged temp file must be removed on every exit path, including the
+        };
+        let dir = self.mktemp_dir_remote().await?;
+        let tmp = format!("{dir}/content");
+        // The staging directory must be removed on every exit path, including the
         // error returns from `exec_as`/`download_file`, not just the happy path.
-        let result = self.stage_download(remote_path, &tmp, run_as).await;
-        let _ = self.exec(&format!("rm -f {}", shell_escape(&tmp))).await;
+        let result = self.stage_download(remote_path, &tmp, r, trusted).await;
+        let _ = self.exec(&format!("rm -rf {}", shell_escape(&dir))).await;
         result
+    }
+
+    /// A private (`0700`) directory holding an empty `content` file (`0600`), both the
+    /// login user's, for a download to be staged in. Not a file straight in `/tmp`: in a
+    /// sticky world-writable directory `fs.protected_regular` (on under systemd) refuses
+    /// even root an `O_CREAT` open of another user's file, which a shell's `>` is.
+    async fn mktemp_dir_remote(&self) -> Result<String, GlideshError> {
+        let out = self
+            .exec(
+                "d=$(mktemp -d /tmp/glidesh.XXXXXX) && : > \"$d/content\" && \
+                 chmod 0600 \"$d/content\" && printf '%s' \"$d\"",
+            )
+            .await?;
+        let dir = out.stdout.trim();
+        if out.exit_code != 0 || dir.is_empty() {
+            return Err(GlideshError::SshChannel {
+                message: format!("mktemp -d failed on {}: {}", self.host, out.failure()),
+            });
+        }
+        Ok(dir.to_string())
     }
 
     async fn stage_download(
         &self,
         remote_path: &str,
         tmp: &str,
-        run_as: Option<&ResolvedRunAs>,
+        r: &ResolvedRunAs,
+        trusted: bool,
     ) -> Result<Vec<u8>, GlideshError> {
-        // tmp is owned by the login user; root can overwrite its content, and the
-        // chmod keeps it readable for the SFTP read that follows.
-        let stage = format!(
-            "cp -f {} {} && chmod 0644 {}",
-            shell_escape(remote_path),
-            shell_escape(tmp),
-            shell_escape(tmp)
-        );
-        let out = self.exec_as(&stage, run_as).await?;
+        // Written into the login user's `0600` staging file, which keeps its owner and
+        // mode: readable over SFTP by the login user, by nobody else.
+        let stage = format!("cat {} > {}", shell_escape(remote_path), shell_escape(tmp));
+        let command = if trusted {
+            guarded(&[remote_path], self.login_uid().await?, &stage)
+        } else {
+            stage
+        };
+        let out = self.exec_as(&command, Some(r)).await?;
         if out.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
@@ -998,12 +1040,15 @@ impl SshSession {
             self.ensure_trusted_destination(path, r).await?;
         }
 
+        // The guard covers the tree's root, not what else lies inside it: `-h` changes a
+        // symlink found in the tree, never what it points to. GNU `chown -R` already
+        // does; busybox follows it without `-h`. `chmod -R` skips symlinks in both.
         match (owner, group) {
             (Some(o), Some(g)) => {
                 let output = self
                     .exec_as(
                         &format!(
-                            "chown -R {}:{} {}",
+                            "chown -hR {}:{} {}",
                             shell_escape(o),
                             shell_escape(g),
                             escaped
@@ -1014,29 +1059,35 @@ impl SshSession {
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
                         module: "file".to_string(),
-                        message: format!("chown -R failed: {}", output.stderr),
+                        message: format!("chown -hR failed: {}", output.stderr),
                     });
                 }
             }
             (Some(o), None) => {
                 let output = self
-                    .exec_as(&format!("chown -R {} {}", shell_escape(o), escaped), run_as)
+                    .exec_as(
+                        &format!("chown -hR {} {}", shell_escape(o), escaped),
+                        run_as,
+                    )
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
                         module: "file".to_string(),
-                        message: format!("chown -R failed: {}", output.stderr),
+                        message: format!("chown -hR failed: {}", output.stderr),
                     });
                 }
             }
             (None, Some(g)) => {
                 let output = self
-                    .exec_as(&format!("chgrp -R {} {}", shell_escape(g), escaped), run_as)
+                    .exec_as(
+                        &format!("chgrp -hR {} {}", shell_escape(g), escaped),
+                        run_as,
+                    )
                     .await?;
                 if output.exit_code != 0 {
                     return Err(GlideshError::Module {
                         module: "file".to_string(),
-                        message: format!("chgrp -R failed: {}", output.stderr),
+                        message: format!("chgrp -hR failed: {}", output.stderr),
                     });
                 }
             }
