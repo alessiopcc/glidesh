@@ -825,8 +825,9 @@ impl SshSession {
 
     /// A private (`0700`) directory holding an empty `content` file (`0600`), both the
     /// login user's, for a download to be staged in. Not a file straight in `/tmp`: in a
-    /// sticky world-writable directory `fs.protected_regular` (on under systemd) refuses
-    /// even root an `O_CREAT` open of another user's file, which a shell's `>` is.
+    /// sticky world-writable directory `fs.protected_regular` (enabled by default under
+    /// systemd) refuses even root an `O_CREAT` open of another user's file, which a
+    /// shell's `>` is.
     async fn mktemp_dir_remote(&self) -> Result<String, GlideshError> {
         // An explicit `sh`: the login shell may not be POSIX. A failure after `mktemp -d`
         // removes the directory here, since the caller never learns its path.
@@ -1380,8 +1381,11 @@ fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
 /// applied whether that sysctl is on or not:
 ///
 /// - a directory must not be writable by others, nor by a group other than root's, nor
-///   carry an ACL while group-writable (the group bits then show the ACL mask, which may
-///   grant writing to anyone);
+///   carry an ACL that may let others write: on Linux a POSIX ACL while group-writable
+///   (the group bits then show the ACL mask), on macOS/BSD an NFSv4 entry allowing
+///   `add_file`, `add_subdirectory`, `delete_child`, `writesecurity` or `chown`, which the
+///   mode bits do not show — or one that cannot be read. Not every ACL: macOS homes carry
+///   `everyone deny delete`;
 /// - a sticky directory writable by others (`/tmp`) is accepted above an existing
 ///   directory or link, which others cannot rename there. Not above a file or a missing
 ///   entry, which anyone could create first — a link, or a hard link to a root file;
@@ -1397,7 +1401,14 @@ fail() { echo "$*" >&2; exit 1; }
 trusted() { [ "$1" = 0 ] || [ "$1" = "$u" ] || [ "$1" = LOGIN ]; }
 owner() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || fail "cannot inspect $1"; }
 up() { up=$(dirname "$1" && echo .) || fail "cannot resolve $1"; up=${up%??}; }
-has_acl() { case $(ls -ld "$1" 2>/dev/null) in ??????????+*) return 0 ;; esac; return 1; }
+bsd=
+acl_writable() {
+  case $(ls -ld "$1" 2>/dev/null) in ??????????+*) ;; *) return 1 ;; esac
+  if [ -z "$bsd" ]; then [ $((m & 020)) -ne 0 ]; return; fi
+  e=$(ls -led "$1" 2>/dev/null) || return 0
+  printf '%s\n' "$e" |
+    grep -Eq '^ *[0-9]+: .* allow .*(add_file|add_subdirectory|delete_child|writesecurity|chown)'
+}
 entry() {
   if [ -L "$1" ]; then
     kind=link
@@ -1413,11 +1424,12 @@ entry() {
     return 0
   fi
   kind=dir
-  a=$(stat -c '%g %a' "$1" 2>/dev/null || stat -f '%g %Mp%Lp' "$1" 2>/dev/null) || fail "cannot inspect $1"
+  a=$(stat -c '%g %a' "$1" 2>/dev/null) || { a=$(stat -f '%g %Mp%Lp' "$1" 2>/dev/null) && bsd=1; } ||
+    fail "cannot inspect $1"
   g=${a%% *}; m=$((0${a#* }))
   if [ $((m & 02)) -ne 0 ] || { [ $((m & 020)) -ne 0 ] && [ "$g" != 0 ]; }; then
     { [ $((m & 01000)) -ne 0 ] && [ "$2" = ancestor ]; } || fail "refusing: other users can write to $1"; fi
-  if [ $((m & 020)) -ne 0 ] && has_acl "$1"; then
+  if acl_writable "$1"; then
     fail "refusing: $1 has an ACL, which may let other users write to it"; fi
 }
 check() {

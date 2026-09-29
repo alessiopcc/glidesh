@@ -632,8 +632,8 @@ async fn test_run_as_fetch_reads_a_root_only_file() {
     let vars = HashMap::new();
     let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
 
-    // Staged in /tmp, where fs.protected_regular (on under systemd) refuses root an
-    // O_CREAT open of the login user's file; the staging must not depend on it.
+    // Staged in /tmp, where fs.protected_regular (enabled by default under systemd)
+    // refuses root an O_CREAT open of the login user's file; staging must not depend on it.
     let local = tempfile::tempdir().unwrap();
     let dest = local.path().join("fetched.conf");
     let mut args = HashMap::new();

@@ -167,8 +167,11 @@ it — and fails the task otherwise, naming the entry. Along the path to `/`, an
 every symlink on the way:
 
 - a directory must not be writable by others, nor by a group other than root's, nor
-  carry an ACL while group-writable (its group bits then show the ACL mask, which may
-  let anyone write);
+  carry an ACL that may let others write: on Linux, an ACL on a group-writable directory
+  (its group bits then show the ACL mask); on macOS and BSD, an entry allowing
+  `add_file`, `add_subdirectory`, `delete_child`, `writesecurity` or `chown` — which the
+  mode bits do not show — or an ACL glidesh cannot read. A deny-only ACL, like the
+  `everyone deny delete` of a macOS home, is fine;
 - a directory writable by others is accepted when it is sticky, like `/tmp`, and what
   sits in it already exists as a directory or link: others cannot rename that. A file or
   a missing entry right under it is refused, since anyone could create it first — so
