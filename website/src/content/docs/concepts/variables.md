@@ -76,6 +76,64 @@ api-keys {
 
 Inline `vars` take precedence over `vars-file` when the same key appears in both. See [External Vars Files](/concepts/plans/#external-vars-files) for details.
 
+## Prompted Variables
+
+Some values should be chosen per run rather than written into the plan — the release to
+deploy, a password nobody wants in a file. Declare them in `vars-prompt`:
+
+```kdl
+plan "deploy" {
+    vars-prompt {
+        release "Release to deploy" default="main"
+        db-password "Database password" secret=#true
+    }
+
+    step "Deploy" {
+        shell "deploy.sh --ref ${release} --db-pass ${db-password}"
+    }
+}
+```
+
+Each child is a variable name (not starting with `-`, and without `=` or whitespace, so
+`--var name=value` can always answer it), the question to ask, and optionally:
+
+- `default="…"` — taken when the answer is empty, and when there is no terminal to ask on
+- `secret=#true` — read without echo, and shown as `***` in the TUI, plain output and run
+  logs, exactly like a [decrypted secret](#secret-variables). A non-empty answer must be at
+  least 4 bytes (4 plain ASCII characters): a shorter one could not be masked, so it is refused (asked again at a
+  terminal)
+
+`glidesh run` asks each question once, before connecting to any host, and the answers
+become plan variables (`${release}`). A non-secret prompt shows its default in brackets:
+
+```
+Release to deploy [main]: v1.4.2
+Database password:
+```
+
+Answer on the command line instead with `--var name=value` (repeatable):
+
+```bash
+glidesh run -i inventory.kdl -p deploy.kdl --var release=v1.4.2 --var db-password="$DB_PASSWORD"
+```
+
+- `--var` only answers a declared prompt; a name the plan does not ask for is an error.
+  Errors about a `--var` name it by position (`--var #2`) and never repeat what you typed,
+  which may be a password; a close declared name is suggested instead.
+- When stdin is not a terminal, a prompt without `--var` takes its default. One with no
+  default fails the run before it connects, and the error names every missing variable
+  with the `--var` that fixes it — glidesh never waits for input it cannot get.
+- `--dry-run` asks too: a preview needs the values. `glidesh validate` never asks; it
+  treats prompted names as defined.
+- Only the plan you run may prompt. `vars-prompt` in an [included](/concepts/plans/#including-other-plans)
+  plan is an error rather than ignored, since skipping the question would leave the variable
+  undefined. A name that is both prompted for and set in `vars` (or a `vars-file`) is an
+  error too.
+- With [inventory `plan=`](/concepts/inventory/#inline-plans) runs, several plans may
+  prompt; a name any of them declares is asked once and the answer shared. It is secret if
+  any plan marks it so, and keeps a `default` only when every plan gives the same one —
+  otherwise it must be answered, so the result never depends on the order of the groups.
+
 ## Merge Order
 
 When the same variable is defined at multiple levels, the most specific value wins:
@@ -83,6 +141,8 @@ When the same variable is defined at multiple levels, the most specific value wi
 ```
 Inventory global vars → Group vars → Host vars → Plan vars
 ```
+
+[Prompted variables](#prompted-variables) take the plan-vars slot.
 
 Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@fact`, `@item`, `@inventory`, `@group`, `@error`) that user variables cannot collide with — a variable name may not begin with `@`. `${@error.msg}` and `${@error.task}` describe a step's failure to its [`rescue` and `always`](/advanced/rescue/#reading-the-failure) tasks.
 

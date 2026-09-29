@@ -307,6 +307,18 @@ pub enum Amount {
     Percent(u8),
 }
 
+/// A variable `glidesh run` asks for before connecting, declared in a plan's `vars-prompt`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarPrompt {
+    pub name: String,
+    /// The question shown to the operator.
+    pub text: String,
+    /// Taken on an empty answer, and without asking when stdin is not a terminal.
+    pub default: Option<String>,
+    /// Read without echo and masked as `***` wherever run output shows it.
+    pub secret: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub name: String,
@@ -322,6 +334,8 @@ pub struct Plan {
     pub structured_vars: HashMap<String, Vec<HashMap<String, String>>>,
     /// Paths to external KDL files containing additional vars (resolved during `resolve_includes`).
     pub vars_files: Vec<String>,
+    /// Variables asked for at run time. Only the top-level plan may declare them.
+    pub prompts: Vec<VarPrompt>,
     /// Plan-level escalation default, applied to every step (overridable per step/task).
     pub run_as: RunAsSpec,
     pub items: Vec<PlanItem>,

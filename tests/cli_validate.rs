@@ -181,6 +181,45 @@ fn a_defined_variable_in_an_untemplated_file_warns_without_failing() {
     );
 }
 
+/// A prompted variable is defined at run time, so it counts; validate itself never asks.
+#[test]
+fn a_prompted_variable_counts_as_defined_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app.env", "RELEASE=${release}\n");
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" {
+            vars-prompt { release "Release to deploy" }
+            step "Env" { file "/etc/app.env" src="app.env" }
+        }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("warning: step 'Env': app.env contains ${release}"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_vars_prompt_in_an_included_plan_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "child.kdl",
+        r#"plan "child" { vars-prompt { release "Release" } }"#,
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { include "child.kdl" }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(!ok, "{out}");
+    assert!(out.contains("only the plan you run may ask"), "{out}");
+}
+
 /// An inventory variable counts too, when `-i` is given.
 #[test]
 fn an_inventory_variable_counts_as_defined() {

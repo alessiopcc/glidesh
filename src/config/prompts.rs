@@ -1,0 +1,481 @@
+//! Answers to a plan's `vars-prompt`, resolved once per run before any host is contacted.
+
+use crate::config::types::{Plan, VarPrompt};
+use crate::error::GlideshError;
+use crate::secrets::MIN_REDACTABLE_LEN;
+
+/// A prompted variable's value for this run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Answer {
+    pub name: String,
+    pub value: String,
+    pub secret: bool,
+}
+
+/// Every variable the plans ask for, each once: several group plans may declare the same
+/// name, and one answer serves them all. A name any of them marks `secret` is treated as
+/// secret, so a second declaration cannot make the answer echo or show in output.
+///
+/// A default is kept only when every declaration gives the same one. Otherwise which one
+/// applied — and whether a run without a terminal could go on at all — would depend on the
+/// order the inventory lists its groups in, so the answer must be given instead.
+pub fn distinct_prompts<'a>(plans: impl IntoIterator<Item = &'a Plan>) -> Vec<VarPrompt> {
+    let mut prompts: Vec<VarPrompt> = Vec::new();
+    for prompt in plans.into_iter().flat_map(|p| &p.prompts) {
+        match prompts.iter_mut().find(|p| p.name == prompt.name) {
+            Some(seen) => {
+                seen.secret |= prompt.secret;
+                if seen.default != prompt.default {
+                    seen.default = None;
+                }
+            }
+            None => prompts.push(prompt.clone()),
+        }
+    }
+    prompts
+}
+
+/// Split `--var name=value` flags. A malformed flag, or a name given twice, is an error.
+///
+/// Nothing a flag holds is ever echoed, not even its name: a password passed without its
+/// `name=`, or one that itself contains `=`, would show up there before anything is
+/// registered to mask it. Errors name a flag by its position instead.
+fn parse_var_flags(flags: &[String]) -> Result<Vec<(String, String)>, GlideshError> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (position, flag) in flags.iter().enumerate().map(|(i, f)| (i + 1, f)) {
+        let Some((name, value)) = flag.split_once('=').filter(|(n, _)| !n.trim().is_empty()) else {
+            let problem = if flag.contains('=') {
+                "no name before '='"
+            } else {
+                "no '='"
+            };
+            return Err(GlideshError::Other(format!(
+                "--var #{position} has {problem}: it must be name=value, e.g. --var release=v1.2"
+            )));
+        };
+        let name = name.trim();
+        if pairs.iter().any(|(n, _)| n == name) {
+            return Err(GlideshError::Other(format!(
+                "--var #{position} names the same variable as an earlier --var"
+            )));
+        }
+        pairs.push((name.to_string(), value.to_string()));
+    }
+    Ok(pairs)
+}
+
+/// The declared name a mistyped `--var` name most likely meant, if one is close. Only a
+/// declared name is ever shown, so a typo is still easy to fix without echoing the flag.
+fn closest_prompt<'a>(name: &str, prompts: &'a [VarPrompt]) -> Option<&'a str> {
+    prompts
+        .iter()
+        .map(|p| (edit_distance(name, &p.name), p.name.as_str()))
+        .filter(|(distance, declared)| *distance <= 2 && *distance < declared.len())
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, declared)| declared)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != *cb))
+                .min(above + 1)
+                .min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+/// Answer each prompt: from its `--var name=value` flag, else by `ask`ing when stdin is a
+/// terminal (`interactive`), else from its default. Without a terminal, every prompt left
+/// with no answer is reported at once, so the run fails before connecting instead of
+/// waiting on input that cannot come.
+///
+/// `--var` answers only declared prompts: a name no plan asks for is an error rather than a
+/// general variable override, so what a run uses stays visible in the plan.
+pub fn resolve_answers(
+    prompts: &[VarPrompt],
+    var_flags: &[String],
+    interactive: bool,
+    mut ask: impl FnMut(&VarPrompt) -> Result<String, GlideshError>,
+) -> Result<Vec<Answer>, GlideshError> {
+    let given = parse_var_flags(var_flags)?;
+    let unknown: Vec<String> = given
+        .iter()
+        .enumerate()
+        .filter(|(_, (n, _))| !prompts.iter().any(|p| p.name == *n))
+        .map(|(i, (n, _))| match closest_prompt(n, prompts) {
+            Some(declared) => format!("#{} (did you mean {declared}?)", i + 1),
+            None => format!("#{}", i + 1),
+        })
+        .collect();
+    if !unknown.is_empty() {
+        let declared = if prompts.is_empty() {
+            "the plan declares no vars-prompt".to_string()
+        } else {
+            format!(
+                "its vars-prompt declares: {}",
+                prompts
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        return Err(GlideshError::Other(format!(
+            "--var {} names a variable the plan does not ask for ({declared}). --var only \
+             answers a vars-prompt; the name is not shown, since it may be part of a password",
+            unknown.join(", ")
+        )));
+    }
+    let given_value = |name: &str| {
+        given
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+
+    if !interactive {
+        let missing: Vec<&str> = prompts
+            .iter()
+            .filter(|p| p.default.is_none() && given_value(&p.name).is_none())
+            .map(|p| p.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            let fix: Vec<String> = missing
+                .iter()
+                .map(|n| format!("--var {n}=<value>"))
+                .collect();
+            return Err(GlideshError::Other(format!(
+                "stdin is not a terminal, so these prompted variables need an answer on the \
+                 command line: {}. Pass {}",
+                missing.join(", "),
+                fix.join(" ")
+            )));
+        }
+    }
+
+    prompts
+        .iter()
+        .map(|p| {
+            let value = match given_value(&p.name) {
+                Some(v) => v,
+                None if interactive => ask(p)?,
+                None => p.default.clone().unwrap_or_default(),
+            };
+            if too_short_to_mask(p, &value) {
+                return Err(GlideshError::Other(format!(
+                    "{}: {}",
+                    p.name,
+                    short_secret_problem()
+                )));
+            }
+            Ok(Answer {
+                name: p.name.clone(),
+                value,
+                secret: p.secret,
+            })
+        })
+        .collect()
+}
+
+/// A secret answer shorter than [`MIN_REDACTABLE_LEN`] would be shown as it is: redaction
+/// leaves values that short alone, since masking them would shred unrelated output. So such
+/// an answer is refused rather than printed. An empty one shows nothing and is allowed.
+pub fn too_short_to_mask(prompt: &VarPrompt, value: &str) -> bool {
+    prompt.secret && !value.is_empty() && value.len() < MIN_REDACTABLE_LEN
+}
+
+/// Why [`too_short_to_mask`] refuses an answer, for the error and the terminal.
+pub fn short_secret_problem() -> String {
+    format!(
+        "a secret answer needs at least {MIN_REDACTABLE_LEN} bytes ({MIN_REDACTABLE_LEN} plain \
+         ASCII characters), or it could not be masked as *** in output and logs"
+    )
+}
+
+/// What a line typed at the terminal answers: the line itself, or the default when it is
+/// empty. `Err` holds why to ask again — nothing typed and no default, or a secret too short
+/// to mask. The default is applied first, so a default too short to mask is asked again
+/// rather than failing the run when the answers are checked.
+pub fn settle_typed_answer(prompt: &VarPrompt, typed: String) -> Result<String, String> {
+    let answer = match (&prompt.default, typed.is_empty()) {
+        (_, false) => typed,
+        (Some(default), true) => default.clone(),
+        (None, true) => return Err(format!("'{}' needs a value.", prompt.name)),
+    };
+    if too_short_to_mask(prompt, &answer) {
+        return Err(short_secret_problem());
+    }
+    Ok(answer)
+}
+
+/// Put each answer into the plan variables of the plans that asked for it — the same slot
+/// as plan `vars`, which `parse_plan` keeps from also naming a prompted variable.
+pub fn apply_answers(plan: &mut Plan, answers: &[Answer]) {
+    for answer in answers {
+        if plan.prompts.iter().any(|p| p.name == answer.name) {
+            plan.vars.insert(answer.name.clone(), answer.value.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::parse_plan;
+
+    fn prompt(name: &str, default: Option<&str>, secret: bool) -> VarPrompt {
+        VarPrompt {
+            name: name.to_string(),
+            text: format!("{name}?"),
+            default: default.map(str::to_string),
+            secret,
+        }
+    }
+
+    fn flags(f: &[&str]) -> Vec<String> {
+        f.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn never_ask(p: &VarPrompt) -> Result<String, GlideshError> {
+        panic!("asked for {} without a terminal", p.name)
+    }
+
+    #[test]
+    fn a_var_flag_answers_its_prompt() {
+        let prompts = [prompt("release", Some("main"), false)];
+        let answers =
+            resolve_answers(&prompts, &flags(&["release=v1.2=rc"]), false, never_ask).unwrap();
+        assert_eq!(
+            answers,
+            [Answer {
+                name: "release".into(),
+                value: "v1.2=rc".into(),
+                secret: false
+            }]
+        );
+    }
+
+    #[test]
+    fn without_a_terminal_the_default_is_taken() {
+        let prompts = [prompt("release", Some("main"), false)];
+        let answers = resolve_answers(&prompts, &[], false, never_ask).unwrap();
+        assert_eq!(answers[0].value, "main");
+    }
+
+    #[test]
+    fn without_a_terminal_every_missing_answer_is_named() {
+        let prompts = [
+            prompt("release", None, false),
+            prompt("region", Some("eu"), false),
+            prompt("db-password", None, true),
+        ];
+        let err = resolve_answers(&prompts, &[], false, never_ask)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("release, db-password"), "{err}");
+        assert!(
+            err.contains("--var release=<value> --var db-password=<value>"),
+            "{err}"
+        );
+        assert!(!err.contains("region"), "{err}");
+    }
+
+    #[test]
+    fn a_terminal_asks_only_what_the_command_line_left_open() {
+        let prompts = [prompt("release", None, false), prompt("tag", None, true)];
+        let mut asked = Vec::new();
+        let answers = resolve_answers(&prompts, &flags(&["release=v2"]), true, |p| {
+            asked.push(p.name.clone());
+            Ok("typed".to_string())
+        })
+        .unwrap();
+        assert_eq!(asked, ["tag"]);
+        assert_eq!(answers[0].value, "v2");
+        assert_eq!(answers[1].value, "typed");
+        assert!(answers[1].secret);
+    }
+
+    /// Redaction leaves values under `MIN_REDACTABLE_LEN` alone, so a short secret would be
+    /// printed; it is refused, from `--var` and from a default alike, and never echoed.
+    #[test]
+    fn a_secret_answer_too_short_to_mask_is_refused() {
+        let secret = [prompt("pin", None, true)];
+        let err = resolve_answers(&secret, &flags(&["pin=123"]), false, never_ask)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pin") && err.contains("at least 4"), "{err}");
+        assert!(!err.contains("123"), "{err}");
+
+        let with_default = [prompt("pin", Some("12"), true)];
+        assert!(resolve_answers(&with_default, &[], false, never_ask).is_err());
+
+        for ok in ["1234", ""] {
+            let flag = format!("pin={ok}");
+            assert!(resolve_answers(&secret, &flags(&[&flag]), false, never_ask).is_ok());
+        }
+        let plain = [prompt("pin", None, false)];
+        assert!(resolve_answers(&plain, &flags(&["pin=1"]), false, never_ask).is_ok());
+    }
+
+    #[test]
+    fn a_typed_answer_takes_the_default_before_it_is_checked() {
+        let short_default = prompt("pin", Some("12"), true);
+        assert!(
+            settle_typed_answer(&short_default, String::new())
+                .unwrap_err()
+                .contains("at least 4"),
+            "pressing Enter on a default too short to mask asks again"
+        );
+        assert_eq!(
+            settle_typed_answer(&short_default, "1234".into()).unwrap(),
+            "1234"
+        );
+        let long_default = prompt("pin", Some("4321"), true);
+        assert_eq!(
+            settle_typed_answer(&long_default, String::new()).unwrap(),
+            "4321"
+        );
+        let no_default = prompt("release", None, false);
+        assert!(
+            settle_typed_answer(&no_default, String::new())
+                .unwrap_err()
+                .contains("needs a value")
+        );
+    }
+
+    /// Which default applied, and whether a run without a terminal could go on, must not
+    /// depend on the order the inventory lists its groups in.
+    #[test]
+    fn a_default_is_shared_only_when_every_plan_gives_the_same_one() {
+        let plan = |default: &str| {
+            parse_plan(&format!(
+                "plan \"p\" {{\n vars-prompt {{\n release \"Release\" {default}\n }}\n}}"
+            ))
+            .unwrap()
+        };
+        let (main, dev, none) = (plan("default=\"main\""), plan("default=\"dev\""), plan(""));
+        for plans in [[&main, &dev], [&dev, &main], [&main, &none], [&none, &main]] {
+            assert_eq!(distinct_prompts(plans)[0].default, None);
+        }
+        let again = plan("default=\"main\"");
+        assert_eq!(
+            distinct_prompts([&main, &again])[0].default.as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn a_var_flag_for_an_undeclared_name_is_an_error() {
+        let prompts = [prompt("release", None, false)];
+        let err = resolve_answers(
+            &prompts,
+            &flags(&["release=v1", "relase=v1"]),
+            false,
+            never_ask,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("--var #2 (did you mean release?)") && err.contains("declares: release"),
+            "{err}"
+        );
+
+        let err = resolve_answers(&[], &flags(&["x=1"]), false, never_ask)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("declares no vars-prompt"), "{err}");
+    }
+
+    /// A password containing `=` passed without its `name=` splits into a "name" that is the
+    /// start of the password, and looks like any other name: none is ever echoed.
+    #[test]
+    fn an_undeclared_or_repeated_name_is_never_echoed() {
+        let prompts = [prompt("db-password", None, true)];
+        for bad in [
+            &["hunter2=rest"][..],
+            &["hunter2!x=rest"],
+            &["hunter2=a", "hunter2=b"],
+        ] {
+            let err = resolve_answers(&prompts, &flags(bad), false, never_ask)
+                .unwrap_err()
+                .to_string();
+            assert!(!err.contains("hunter2"), "{bad:?}: {err}");
+            assert!(err.contains("--var #"), "{err}");
+        }
+    }
+
+    #[test]
+    fn only_a_close_declared_name_is_suggested() {
+        let prompts = [
+            prompt("release", None, false),
+            prompt("db-password", None, true),
+        ];
+        assert_eq!(closest_prompt("relase", &prompts), Some("release"));
+        assert_eq!(closest_prompt("db-pasword", &prompts), Some("db-password"));
+        assert_eq!(closest_prompt("hunter2", &prompts), None);
+        assert_eq!(closest_prompt("r", &[prompt("x", None, false)]), None);
+    }
+
+    #[test]
+    fn a_malformed_or_repeated_var_flag_is_an_error() {
+        let prompts = [prompt("release", None, false)];
+        for bad in [&["release"][..], &["=v1"], &["release=a", "release=b"]] {
+            assert!(
+                resolve_answers(&prompts, &flags(bad), false, never_ask).is_err(),
+                "{bad:?} was accepted"
+            );
+        }
+    }
+
+    /// A password typed without its `name=` must not end up on stderr before anything is
+    /// registered to mask it.
+    #[test]
+    fn a_malformed_var_flag_is_not_echoed() {
+        let prompts = [prompt("db-password", None, true)];
+        for bad in ["hunter2-secret", "=hunter2-secret"] {
+            let err = resolve_answers(&prompts, &flags(&[bad]), false, never_ask)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("name=value"), "{err}");
+            assert!(!err.contains("hunter2"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn plans_sharing_a_prompt_ask_it_once_and_secret_wins() {
+        let a = parse_plan(
+            "plan \"a\" {\n vars-prompt {\n pass \"Password\"\n release \"Release\"\n }\n}",
+        )
+        .unwrap();
+        let b =
+            parse_plan("plan \"b\" {\n vars-prompt {\n pass \"Pass\" secret=#true\n }\n}").unwrap();
+        let prompts = distinct_prompts([&a, &b]);
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].name == "pass" && prompts[0].secret);
+        assert_eq!(prompts[0].text, "Password");
+    }
+
+    #[test]
+    fn answers_reach_only_the_plans_that_asked() {
+        let mut asking =
+            parse_plan("plan \"a\" {\n vars-prompt {\n release \"Release\"\n }\n}").unwrap();
+        let mut other = parse_plan("plan \"b\" { }").unwrap();
+        let answers = [Answer {
+            name: "release".into(),
+            value: "v3".into(),
+            secret: false,
+        }];
+        apply_answers(&mut asking, &answers);
+        apply_answers(&mut other, &answers);
+        assert_eq!(asking.vars["release"], "v3");
+        assert!(other.vars.is_empty());
+    }
+}

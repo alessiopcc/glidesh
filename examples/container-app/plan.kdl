@@ -2,13 +2,18 @@ plan "container-app" {
     mode "sync"
 
     vars {
-        app-image "nginx:alpine"
         app-port 8080
+    }
+
+    // Asked when the run starts; `--var app-tag=1.27-alpine` answers it up front, and
+    // without a terminal the default is used.
+    vars-prompt {
+        app-tag "nginx image tag to deploy" default="alpine"
     }
 
     step "Deploy application" {
         container "webapp" {
-            image "${app-image}"
+            image "nginx:${app-tag}"
             state "running"
             restart "always"
             ports {

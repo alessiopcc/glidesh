@@ -44,6 +44,7 @@ plan "deploy-app" {
 - **max-fail** — stop a rolling run once too many hosts fail, e.g. `max-fail "10%"` (overridden by `--max-fail`)
 - **vars** — plan-scoped variables, merged with inventory vars (supports both scalar and [structured variables](/concepts/variables/#structured-variables))
 - **vars-file** — load variables from an external KDL file (see below)
+- **vars-prompt** — variables asked for when the run starts, or given with `--var name=value` — see [Prompted Variables](/concepts/variables/#prompted-variables). Only the plan you run may declare them: in an included plan it is an error
 - **run-as** / **run-as-method** — attributes on the `plan` node that escalate privileges for every step, e.g. `plan "deploy" run-as="root" { … }` — see [Privilege Escalation](/advanced/run-as/)
 - **step** and **include** — the plan's steps, and other plans inlined among them (see [Steps](#steps) and [Including Other Plans](#including-other-plans))
 

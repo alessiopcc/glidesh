@@ -31,7 +31,7 @@ Create deploy users with specific shells, groups, and SSH authorized keys.
 
 ## container-app
 
-Deploy a containerized application with port mappings, environment variables, and persistent volumes.
+Deploy a containerized application with port mappings, environment variables, and persistent volumes. The image tag is a [prompted variable](/concepts/variables/#prompted-variables): asked when the run starts, or given with `--var app-tag=…`.
 
 **Modules used:** container
 

@@ -2,6 +2,7 @@ pub mod checks;
 pub mod condition;
 pub mod inventory;
 pub mod plan;
+pub mod prompts;
 pub mod tags;
 pub mod template;
 pub mod types;

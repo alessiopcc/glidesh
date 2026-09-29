@@ -97,7 +97,7 @@ impl SecretRegistry {
         if !guard.iter().any(|p| p.as_str() == plaintext) {
             if plaintext.len() < MIN_REDACTABLE_LEN {
                 tracing::warn!(
-                    "a decrypted secret is only {} characters long: too short to mask \
+                    "a secret value is only {} characters long: too short to mask \
                      without shredding unrelated output, so it will NOT be redacted from \
                      the TUI or run logs (it is still withheld from external plugins)",
                     plaintext.len()
@@ -208,6 +208,12 @@ impl Secrets {
         self.registry.clone()
     }
 
+    /// Mask a secret that did not come from a token — a `vars-prompt` answer marked
+    /// `secret` — exactly as a decrypted value is.
+    pub fn register_plaintext(&self, plaintext: &str) {
+        self.registry.register(plaintext);
+    }
+
     /// Decrypt one token, registering its plaintext for redaction.
     pub fn decrypt_token(&self, token: &str) -> Result<String, GlideshError> {
         let dek = self.dek.as_ref().ok_or_else(|| self.locked_error())?;
@@ -314,6 +320,13 @@ mod tests {
         reg.register("password");
         assert_eq!(reg.redact("login password now"), "login *** now");
         assert_eq!(reg.redact("bare pass end"), "bare *** end");
+    }
+
+    #[test]
+    fn a_plaintext_registered_without_a_token_is_masked() {
+        let secrets = Secrets::locked();
+        secrets.register_plaintext("hunter22");
+        assert_eq!(secrets.registry().redact("pw=hunter22"), "pw=***");
     }
 
     #[test]

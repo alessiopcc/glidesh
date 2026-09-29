@@ -1,7 +1,7 @@
 use crate::config::condition::Condition;
 use crate::config::types::{
     Amount, ExecutionMode, Include, LoopSource, ParamValue, Plan, PlanItem, RunAsSpec, Step,
-    TaskDef, UntilGate,
+    TaskDef, UntilGate, VarPrompt,
 };
 use crate::error::GlideshError;
 use std::collections::{HashMap, HashSet};
@@ -45,6 +45,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
     let mut vars = HashMap::new();
     let mut structured_vars: HashMap<String, Vec<HashMap<String, String>>> = HashMap::new();
     let mut vars_files = Vec::new();
+    let mut prompts = Vec::new();
     let mut items = Vec::new();
 
     for node in children.nodes() {
@@ -130,6 +131,19 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
                     }
                 }
             }
+            "vars-prompt" => {
+                for prompt in parse_vars_prompt(node)? {
+                    if prompts.iter().any(|p: &VarPrompt| p.name == prompt.name) {
+                        return Err(GlideshError::ConfigParse {
+                            message: format!(
+                                "vars-prompt declares '{}' more than once",
+                                prompt.name
+                            ),
+                        });
+                    }
+                    prompts.push(prompt);
+                }
+            }
             "step" => {
                 items.push(PlanItem::Step(Box::new(parse_step(node)?)));
             }
@@ -158,7 +172,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
 
     let run_as = super::parse_run_as_attrs(fp_node)?;
 
-    Ok(Plan {
+    let plan = Plan {
         name,
         mode,
         serial,
@@ -166,9 +180,118 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         vars,
         structured_vars,
         vars_files,
+        prompts,
         run_as,
         items,
-    })
+    };
+    check_prompts_are_not_vars(&plan)?;
+    Ok(plan)
+}
+
+const PROMPT_ATTRS: &[&str] = &["default", "secret"];
+
+/// `vars-prompt { name "Question" default="…" secret=#true }`, one child per variable.
+fn parse_vars_prompt(node: &kdl::KdlNode) -> Result<Vec<VarPrompt>, GlideshError> {
+    let error = |message: String| GlideshError::ConfigParse { message };
+    // Ignored, `vars-prompt secret=#true { … }` would read as marking every answer secret
+    // while each one is still echoed and printed.
+    if !node.entries().is_empty() {
+        return Err(error(
+            "vars-prompt takes no arguments or attributes: put default= and secret= on each \
+             variable, e.g. vars-prompt { password \"Password\" secret=#true }"
+                .to_string(),
+        ));
+    }
+    let Some(children) = node.children() else {
+        return Err(error(
+            "vars-prompt needs a block of variables, e.g. vars-prompt { release \"Release to \
+             deploy\" default=\"main\" }"
+                .to_string(),
+        ));
+    };
+    let mut prompts = Vec::new();
+    for child in children.nodes() {
+        let name = child.name().value().to_string();
+        super::validate_user_var_name(&name)?;
+        // `--var name=value` splits at the first `=` and trims the name, and a value starting
+        // with `-` is read as another flag, so a name that could not be written that way
+        // could never be answered without a terminal.
+        if name.is_empty()
+            || name.starts_with('-')
+            || name.contains('=')
+            || name.contains(char::is_whitespace)
+        {
+            return Err(error(format!(
+                "vars-prompt name {name:?} cannot be given as --var name=value: use a name \
+                 that does not start with '-' and has no '=' or whitespace"
+            )));
+        }
+        let mut args = child.entries().iter().filter(|e| e.name().is_none());
+        let text = match (args.next(), args.next()) {
+            (Some(text), None) => text.value().as_string().map(str::to_string),
+            _ => None,
+        }
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| {
+            error(format!(
+                "vars-prompt '{name}' needs one question to ask, e.g. {name} \"What to use for \
+                 {name}\""
+            ))
+        })?;
+        let mut default = None;
+        let mut secret = false;
+        for entry in child.entries() {
+            let Some(attr) = entry.name() else { continue };
+            match attr.value() {
+                "default" => {
+                    default = Some(super::kdl_value_to_string(entry.value()));
+                }
+                "secret" => {
+                    secret = entry.value().as_bool().ok_or_else(|| {
+                        error(format!(
+                            "vars-prompt '{name}': secret must be #true or #false"
+                        ))
+                    })?;
+                }
+                other => {
+                    return Err(error(format!(
+                        "vars-prompt '{name}': unknown attribute '{other}' (expected one of: {})",
+                        PROMPT_ATTRS.join(", ")
+                    )));
+                }
+            }
+        }
+        if child.children().is_some() {
+            return Err(error(format!(
+                "vars-prompt '{name}' takes no block, only a question and attributes"
+            )));
+        }
+        prompts.push(VarPrompt {
+            name,
+            text,
+            default,
+            secret,
+        });
+    }
+    Ok(prompts)
+}
+
+/// A name both prompted for and set in `vars` would leave it unclear which one a run uses.
+fn check_prompts_are_not_vars(plan: &Plan) -> Result<(), GlideshError> {
+    match plan
+        .prompts
+        .iter()
+        .find(|p| plan.vars.contains_key(&p.name) || plan.structured_vars.contains_key(&p.name))
+    {
+        Some(p) => Err(GlideshError::ConfigParse {
+            message: format!(
+                "'{}' is both in vars-prompt and a plan variable (vars, vars-file or an \
+                 included plan's vars): remove one, or give the prompt a default instead",
+                p.name
+            ),
+        }),
+        None => Ok(()),
+    }
 }
 
 fn parse_include(node: &kdl::KdlNode) -> Result<Include, GlideshError> {
@@ -304,7 +427,7 @@ pub fn resolve_includes(plan: &mut Plan, base_dir: &Path) -> Result<(), GlideshE
         seen_steps.push(step.name.clone());
     }
 
-    Ok(())
+    check_prompts_are_not_vars(plan)
 }
 
 /// Load vars from external KDL files. Each file contains raw var nodes (no wrapper).
@@ -431,6 +554,19 @@ fn resolve_items(
                     ))
                 })?;
                 let included = parse_plan(&content)?;
+                // Rejected rather than ignored: silently not asking would run with the
+                // variable undefined.
+                if let Some(prompt) = included.prompts.first() {
+                    return Err(GlideshError::ConfigParse {
+                        message: format!(
+                            "included plan '{}' ({}) declares vars-prompt '{}': only the plan \
+                             you run may ask for variables, so move the vars-prompt block there",
+                            included.name,
+                            resolved_path.display(),
+                            prompt.name
+                        ),
+                    });
+                }
                 if !seen.insert(included.name.clone()) {
                     return Err(GlideshError::ConfigParse {
                         message: format!(
@@ -1202,6 +1338,150 @@ plan "main" {
         assert_eq!(plan.serial, [Amount::Count(2)]);
         assert_eq!(plan.max_fail, None);
         assert_eq!(plan.steps().len(), 1);
+    }
+
+    fn prompts(body: &str) -> Result<Plan, GlideshError> {
+        parse_plan(&format!("plan \"p\" {{\n{body}\n}}"))
+    }
+
+    #[test]
+    fn vars_prompt_declares_questions_defaults_and_secrets() {
+        let plan = prompts(
+            "vars-prompt {\n release \"Release to deploy\" default=\"main\"\n \
+             db-password \"Database password\" secret=#true\n port \"Port\" default=8080\n}",
+        )
+        .unwrap();
+        assert_eq!(
+            plan.prompts,
+            [
+                VarPrompt {
+                    name: "release".into(),
+                    text: "Release to deploy".into(),
+                    default: Some("main".into()),
+                    secret: false,
+                },
+                VarPrompt {
+                    name: "db-password".into(),
+                    text: "Database password".into(),
+                    default: None,
+                    secret: true,
+                },
+                VarPrompt {
+                    name: "port".into(),
+                    text: "Port".into(),
+                    default: Some("8080".into()),
+                    secret: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_vars_prompts_are_rejected() {
+        for (body, needle) in [
+            ("vars-prompt", "needs a block"),
+            (
+                "vars-prompt secret=#true {\n password \"Password\"\n}",
+                "takes no arguments or attributes",
+            ),
+            (
+                "vars-prompt \"x\" {\n release \"A\"\n}",
+                "takes no arguments or attributes",
+            ),
+            ("vars-prompt {\n release\n}", "needs one question"),
+            ("vars-prompt {\n release \"\"\n}", "needs one question"),
+            ("vars-prompt {\n release 5\n}", "needs one question"),
+            (
+                "vars-prompt {\n release \"A\" \"B\"\n}",
+                "needs one question",
+            ),
+            (
+                "vars-prompt {\n release \"A\" secret=\"yes\"\n}",
+                "#true or #false",
+            ),
+            (
+                "vars-prompt {\n release \"A\" hidden=#true\n}",
+                "unknown attribute 'hidden'",
+            ),
+            ("vars-prompt {\n release \"A\" { x 1 }\n}", "takes no block"),
+            (
+                "vars-prompt {\n release \"A\"\n release \"B\"\n}",
+                "more than once",
+            ),
+            (
+                "vars-prompt {\n release \"A\"\n}\nvars-prompt {\n release \"B\"\n}",
+                "more than once",
+            ),
+            ("vars-prompt {\n \"@host.name\" \"A\"\n}", "reserved"),
+            (
+                "vars-prompt {\n \"release=tag\" \"A\"\n}",
+                "cannot be given as --var",
+            ),
+            ("vars-prompt {\n \"\" \"A\"\n}", "cannot be given as --var"),
+            (
+                "vars-prompt {\n \"-rel\" \"A\"\n}",
+                "cannot be given as --var",
+            ),
+            (
+                "vars-prompt {\n \" release\" \"A\"\n}",
+                "cannot be given as --var",
+            ),
+            (
+                "vars-prompt {\n \"my release\" \"A\"\n}",
+                "cannot be given as --var",
+            ),
+            (
+                "vars {\n release \"v1\"\n}\nvars-prompt {\n release \"A\"\n}",
+                "both in vars-prompt and a plan variable",
+            ),
+        ] {
+            let err = match prompts(body) {
+                Ok(_) => panic!("accepted: {body}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains(needle), "{body}: {err}");
+        }
+    }
+
+    /// Ignoring it, as an included plan's rollout settings are, would run the included steps
+    /// with the variable silently undefined.
+    #[test]
+    fn an_included_plans_vars_prompt_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("child.kdl"),
+            "plan \"child\" {\n    vars-prompt {\n        release \"Release\"\n    }\n}",
+        )
+        .unwrap();
+        let mut plan = parse_plan("plan \"parent\" {\n    include \"child.kdl\"\n}").unwrap();
+        let err = resolve_includes(&mut plan, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("included plan 'child'") && err.contains("vars-prompt 'release'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_prompted_name_set_by_a_vars_file_or_an_include_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("vars.kdl"), "release \"v1\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("child.kdl"),
+            "plan \"child\" {\n    vars {\n        region \"eu\"\n    }\n}",
+        )
+        .unwrap();
+        for body in [
+            "vars-file \"vars.kdl\"\n vars-prompt {\n release \"Release\"\n }",
+            "include \"child.kdl\"\n vars-prompt {\n region \"Region\"\n }",
+        ] {
+            let mut plan = prompts(body).unwrap();
+            let err = resolve_includes(&mut plan, dir.path())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("both in vars-prompt"), "{body}: {err}");
+        }
     }
 
     #[test]
