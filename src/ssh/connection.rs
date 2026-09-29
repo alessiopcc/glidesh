@@ -1034,7 +1034,9 @@ impl SshSession {
         mode: Option<&str>,
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
-        let escaped = shell_escape(path);
+        // The trailing slash resolves a root that is a symlink to the directory it points
+        // to, as uploads through it do; `-h` would otherwise change only that link.
+        let escaped = shell_escape(&format!("{}/", path.trim_end_matches('/')));
         let changes = owner.is_some() || group.is_some() || mode.is_some();
         if let Some(r) = run_as.filter(|_| changes) {
             self.ensure_trusted_destination(path, r).await?;

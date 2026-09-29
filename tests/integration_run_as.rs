@@ -687,3 +687,45 @@ async fn test_run_as_diff_of_a_root_owned_file_shows_its_content() {
     assert!(diff.contains("-port=80"), "{diff}");
     assert!(diff.contains("+port=8080"), "{diff}");
 }
+
+#[tokio::test]
+async fn test_run_as_recursive_owner_through_a_symlinked_destination() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "mkdir -p /srv/glidesh-realtree && ln -s /srv/glidesh-realtree /srv/glidesh-linktree",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::create_dir(src.path().join("sub")).unwrap();
+    std::fs::write(src.path().join("sub").join("app.conf"), b"app").unwrap();
+    let params = upload_params(
+        src.path(),
+        "/srv/glidesh-linktree",
+        &[
+            ("recurse", ParamValue::Bool(true)),
+            ("owner", ParamValue::String("nobody".to_string())),
+        ],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    // The tree behind the link gets the owner, not just the link itself.
+    assert_eq!(
+        stat(&root, "/srv/glidesh-realtree/sub/app.conf").await,
+        "644 nobody:root"
+    );
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run should be ok, got {status:?}"
+    );
+}

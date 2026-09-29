@@ -73,7 +73,9 @@ All files under the local `configs/` directory are uploaded to `/etc/myapp/`, pr
 Recursive copy supports:
 - **Idempotency** — each file is compared by SHA256 checksum; only changed files are uploaded
 - **Template mode** — combine with `template=#true` to interpolate all files in the directory
-- **Attributes** — `owner`, `group`, and `mode` are applied recursively to all files and directories
+- **Attributes** — `owner`, `group`, and `mode` are applied recursively to all files and directories,
+  behind the destination when it is a symlink to a directory too. A symlink inside the tree gets
+  `owner`/`group` itself, never what it points to; `mode` skips it.
 
 :::note
 `fetch=#true` and `recurse=#true` cannot be combined.
