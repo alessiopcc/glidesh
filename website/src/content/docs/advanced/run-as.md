@@ -132,11 +132,15 @@ GLIDESH_RUNAS_PASS='…' glidesh run ... --run-as root  # from the environment
 The password is held in process memory only — never logged or written to disk. It is
 global for the run; `GLIDESH_RUNAS_PASS` takes precedence over `--ask-pass`.
 
-Glidesh sends it only when `sudo` needs one: once per connection and `run-as` user it
-asks whether `sudo` runs commands without a password (`NOPASSWD`), and if so sends none.
-When it does send it, `sudo -k` makes `sudo` ignore cached credentials and read it
-every time. Either way a password never reaches the command — whose input a sudoers
-`log_input` I/O log records — even with credentials cached by an earlier `sudo`.
+Glidesh sends it only when `sudo` asks for it: each command gets a prompt of its own
+(`-p`), and the password goes out when that prompt appears, never before — or when a
+prompt PAM shows instead (Kerberos, say) has sat unanswered for two seconds. Without a
+prompt — `NOPASSWD`, or a sudoers change during the run — no password is sent, so it
+never reaches the command, whose input a sudoers `log_input` I/O log records. A second
+prompt means the password was wrong, or PAM wants more than it (a one-time code):
+nothing more is sent, and the task fails as a denied escalation. `sudo -k` keeps
+cached credentials out of it, both ways: none from an earlier `sudo` are used, and a run
+leaves none behind for the login user.
 
 ## Method support and caveats
 
@@ -152,25 +156,25 @@ distinct error, not confused with a command that failed on its own.
 ## File uploads to root-owned paths
 
 SFTP writes as the login user, so it cannot create files in directories like `/etc`
-directly. With `run-as` set, the `file` module stages the upload in the login user's
-private (`0600`) file in `/tmp`, the elevated shell writes its content into the
-destination, and the staging file is removed. Fetches and `--diff` reads stage the other
-way round, through a private file the login user then reads.
+directly. With `run-as` set, the elevated shell writes the destination:
 
-- **`run-as="root"`** opens the staging file itself.
+- **`run-as="root"`** reads the content from a private (`0600`) file the login user
+  staged in `/tmp`, then removes it.
 - **Any other user** — a service account like `postgres`, which cannot open another
-  user's private file — gets the content piped in by the login user (`sudo` or `doas`),
-  and a read piped back out. A `sudo` password ([sent only when needed](#passwords))
-  goes ahead of the content on the same stream, where `sudo` reads it itself; it is
-  checked first, so a wrong one fails before any content is sent. Content piped this way passes through
-  `sudo`'s input and output, so a sudoers `log_input`/`log_output` I/O log records it —
-  the content, never the password.
-- **`su`** cannot pipe content — its terminal would mangle binary data — so it works for
-  root or the login user only: any other `run-as` user fails the upload, fetch or
-  `--diff` read before anything is written, naming the limitation. Use `sudo` or `doas`
-  for it.
+  user's private file — gets the content on its input, sent by glidesh only once the
+  destination has passed [its check](#destinations-other-users-control) and `sudo` is
+  done with any [password](#passwords). Content sent this way passes through `sudo`'s
+  input, so a sudoers `log_input` I/O log records it — the content, never the password.
+- **`su`** cannot take content on its input — its terminal would mangle binary data — so
+  it works for root or the login user only: any other `run-as` user fails the upload
+  before anything is written, naming the limitation. Use `sudo` or `doas` for it.
 
-The staging file's mode and owner never reach the result: a file that
+Fetches and `--diff` reads go through a private file the login user stages and then
+reads. Root writes it directly, as does `su` — for root or the login user only, like
+uploads; with `sudo` or `doas`, any other user's read is written into it by the login
+user, and so passes through `sudo`'s output, which `log_output` records.
+
+What is staged never reaches the result: a file that
 already existed keeps its owner, group, and mode, and a new one is created by the
 escalation target, so the umask in effect (the session's; `sudo` adds its own, `022`
 by default) or the directory's default ACL decides the mode (`0644` usually) — the same

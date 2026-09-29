@@ -150,12 +150,203 @@ impl CappedStream {
     }
 }
 
-/// Optional controls for [`SshSession::exec_with`]: feed bytes on stdin (e.g. a
-/// `sudo -S` password) and/or allocate a PTY (required by `su`).
+/// Optional controls for [`SshSession::exec_with`]: feed bytes on stdin (e.g. `su`'s
+/// password), allocate a PTY (required by `su`), or hold stdin for a [`Handshake`] —
+/// which then writes stdin alone, and `stdin` is ignored.
 #[derive(Default)]
 pub struct ExecOptions {
     pub stdin: Option<Vec<u8>>,
     pub pty: bool,
+    pub handshake: Option<Handshake>,
+}
+
+/// Stdin sent only when the remote side asks for it on stderr: a `sudo -S` password when
+/// sudo prompts for it, the input once the command prints `ready`. A password sudo does
+/// not ask for — `NOPASSWD`, a policy changed mid-run — would reach the command's stdin,
+/// which a sudoers `log_input` I/O log records; input sent while sudo still authenticates
+/// would be read as more password attempts.
+pub struct Handshake {
+    /// sudo's `-p` prompt, and the password line that answers the first prompt.
+    pub prompt: Option<(String, Vec<u8>)>,
+    /// The line the command prints on stderr first: sudo is done with the password, and
+    /// what follows is the command's own output, never a prompt.
+    pub started: String,
+    /// The line the command prints on stderr before it reads stdin; may be `started`.
+    pub ready: String,
+    /// Sent once `ready` appears, then stdin is closed.
+    pub input: Vec<u8>,
+}
+
+/// What a [`Handshake`] writes on stdin next.
+#[derive(Debug, PartialEq, Eq)]
+enum Reply {
+    Bytes(Vec<u8>),
+    Close,
+}
+
+/// How long a line sudo left unfinished stays quiet before it counts as a prompt: PAM
+/// shows its own prompt instead of `-p`'s when it is not the standard one (Kerberos,
+/// one-time codes).
+const PROMPT_QUIET: Duration = Duration::from_secs(2);
+
+/// A [`Handshake`] in progress. The first prompt gets the password; a second means it
+/// was wrong, and stdin is closed with nothing more sent.
+struct Handshaking {
+    handshake: Handshake,
+    pending: Vec<u8>,
+    marked_prompts: usize,
+    prompts: usize,
+    answered: usize,
+    started: bool,
+    done: bool,
+}
+
+impl Handshaking {
+    fn new(handshake: Handshake) -> Self {
+        Handshaking {
+            handshake,
+            pending: Vec::new(),
+            marked_prompts: 0,
+            prompts: 0,
+            answered: 0,
+            started: false,
+            done: false,
+        }
+    }
+
+    /// Whether a quiet unfinished line could still be a prompt.
+    fn awaits_prompt(&self) -> bool {
+        !self.done && !self.started && self.handshake.prompt.is_some()
+    }
+
+    /// Takes a stderr chunk; returns what to write and the stderr to keep, without the
+    /// markers. Stderr is held back until the exchange ends, as a marker may be split
+    /// across chunks.
+    fn stderr(&mut self, chunk: &[u8]) -> (Vec<Reply>, Vec<u8>) {
+        if self.done {
+            return (Vec::new(), chunk.to_vec());
+        }
+        self.pending.extend_from_slice(chunk);
+        let mut replies = Vec::new();
+        if !self.started {
+            let started = line(&self.handshake.started);
+            let at = find(&self.pending, &started);
+            let before = at.unwrap_or(self.pending.len());
+            if let Some((prompt, _)) = &self.handshake.prompt {
+                let seen = occurrences(&self.pending[..before], prompt.as_bytes());
+                while self.marked_prompts < seen && !self.done {
+                    self.marked_prompts += 1;
+                    self.answered = self.pending.len();
+                    replies.extend(self.prompted());
+                }
+            }
+            self.started = at.is_some();
+        }
+        if self.started && !self.done && find(&self.pending, &line(&self.handshake.ready)).is_some()
+        {
+            let input = std::mem::take(&mut self.handshake.input);
+            if !input.is_empty() {
+                replies.push(Reply::Bytes(input));
+            }
+            replies.push(Reply::Close);
+            self.done = true;
+        }
+        let kept = if self.done { self.finish() } else { Vec::new() };
+        (replies, kept)
+    }
+
+    /// Stderr went quiet for [`PROMPT_QUIET`]: a line sudo left unfinished since the last
+    /// prompt is one — unless it is the start of `-p`'s, still arriving.
+    fn quiet(&mut self) -> (Vec<Reply>, Vec<u8>) {
+        if !self.awaits_prompt()
+            || self.pending.len() <= self.answered
+            || self.pending.ends_with(b"\n")
+        {
+            return (Vec::new(), Vec::new());
+        }
+        let tail_from = self
+            .pending
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |at| at + 1);
+        let tail = &self.pending[tail_from..];
+        if self
+            .handshake
+            .prompt
+            .as_ref()
+            .is_some_and(|(prompt, _)| prompt.as_bytes().starts_with(tail))
+        {
+            return (Vec::new(), Vec::new());
+        }
+        self.answered = self.pending.len();
+        let replies = self.prompted();
+        let kept = if self.done { self.finish() } else { Vec::new() };
+        (replies, kept)
+    }
+
+    fn prompted(&mut self) -> Vec<Reply> {
+        self.prompts += 1;
+        match &self.handshake.prompt {
+            Some((_, password)) if self.prompts == 1 => vec![Reply::Bytes(password.clone())],
+            _ => {
+                self.done = true;
+                vec![Reply::Close]
+            }
+        }
+    }
+
+    /// The stderr still held back, without the markers.
+    fn finish(&mut self) -> Vec<u8> {
+        let mut kept = std::mem::take(&mut self.pending);
+        if let Some((prompt, _)) = &self.handshake.prompt {
+            kept = without(&kept, prompt.as_bytes());
+        }
+        kept = without(&kept, &line(&self.handshake.started));
+        without(&kept, &line(&self.handshake.ready))
+    }
+}
+
+fn line(marker: &str) -> Vec<u8> {
+    format!("{marker}\n").into_bytes()
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+    let (mut count, mut at) = (0, 0);
+    while at + needle.len() <= haystack.len() {
+        if &haystack[at..at + needle.len()] == needle {
+            count += 1;
+            at += needle.len();
+        } else {
+            at += 1;
+        }
+    }
+    count
+}
+
+fn without(haystack: &[u8], needle: &[u8]) -> Vec<u8> {
+    let mut kept = Vec::with_capacity(haystack.len());
+    let mut at = 0;
+    while at < haystack.len() {
+        if !needle.is_empty() && haystack[at..].starts_with(needle) {
+            at += needle.len();
+        } else {
+            kept.push(haystack[at]);
+            at += 1;
+        }
+    }
+    kept
+}
+
+/// A line no command prints by chance.
+fn marker(kind: &str) -> String {
+    format!("glidesh-{kind}-{}", uuid::Uuid::new_v4().simple())
 }
 
 pub struct SshSession {
@@ -165,8 +356,6 @@ pub struct SshSession {
     forward_registry: ForwardRegistry,
     /// The login user's uid, read once: [`trusted_paths`] trusts it.
     login_uid: tokio::sync::OnceCell<String>,
-    /// Per run-as user, whether sudo runs commands without a password.
-    sudo_passwordless: tokio::sync::Mutex<std::collections::HashMap<String, bool>>,
 }
 
 impl SshSession {
@@ -226,7 +415,6 @@ impl SshSession {
             _jump_handle: tokio::sync::Mutex::new(None),
             forward_registry,
             login_uid: tokio::sync::OnceCell::new(),
-            sudo_passwordless: tokio::sync::Mutex::default(),
         })
     }
 
@@ -353,7 +541,6 @@ impl SshSession {
             _jump_handle: tokio::sync::Mutex::new(Some(jump_handle)),
             forward_registry,
             login_uid: tokio::sync::OnceCell::new(),
-            sudo_passwordless: tokio::sync::Mutex::default(),
         })
     }
 
@@ -471,21 +658,57 @@ impl SshSession {
                 message: format!("Failed to exec command on {}: {}", self.host, e),
             })?;
 
-        if let Some(stdin) = opts.stdin.as_ref() {
-            channel
-                .data(&stdin[..])
-                .await
-                .map_err(|e| GlideshError::SshChannel {
-                    message: format!("Failed to write stdin on {}: {}", self.host, e),
+        let mut handshaking = opts.handshake.map(Handshaking::new);
+        // A task writes the handshake's replies while this loop keeps reading: a large
+        // input to a command that exits early would otherwise wait forever for a window
+        // the closed channel never grants.
+        let (replies, writer) = match &handshaking {
+            Some(_) => {
+                let (replies, mut queued) = tokio::sync::mpsc::unbounded_channel::<Reply>();
+                let mut stdin = channel.make_writer();
+                let writer = tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    while let Some(reply) = queued.recv().await {
+                        let written = match reply {
+                            Reply::Bytes(bytes) => stdin.write_all(&bytes).await,
+                            Reply::Close => {
+                                let _ = stdin.shutdown().await;
+                                break;
+                            }
+                        };
+                        if written.is_err() {
+                            break;
+                        }
+                    }
+                });
+                (Some(replies), Some(writer))
+            }
+            None => (None, None),
+        };
+        let send = |sent: Vec<Reply>| {
+            if let Some(replies) = &replies {
+                for reply in sent {
+                    let _ = replies.send(reply);
+                }
+            }
+        };
+        if handshaking.is_none() {
+            if let Some(stdin) = opts.stdin.as_ref() {
+                channel
+                    .data(&stdin[..])
+                    .await
+                    .map_err(|e| GlideshError::SshChannel {
+                        message: format!("Failed to write stdin on {}: {}", self.host, e),
+                    })?;
+                channel.eof().await.map_err(|e| GlideshError::SshChannel {
+                    message: format!("Failed to close stdin on {}: {}", self.host, e),
                 })?;
-            channel.eof().await.map_err(|e| GlideshError::SshChannel {
-                message: format!("Failed to close stdin on {}: {}", self.host, e),
-            })?;
-        } else if !opts.pty {
-            // No input to send. Signal EOF immediately (like `ssh -n`) so a
-            // command that reads stdin gets EOF instead of blocking forever
-            // waiting for input that will never arrive.
-            let _ = channel.eof().await;
+            } else if !opts.pty {
+                // No input to send. Signal EOF immediately (like `ssh -n`) so a
+                // command that reads stdin gets EOF instead of blocking forever
+                // waiting for input that will never arrive.
+                let _ = channel.eof().await;
+            }
         }
 
         let mut stdout = CappedStream::new(OUTPUT_LIMIT);
@@ -506,6 +729,17 @@ impl SshSession {
                     Ok(Some(msg)) => msg,
                     Ok(None) | Err(_) => break,
                 }
+            } else if let Some(h) = handshaking.as_mut().filter(|h| h.awaits_prompt()) {
+                match tokio::time::timeout(PROMPT_QUIET, channel.wait()).await {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => break,
+                    Err(_) => {
+                        let (sent, kept) = h.quiet();
+                        stderr.push(&kept);
+                        send(sent);
+                        continue;
+                    }
+                }
             } else {
                 match channel.wait().await {
                     Some(msg) => msg,
@@ -517,9 +751,14 @@ impl SshSession {
                 russh::ChannelMsg::Data { ref data } => {
                     stdout.push(data);
                 }
-                russh::ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    stderr.push(data);
-                }
+                russh::ChannelMsg::ExtendedData { ref data, ext: 1 } => match &mut handshaking {
+                    Some(h) => {
+                        let (sent, kept) = h.stderr(data);
+                        stderr.push(&kept);
+                        send(sent);
+                    }
+                    None => stderr.push(data),
+                },
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     status = Some(exit_status);
                     exited = true;
@@ -530,6 +769,12 @@ impl SshSession {
                 }
                 _ => {}
             }
+        }
+        if let Some(h) = &mut handshaking {
+            stderr.push(&h.finish());
+        }
+        if let Some(writer) = writer {
+            writer.abort();
         }
 
         let (exit_code, why) = exit_outcome(status, signal.as_deref());
@@ -560,26 +805,48 @@ impl SshSession {
         let Some(r) = run_as else {
             return self.exec(command).await;
         };
-        self.exec_as_within(command, r, str::to_string).await
+        self.exec_as_within(command, r, str::to_string, None).await
     }
 
     /// [`Self::exec_as`], the escalated command placed in a login-user script by `outer`,
-    /// to feed it or keep its output in files only the login user can read or write.
+    /// to keep its output in a file only the login user can read. `input` is the stdin
+    /// for a command that prints its `ready` line on stderr before reading it. With a
+    /// [`Handshake`], the command is prefixed with printing its `started` line.
     async fn exec_as_within(
         &self,
         command: &str,
         r: &ResolvedRunAs,
         outer: impl FnOnce(&str) -> String,
+        input: Option<(String, Vec<u8>)>,
     ) -> Result<CommandOutput, GlideshError> {
         escalation::precheck(r)?;
-        let r = &self.sending_run_as(r).await?;
-        let wrapped = escalation::wrap(r, command);
+        let asks_password = r.method == RunAsMethod::Sudo && r.password.is_some();
+        let started = marker("started");
+        // `started` says sudo is done: stdin can close without a password, or carry the
+        // input once `ready` follows.
+        let (ready, input) = match input {
+            Some((ready, input)) => (Some(ready), input),
+            None if asks_password => (Some(started.clone()), Vec::new()),
+            None => (None, Vec::new()),
+        };
+        let command = match ready {
+            Some(_) => format!("printf '%s\\n' {} >&2; {command}", shell_escape(&started)),
+            None => command.to_string(),
+        };
+        let wrapped = escalation::wrap(r, &command);
+        let handshake = ready.map(|ready| Handshake {
+            prompt: wrapped.prompt.clone(),
+            started,
+            ready,
+            input,
+        });
         let out = self
             .exec_with(
                 &outer(&wrapped.command),
                 ExecOptions {
                     stdin: wrapped.stdin,
                     pty: wrapped.pty,
+                    handshake,
                 },
             )
             .await?;
@@ -765,10 +1032,10 @@ impl SshSession {
     }
 
     /// Upload to a destination the login user may not be able to write directly.
-    /// Without escalation this is a plain SFTP write; with escalation the content is
-    /// staged in the login user's private file in `/tmp` over SFTP. Root, or any user
-    /// through `su`, reads it escalated; any other run-as user, who cannot, gets it piped
-    /// in by the login user.
+    /// Without escalation this is a plain SFTP write. With escalation to root, or through
+    /// `su`, the content is staged in the login user's private file in `/tmp` over SFTP
+    /// and read escalated; any other run-as user cannot open that file, so the content is
+    /// sent on the escalated command's stdin instead.
     pub async fn upload_file_as(
         &self,
         content: &[u8],
@@ -778,6 +1045,9 @@ impl SshSession {
         let Some(r) = run_as else {
             return self.upload_file(content, remote_path).await;
         };
+        if !stages_escalated(r) {
+            return self.stream_upload(content, remote_path, r).await;
+        }
         let tmp = self.mktemp_remote().await?;
         // Any early return past this point must clean up the staged temp file,
         // so the SFTP write and the escalated write are wrapped and the temp file
@@ -798,32 +1068,9 @@ impl SshSession {
     ) -> Result<(), GlideshError> {
         self.upload_file(content, tmp).await?;
         let uid = self.login_uid().await?;
-        let out = if stages_escalated(r) {
-            self.exec_as(&place_staged_upload(tmp, remote_path, uid), Some(r))
-                .await?
-        } else {
-            let r = &self.sending_run_as(r).await?;
-            // A wrong password makes `sudo -S` retry, reading the content that follows it
-            // as more attempts: into the PAM stack and toward an account lockout.
-            if r.password.is_some() {
-                let out = self.exec_as("true", Some(r)).await?;
-                if out.exit_code != 0 {
-                    return Err(GlideshError::RunAs {
-                        user: r.user.clone(),
-                        method: escalation::method_name(r.method).to_string(),
-                        message: format!(
-                            "the password check failed, so the upload was not sent: {}",
-                            out.failure()
-                        ),
-                    });
-                }
-            }
-            let mark = format!("glidesh-content-{}", uuid::Uuid::new_v4().simple());
-            self.exec_as_within(&write_fed_upload(remote_path, uid, &mark), r, |escalated| {
-                feed_staged_upload(tmp, &mark, escalated)
-            })
-            .await?
-        };
+        let out = self
+            .exec_as(&place_staged_upload(tmp, remote_path, uid), Some(r))
+            .await?;
         if out.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
@@ -837,32 +1084,35 @@ impl SshSession {
         Ok(())
     }
 
-    /// `r` without its password when sudo needs none for that user (`NOPASSWD`), asked
-    /// once per session: a password sudo does not read goes on to the command's stdin,
-    /// which a sudoers `log_input` I/O log records. Every command runs as `sh`, so the
-    /// answer holds for all of them; with the password, `sudo -k` ignores cached
-    /// credentials, so sudo reads it every time.
-    async fn sending_run_as(&self, r: &ResolvedRunAs) -> Result<ResolvedRunAs, GlideshError> {
-        if r.password.is_none() || r.method != RunAsMethod::Sudo {
-            return Ok(r.clone());
+    /// Sends `content` on the stdin of an escalated [`write_streamed_upload`], once the
+    /// destination passed its check and sudo is done with its password.
+    async fn stream_upload(
+        &self,
+        content: &[u8],
+        remote_path: &str,
+        r: &ResolvedRunAs,
+    ) -> Result<(), GlideshError> {
+        let uid = self.login_uid().await?;
+        let ready = marker("ready");
+        let out = self
+            .exec_as_within(
+                &write_streamed_upload(remote_path, uid, &ready),
+                r,
+                str::to_string,
+                Some((ready, content.to_vec())),
+            )
+            .await?;
+        if out.exit_code != 0 {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "failed to write upload to {}: {}",
+                    remote_path,
+                    out.failure()
+                ),
+            });
         }
-        let passwordless = ResolvedRunAs {
-            password: None,
-            ..r.clone()
-        };
-        let mut known = self.sudo_passwordless.lock().await;
-        let free = match known.get(&r.user) {
-            Some(&free) => free,
-            None => {
-                // `-k`: credentials cached now would expire during the run.
-                let probe = format!("sudo -k -n -u {} -- sh -c true", shell_escape(&r.user));
-                let out = self.exec(&probe).await?;
-                let free = out.exit_code == 0;
-                known.insert(r.user.clone(), free);
-                free
-            }
-        };
-        Ok(if free { passwordless } else { r.clone() })
+        Ok(())
     }
 
     /// Download a source the login user may not be able to read directly. Without
@@ -955,9 +1205,12 @@ printf '%s' "$d""#;
         let out = if escalated_writes {
             self.exec_as(&command, Some(r)).await?
         } else {
-            self.exec_as_within(&command, r, |escalated| {
-                format!("sh -c {}", shell_escape(&format!("{escalated} > {t}")))
-            })
+            self.exec_as_within(
+                &command,
+                r,
+                |escalated| format!("sh -c {}", shell_escape(&format!("{escalated} > {t}"))),
+                None,
+            )
             .await?
         };
         if out.exit_code != 0 {
@@ -1486,48 +1739,18 @@ const SU_STAGING_LIMIT: &str = "with run-as-method su, files are staged only for
      login user: the run-as user cannot open the login user's private staging file; use \
      run-as-method sudo or doas";
 
-/// The escalated side of an upload fed on stdin by [`feed_staged_upload`]: skips to the
-/// line `mark`, then writes the rest into `dest` as [`place_staged_upload`] does. What
-/// comes before `mark` is a `sudo -S` password sudo did not read after all — its policy
-/// changed since `sending_run_as` found one needed — and must never reach the file.
-fn write_fed_upload(dest: &str, login_uid: &str, mark: &str) -> String {
-    // The content goes on fd 3 so no command of the guard can read from it, redirected on
-    // the command: ksh does not pass an fd above 2 opened by a bare `exec` to children.
-    format!(
-        "while :; do\n\
-         IFS= read -r l || {{ echo 'the upload ended before its content' >&2; exit 1; }}\n\
-         [ \"$l\" = {} ] && break\n\
-         done\n\
-         {} 3<&0 </dev/null",
-        shell_escape(mark),
-        guarded(
-            &[dest],
-            login_uid,
-            &format!("cat <&3 > {}", shell_escape(dest))
-        )
+/// The escalated command of a streamed upload: once [`trusted_paths`] passes it prints
+/// `ready` on stderr and writes its stdin into `dest` as [`place_staged_upload`] does.
+fn write_streamed_upload(dest: &str, login_uid: &str, ready: &str) -> String {
+    guarded(
+        &[dest],
+        login_uid,
+        &format!(
+            "printf '%s\\n' {} >&2\ncat > {}",
+            shell_escape(ready),
+            shell_escape(dest)
+        ),
     )
-}
-
-/// The login side of [`write_fed_upload`]: the channel's stdin (the `sudo -S` password,
-/// or nothing), `mark`, then the staged file, piped into the `escalated` command; the
-/// staged file is removed whatever happens. sudo and `read` both take a pipe a byte at a
-/// time, so each leaves what follows its line in the pipe.
-fn feed_staged_upload(tmp: &str, mark: &str, escalated: &str) -> String {
-    let t = shell_escape(tmp);
-    // Only the escalated side's status survives a pipe, and it succeeds on whatever part
-    // of the content arrived; the reading side's status comes out on fd 3 instead. Checked
-    // up front too, so an unreadable file does not truncate the destination.
-    let script = format!(
-        "test -r {t} || {{ echo 'cannot read the staged upload' >&2; rm -f {t}; exit 1; }}\n\
-         exec 4>&1\n\
-         r=$({{ {{ cat; printf '%s\\n' {}; cat {t}; echo $? >&3; }} | {escalated} >&4 3>&-; }} 3>&1)\n\
-         s=$?\n\
-         rm -f {t}\n\
-         [ \"$s\" = 0 ] || exit \"$s\"\n\
-         [ \"$r\" = 0 ] || {{ echo 'reading the staged upload failed' >&2; exit 1; }}",
-        shell_escape(mark)
-    );
-    format!("sh -c {}", shell_escape(&script))
 }
 
 /// The command behind [`SshSession::is_root_dir_as`]. `/` is compared on the host by
@@ -1992,98 +2215,163 @@ mod tests {
         assert!(!stages_escalated(&run_as("postgres", RunAsMethod::Doas)));
     }
 
-    #[cfg(unix)]
-    const MARK: &str = "glidesh-content-0123abcd";
+    fn handshake(prompt: bool, input: &[u8]) -> Handshaking {
+        Handshaking::new(Handshake {
+            prompt: prompt.then(|| ("PROMPT".to_string(), b"pw\n".to_vec())),
+            started: "STARTED".to_string(),
+            ready: "READY".to_string(),
+            input: input.to_vec(),
+        })
+    }
 
-    /// Runs a fed upload of `content`, with `stdin` on the channel and `escalate`
-    /// standing in for sudo: a script that gets the escalated command as `$0`.
+    fn password() -> Reply {
+        Reply::Bytes(b"pw\n".to_vec())
+    }
+
+    #[test]
+    fn a_password_is_sent_when_sudo_prompts_and_input_when_the_command_is_ready() {
+        let mut h = handshake(true, b"content");
+        assert_eq!(h.stderr(b"PROMPT"), (vec![password()], vec![]));
+        assert_eq!(h.stderr(b"STARTED\n"), (vec![], vec![]));
+        assert_eq!(
+            h.stderr(b"READY\n"),
+            (
+                vec![Reply::Bytes(b"content".to_vec()), Reply::Close],
+                vec![]
+            )
+        );
+        assert_eq!(h.stderr(b"later"), (vec![], b"later".to_vec()));
+    }
+
+    #[test]
+    fn no_password_is_sent_when_sudo_does_not_prompt() {
+        let mut h = Handshaking::new(Handshake {
+            prompt: Some(("PROMPT".to_string(), b"pw\n".to_vec())),
+            started: "STARTED".to_string(),
+            ready: "STARTED".to_string(),
+            input: Vec::new(),
+        });
+        assert_eq!(h.stderr(b"STARTED\n"), (vec![Reply::Close], vec![]));
+    }
+
+    #[test]
+    fn a_second_prompt_closes_stdin_and_sends_nothing_more() {
+        let mut h = handshake(true, b"content");
+        h.stderr(b"PROMPT");
+        let (sent, kept) = h.stderr(b"Sorry, try again.\nPROMPT");
+        assert_eq!(sent, vec![Reply::Close]);
+        assert_eq!(kept, b"Sorry, try again.\n".to_vec());
+        assert_eq!(
+            h.stderr(b"STARTED\nREADY\n"),
+            (vec![], b"STARTED\nREADY\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_prompt_after_the_command_started_is_its_output_not_sudos() {
+        let mut h = handshake(true, b"x");
+        assert_eq!(h.stderr(b"STARTED\nrefusing: PROMPT\n"), (vec![], vec![]));
+        assert!(!h.awaits_prompt());
+        assert_eq!(h.finish(), b"refusing: \n".to_vec());
+    }
+
+    #[test]
+    fn markers_split_across_chunks_are_found_and_removed() {
+        let mut h = handshake(true, b"x");
+        assert_eq!(h.stderr(b"notice\nPRO"), (vec![], vec![]));
+        assert_eq!(h.stderr(b"MPT"), (vec![password()], vec![]));
+        assert_eq!(h.stderr(b"STAR"), (vec![], vec![]));
+        assert_eq!(h.stderr(b"TED\nREA"), (vec![], vec![]));
+        let (sent, kept) = h.stderr(b"DY\nwarn");
+        assert_eq!(sent, vec![Reply::Bytes(b"x".to_vec()), Reply::Close]);
+        assert_eq!(kept, b"notice\nwarn".to_vec());
+    }
+
+    #[test]
+    fn a_quiet_unfinished_line_is_a_prompt_of_pams_own() {
+        let mut h = handshake(true, b"x");
+        assert_eq!(
+            h.stderr(b"Password for ops@EXAMPLE.COM: "),
+            (vec![], vec![])
+        );
+        assert_eq!(h.quiet(), (vec![password()], vec![]));
+        assert_eq!(h.quiet(), (vec![], vec![]), "answered once");
+        h.stderr(b"\nVerification code: ");
+        let (sent, kept) = h.quiet();
+        assert_eq!(sent, vec![Reply::Close]);
+        assert_eq!(
+            kept,
+            b"Password for ops@EXAMPLE.COM: \nVerification code: ".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_quiet_start_of_the_own_prompt_is_not_a_prompt() {
+        let mut h = handshake(true, b"x");
+        h.stderr(b"PROM");
+        assert_eq!(h.quiet(), (vec![], vec![]));
+        assert_eq!(h.stderr(b"PT"), (vec![password()], vec![]));
+    }
+
+    #[test]
+    fn a_finished_line_or_no_password_is_never_a_prompt() {
+        let mut h = handshake(true, b"x");
+        h.stderr(b"a notice\n");
+        assert_eq!(h.quiet(), (vec![], vec![]));
+        let mut h = handshake(false, b"x");
+        h.stderr(b"half a line");
+        assert!(!h.awaits_prompt());
+        assert_eq!(h.quiet(), (vec![], vec![]));
+    }
+
+    #[test]
+    fn stderr_held_back_is_kept_when_the_command_never_gets_ready() {
+        let mut h = handshake(false, b"x");
+        h.stderr(b"STARTED\n");
+        assert_eq!(
+            h.stderr(b"refusing: other users can write to /srv\n"),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            h.finish(),
+            b"refusing: other users can write to /srv\n".to_vec()
+        );
+    }
+
+    /// Runs a streamed upload of `content` with `sh` standing in for the escalation.
     #[cfg(unix)]
-    fn feed(
-        dir: &std::path::Path,
-        dest: &std::path::Path,
-        content: &[u8],
-        stdin: &[u8],
-        escalate: &str,
-    ) -> (std::process::Output, std::path::PathBuf) {
+    fn stream(dest: &std::path::Path, content: &[u8]) -> std::process::Output {
         use std::io::Write;
-        let tmp = staged(dir, "");
-        std::fs::write(&tmp, content).unwrap();
-        let inner = write_fed_upload(dest.to_str().unwrap(), "0", MARK);
-        let escalated = format!("sh -c {} {}", shell_escape(escalate), shell_escape(&inner));
         let mut child = std::process::Command::new("sh")
             .arg("-c")
-            .arg(feed_staged_upload(tmp.to_str().unwrap(), MARK, &escalated))
+            .arg(write_streamed_upload(dest.to_str().unwrap(), "0", "READY"))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(stdin).unwrap();
-        (child.wait_with_output().unwrap(), tmp)
+        child.stdin.take().unwrap().write_all(content).unwrap();
+        child.wait_with_output().unwrap()
     }
 
     #[cfg(unix)]
-    const BINARY: &[u8] = b"\x00\xff\nglidesh-content-0123abcd\n\r\nno newline at the end";
+    const BINARY: &[u8] = b"\x00\xff\nREADY\n\r\nno newline at the end";
 
     #[cfg(unix)]
     #[test]
-    fn a_fed_upload_writes_the_content_after_a_password_sudo_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("app.bin");
-        let sudo = r#"IFS= read -r pw; [ "$pw" = secret ] || exit 9; exec sh -c "$0""#;
-
-        let (out, tmp) = feed(dir.path(), &dest, BINARY, b"secret\n", sudo);
-        assert!(out.status.success(), "{:?}", out);
-        assert_eq!(std::fs::read(&dest).unwrap(), BINARY);
-        assert!(!tmp.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_password_sudo_did_not_read_never_reaches_the_file() {
+    fn a_streamed_upload_writes_its_stdin_after_saying_it_is_ready() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("app.bin");
 
-        let (out, _) = feed(dir.path(), &dest, BINARY, b"secret\n", r#"exec sh -c "$0""#);
+        let out = stream(&dest, BINARY);
         assert!(out.status.success(), "{:?}", out);
+        assert_eq!(out.stderr, b"READY\n");
         assert_eq!(std::fs::read(&dest).unwrap(), BINARY);
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_fed_upload_without_a_password_writes_the_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("app.bin");
-
-        let (out, _) = feed(dir.path(), &dest, BINARY, b"", r#"exec sh -c "$0""#);
-        assert!(out.status.success(), "{:?}", out);
-        assert_eq!(std::fs::read(&dest).unwrap(), BINARY);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_staged_upload_that_fails_to_read_is_not_a_success() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("app.conf");
-        // A directory passes `test -r`, then `cat` fails on it.
-        let tmp = dir.path().join("glidesh.staged");
-        std::fs::create_dir(&tmp).unwrap();
-        let inner = write_fed_upload(dest.to_str().unwrap(), "0", MARK);
-        let escalated = format!("sh -c {}", shell_escape(&inner));
-
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(feed_staged_upload(tmp.to_str().unwrap(), MARK, &escalated))
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap();
-        assert!(!out.status.success(), "{:?}", out);
-        assert!(String::from_utf8_lossy(&out.stderr).contains("reading the staged upload failed"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_refused_fed_upload_leaves_the_destination_and_no_staged_file() {
+    fn a_refused_streamed_upload_never_says_it_is_ready() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let shared = dir.path().join("shared");
@@ -2092,11 +2380,12 @@ mod tests {
         std::fs::write(&dest, "keep me").unwrap();
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
 
-        let (out, tmp) = feed(dir.path(), &dest, b"new", b"", r#"exec sh -c "$0""#);
+        let out = stream(&dest, b"");
         assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("other users can write"));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("other users can write"), "{stderr}");
+        assert!(!stderr.contains("READY"), "{stderr}");
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
-        assert!(!tmp.exists());
     }
 
     #[cfg(unix)]

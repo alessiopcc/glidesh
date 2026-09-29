@@ -903,7 +903,7 @@ async fn test_run_as_a_non_root_user_uploads_a_new_file() {
     let vars = HashMap::new();
     let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_app());
 
-    // The staging file is deploy's and 0600, so `app` could never read it.
+    // `app` could not read a file deploy staged, so the content goes on its stdin.
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), BINARY).unwrap();
     let params = upload_params(tmp.path(), "/srv/app/data.bin", &[]);
@@ -926,7 +926,7 @@ async fn test_run_as_a_non_root_user_uploads_a_new_file() {
         .exec("ls -d /tmp/glidesh.* 2>/dev/null | wc -l")
         .await
         .unwrap();
-    assert_eq!(leftovers.stdout.trim(), "0", "the staging file is removed");
+    assert_eq!(leftovers.stdout.trim(), "0", "nothing is staged in /tmp");
 }
 
 #[tokio::test]
@@ -1134,8 +1134,8 @@ async fn test_run_as_upload_with_a_sudo_password_writes_only_the_content() {
 
     let container = common::TestContainer::start();
     let root = container.ssh_session().await;
-    // Credentials cached for every later sudo (a global timestamp) must not make sudo skip
-    // the password glidesh sends: it would reach the command's stdin and `log_input`.
+    // Credentials cached for every later sudo (a global timestamp): `sudo -k` ignores
+    // them, so sudo still prompts, and the password goes to sudo, never to the command.
     root.exec(
         "echo 'Defaults:ops log_input, timestamp_type=global' > /etc/sudoers.d/zz-log && \
          chmod 440 /etc/sudoers.d/zz-log",
@@ -1149,7 +1149,7 @@ async fn test_run_as_upload_with_a_sudo_password_writes_only_the_content() {
     let vars = HashMap::new();
     let ctx = container.module_context_run_as(&ops, &os_info, &vars, false, ops_to_app("ops-pass"));
 
-    // sudo reads the password from the same stdin that carries the content.
+    // The password goes only when sudo prompts, the content only once the command is ready.
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), BINARY).unwrap();
     let params = upload_params(tmp.path(), "/srv/app/sudo-pass.bin", &[]);
@@ -1175,6 +1175,55 @@ async fn test_run_as_upload_with_a_sudo_password_writes_only_the_content() {
         stat(&root, "/srv/app/sudo-pass.bin").await,
         format!("{file} app:app")
     );
+}
+
+#[tokio::test]
+async fn test_run_as_a_sudo_password_answers_its_prompt_and_leaves_no_trace() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "echo 'Defaults:ops log_input' > /etc/sudoers.d/zz-log && chmod 440 /etc/sudoers.d/zz-log",
+    )
+    .await
+    .unwrap();
+    let ops = container.ssh_session_as("ops").await;
+    let run_as = ops_to_app("ops-pass");
+
+    // Markers and the prompt are removed from what the command printed, nothing added.
+    let out = ops
+        .exec_as("echo out; echo err >&2", Some(&run_as))
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0, "{}", out.failure());
+    assert_eq!(out.stdout, "out\n");
+    assert_eq!(out.stderr, "err\n");
+
+    let os_info = container.detect_os(&ops).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&ops, &os_info, &vars, false, run_as);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), BINARY).unwrap();
+    let params = upload_params(tmp.path(), "/srv/app/prompted.bin", &[]);
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    assert_eq!(hex_of(&root, "/srv/app/prompted.bin").await, hex(BINARY));
+    let logged = root
+        .exec("find /var/log/sudo-io -name stdin -exec zcat -f {} + 2>/dev/null")
+        .await
+        .unwrap();
+    assert!(
+        logged.stdout.contains("no newline at the end"),
+        "the upload went through the input log: {:?}",
+        logged.stdout
+    );
+    assert!(
+        !logged.stdout.contains("ops-pass"),
+        "the password was logged"
+    );
+    let cached = ops.exec("sudo -n true").await.unwrap();
+    assert_ne!(cached.exit_code, 0, "no sudo credentials are left cached");
 }
 
 #[tokio::test]

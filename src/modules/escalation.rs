@@ -32,11 +32,13 @@ pub fn password() -> Option<&'static str> {
 pub struct Wrapped {
     /// The command to execute on the remote host.
     pub command: String,
-    /// Bytes to feed on stdin before EOF (the escalation password + newline).
+    /// Bytes to feed on stdin before EOF (`su`'s password + newline).
     pub stdin: Option<Vec<u8>>,
     /// Whether the exec channel must allocate a PTY (required by `su`, which reads
     /// its password from the controlling terminal rather than stdin).
     pub pty: bool,
+    /// `sudo -S`'s prompt on stderr, and the password line to send only when it appears.
+    pub prompt: Option<(String, Vec<u8>)>,
 }
 
 /// Human-readable method name for error messages.
@@ -70,20 +72,28 @@ pub fn wrap(run_as: &ResolvedRunAs, inner: &str) -> Wrapped {
 
     match run_as.method {
         // `-n` fails fast instead of blocking on a password prompt; with a password
-        // we use `-S` (read from stdin) and an empty prompt so nothing pollutes stderr.
-        // `-k` ignores cached credentials, so sudo always reads the password itself: one
-        // it skipped would reach the command's stdin, and a `log_input` I/O log.
+        // we use `-S` (read from stdin) and a prompt of our own, answered only when it
+        // appears on stderr, and removed from it. `-k` neither uses nor leaves cached
+        // credentials, so a run does not leave the login user a sudo without a password.
         RunAsMethod::Sudo => match &run_as.password {
             None => Wrapped {
                 command: format!("sudo -n -u {user} -- sh -c {cmd}"),
                 stdin: None,
                 pty: false,
+                prompt: None,
             },
-            Some(pw) => Wrapped {
-                command: format!("sudo -k -S -p '' -u {user} -- sh -c {cmd}"),
-                stdin: Some(format!("{pw}\n").into_bytes()),
-                pty: false,
-            },
+            Some(pw) => {
+                let prompt = format!("glidesh-sudo-prompt-{}", uuid::Uuid::new_v4().simple());
+                Wrapped {
+                    command: format!(
+                        "sudo -k -S -p {} -u {user} -- sh -c {cmd}",
+                        shell_escape(&prompt)
+                    ),
+                    stdin: None,
+                    pty: false,
+                    prompt: Some((prompt, format!("{pw}\n").into_bytes())),
+                }
+            }
         },
         // doas cannot read a password from stdin (it requires a tty), so it is
         // passwordless-only here; `-n` makes a missing-credential case fail cleanly.
@@ -91,6 +101,7 @@ pub fn wrap(run_as: &ResolvedRunAs, inner: &str) -> Wrapped {
             command: format!("doas -n -u {user} sh -c {cmd}"),
             stdin: None,
             pty: false,
+            prompt: None,
         },
         // su reads its password from the controlling terminal, so a PTY is required;
         // stderr is merged into stdout under a PTY (documented best-effort path).
@@ -101,6 +112,7 @@ pub fn wrap(run_as: &ResolvedRunAs, inner: &str) -> Wrapped {
                 .as_ref()
                 .map(|pw| format!("{pw}\n").into_bytes()),
             pty: true,
+            prompt: None,
         },
     }
 }
@@ -168,8 +180,14 @@ mod tests {
     #[test]
     fn sudo_with_password() {
         let w = wrap(&resolved(RunAsMethod::Sudo, Some("s3cr3t")), "id -u");
-        assert_eq!(w.command, "sudo -k -S -p '' -u 'root' -- sh -c 'id -u'");
-        assert_eq!(w.stdin, Some(b"s3cr3t\n".to_vec()));
+        let (prompt, password) = w.prompt.unwrap();
+        assert!(prompt.starts_with("glidesh-sudo-prompt-"), "{prompt}");
+        assert_eq!(
+            w.command,
+            format!("sudo -k -S -p '{prompt}' -u 'root' -- sh -c 'id -u'")
+        );
+        assert_eq!(password, b"s3cr3t\n".to_vec());
+        assert_eq!(w.stdin, None, "sent only when sudo prompts");
         assert!(!w.pty);
     }
 
