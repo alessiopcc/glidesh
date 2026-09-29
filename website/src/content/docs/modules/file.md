@@ -110,7 +110,7 @@ file "backups/${@host.name}-dump.sql" {
 
 ## Owner and Mode
 
-`owner`, `group`, and `mode` always win. Without them, an upload gives the same result
+`owner`, `group`, and `mode` always win. Without them, an upload follows the same rules
 with or without [`run-as`](/advanced/run-as/):
 
 - **A file that already exists** is rewritten in place: it keeps its owner, group, mode

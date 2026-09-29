@@ -181,6 +181,9 @@ every symlink on the way:
   user, the login user, or the owner of the directory it sits in; what it points to is
   checked the same way;
 - a directory that does not exist yet is skipped: its parent decides who can create it.
+  glidesh creates missing directories one at a time and checks each before creating
+  the next inside it, so a new one that comes out writable by others — through the
+  umask, a setgid parent or a default ACL — stops the task before anything goes in it.
 
 For a recursive copy the rule covers the path to the destination and each file uploaded;
 `owner` and `group` over the tree change a symlink found in it, never what it points

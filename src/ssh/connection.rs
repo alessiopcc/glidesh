@@ -650,16 +650,15 @@ impl SshSession {
         if dirs.is_empty() {
             return Ok(());
         }
-        let mkdir = format!(
-            "mkdir -p {}",
-            dirs.iter()
-                .map(|d| shell_escape(d))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
         let command = match run_as {
-            Some(_) => guarded(dirs, self.login_uid().await?, &mkdir),
-            None => mkdir,
+            Some(_) => guarded_mkdir(dirs, self.login_uid().await?),
+            None => format!(
+                "mkdir -p {}",
+                dirs.iter()
+                    .map(|d| shell_escape(d))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
         };
         let out = self.exec_as(&command, run_as).await?;
         if out.exit_code != 0 {
@@ -1396,6 +1395,23 @@ pub fn root_refusal(path: &str) -> GlideshError {
     }
 }
 
+/// The escalated `mkdir -p` of `dirs`, one directory at a time, each checked by
+/// [`trusted_paths`] before the next goes in it: a new one may come out writable by a
+/// group (umask, setgid parent, default ACL), whose members could swap in a symlink while
+/// a single `mkdir -p` descends.
+fn guarded_mkdir(dirs: &[&str], login_uid: &str) -> String {
+    let escaped: Vec<String> = dirs.iter().map(|d| shell_escape(d)).collect();
+    guarded(
+        dirs,
+        login_uid,
+        &format!(
+            "for t in {}; do\n  case $t in /*) ;; *) t=$(pwd -P)/$t ;; esac\n  \
+             ( mkd \"$t\" ) || exit 1\ndone",
+            escaped.join(" ")
+        ),
+    )
+}
+
 /// `then`, run by `sh` once [`trusted_paths`] holds for every one of `targets`. An
 /// explicit `sh`, because `su` runs a command in the target's login shell, and zsh reads
 /// `0777` as decimal.
@@ -1428,7 +1444,7 @@ fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
 /// - an entry that does not exist yet is skipped: its directory decides who can create it.
 ///
 /// Paths are read with `echo .` appended, since `$(…)` strips trailing newlines, which a
-/// name may end in.
+/// name may end in. The script also defines `mkd`, for [`guarded_mkdir`].
 fn trusted_paths(targets: &[&str], login_uid: &str) -> String {
     const SCRIPT: &str = r#"u=$(id -u)
 fail() { echo "$*" >&2; exit 1; }
@@ -1482,6 +1498,12 @@ check() {
     p=$up
     case $kind in dir|link) role=ancestor ;; *) role=parent ;; esac
   done
+}
+mkd() {
+  [ -d "$1" ] && return 0
+  up "$1"; ( mkd "$up" ) || exit 1
+  mkdir "$1" || fail "cannot create $1"
+  ( check "$1" 0 target ) || exit 1
 }
 for t in TARGETS; do
   case $t in /*) ;; *) t=$(pwd -P)/$t ;; esac
@@ -1761,6 +1783,39 @@ mod tests {
         let out = place(&tmp, &dest);
         assert!(!out.status.success());
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
+    }
+
+    #[cfg(unix)]
+    fn mkdir_with_umask(dir: &std::path::Path, umask: &str) -> std::process::Output {
+        let cmd = guarded_mkdir(&[dir.to_str().unwrap()], "0");
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("umask {umask} && {cmd}"))
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_directories_are_created_one_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = mkdir_with_umask(&dir.path().join("a/b/c"), "022");
+        assert!(out.status.success(), "{:?}", out);
+        assert!(dir.path().join("a/b/c").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_created_inside_a_new_directory_others_could_write() {
+        let gid = std::process::Command::new("id").arg("-g").output().unwrap();
+        if String::from_utf8_lossy(&gid.stdout).trim() == "0" {
+            return; // a group-writable directory of root's group is accepted
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let out = mkdir_with_umask(&dir.path().join("a/b"), "002");
+        refused(&out, "other users can write");
+        assert!(dir.path().join("a").is_dir());
+        assert!(!dir.path().join("a/b").exists());
     }
 
     #[test]
