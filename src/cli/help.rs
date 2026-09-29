@@ -143,6 +143,8 @@ VARIABLES
   Built in: ${@host.name} ${@host.address} ${@host.user} ${@host.port}
             ${@os.id} ${@os.version} ${@os.family} ${@os.pkg-manager} ${@os.init}
             ${@os.container-runtime} ${@os.nix-installed}
+            ${@fact.hostname} ${@fact.kernel} ${@fact.arch} ${@fact.cpu.count}
+            ${@fact.mem.total-mb} ${@fact.ip.default} (\"\" when the host cannot tell)
             ${@inventory.<host>.address|user|port|vars.<name>}
             ${@error.msg} ${@error.task} (in rescue and always blocks only)
   In `file` templates: ${for h in @group.web}${h.address}${endfor}, and loops over list

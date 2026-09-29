@@ -221,7 +221,8 @@ glidesh console -i inventory.kdl -t web --vars \
 - With `--vars`, every `${…}` is a glidesh reference — quoting does not change that — so a
   shell variable written `${HOME}` fails as undefined. Write it `$HOME` instead, or leave
   `--vars` off.
-- `${@os.*}` is not available: `console` does not detect the operating system.
+- `${@os.*}` and `${@fact.*}` are not available: `console` does not detect the operating
+  system or gather host facts.
 
 Without `--vars`, the secrets file is not read and nothing is prompted for.
 

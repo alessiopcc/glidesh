@@ -54,7 +54,7 @@ step "Write the same token everywhere" {
   execution.
 - **Per-host variables resolve for the first host only.** The command is
   interpolated by whichever host reaches the task first, and that one result is
-  what everyone receives. A `${@host.*}` or `${@os.*}` reference in a `host`
+  what everyone receives. A `${@host.*}`, `${@os.*}` or `${@fact.*}` reference in a `host`
   command therefore reflects a single, arbitrary host — use `shell` when the
   command should differ per host.
 

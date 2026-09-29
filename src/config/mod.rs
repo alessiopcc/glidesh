@@ -56,9 +56,10 @@ pub(crate) fn parse_structured_var(node: &kdl::KdlNode) -> Option<Vec<HashMap<St
 }
 
 /// Reject user-declared variable names that collide with a reserved namespace. Names
-/// beginning with `@` are the system-injected namespaces (`@host`, `@os`, `@item`,
-/// `@inventory`, `@group`); the `@` prefix — illegal at the start of a KDL bare identifier —
-/// makes this protection structural rather than dependent on injection order. Applies at
+/// beginning with `@` are the system-injected namespaces (`@host`, `@os`, `@fact`,
+/// `@item`, `@inventory`, `@group`, `@error`); the `@` prefix — illegal at the start of a
+/// KDL bare identifier — makes this protection structural rather than dependent on
+/// injection order. Applies at
 /// every site a user names a variable: inventory/group/host `vars`, plan `vars`,
 /// `vars-file`, the secrets file, and `register=`.
 pub(crate) fn validate_user_var_name(name: &str) -> Result<(), GlideshError> {
@@ -66,7 +67,7 @@ pub(crate) fn validate_user_var_name(name: &str) -> Result<(), GlideshError> {
         return Err(GlideshError::ConfigParse {
             message: format!(
                 "variable name '{name}' is reserved: names beginning with '@' belong to \
-                 built-in namespaces (@host, @os, @item, @inventory, @group)"
+                 built-in namespaces (@host, @os, @fact, @item, @inventory, @group, @error)"
             ),
         });
     }

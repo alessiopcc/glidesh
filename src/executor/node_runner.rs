@@ -10,7 +10,7 @@ use glidesh::config::types::{
 };
 use glidesh::error::GlideshError;
 use glidesh::modules::context::{ModuleContext, Trigger};
-use glidesh::modules::detect::{OsInfo, detect_os};
+use glidesh::modules::detect::{Facts, OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
@@ -90,6 +90,19 @@ fn os_builtin_vars(os: &OsInfo) -> [(String, String); 7] {
             "@os.nix-installed".to_string(),
             os.nix_installed.to_string(),
         ),
+    ]
+}
+
+/// Host facts under the reserved `@fact.*` namespace, read by the same exec as `@os.*`.
+/// Each is always defined; a fact the host could not report is empty.
+fn fact_builtin_vars(facts: &Facts) -> [(String, String); 6] {
+    [
+        ("@fact.hostname".to_string(), facts.hostname.clone()),
+        ("@fact.kernel".to_string(), facts.kernel.clone()),
+        ("@fact.arch".to_string(), facts.arch.clone()),
+        ("@fact.cpu.count".to_string(), facts.cpu_count.clone()),
+        ("@fact.mem.total-mb".to_string(), facts.mem_total_mb.clone()),
+        ("@fact.ip.default".to_string(), facts.ip_default.clone()),
     ]
 }
 
@@ -528,6 +541,7 @@ impl NodeRunner {
         // anyway, so the reserved namespace cannot be reached from a config file at all.
         vars.extend(host_builtin_vars(&self.host));
         vars.extend(os_builtin_vars(&os_info));
+        vars.extend(fact_builtin_vars(&os_info.facts));
 
         // Build template data: inventory @-refs + plan structured vars.
         // Preserve inventory-provided collections so plan structured vars
@@ -1753,6 +1767,7 @@ mod tests {
             init_system: InitSystem::Systemd,
             container_runtime,
             nix_installed: false,
+            facts: Facts::default(),
         }
     }
 
@@ -1792,6 +1807,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "plan9/apt/[]");
+    }
+
+    /// A fact the host could not report must still expand, to "", rather than fail the task
+    /// as an undefined variable would.
+    #[test]
+    fn fact_builtins_are_always_defined() {
+        let facts = Facts {
+            hostname: "web-1".into(),
+            cpu_count: "4".into(),
+            mem_total_mb: "7821".into(),
+            ..Facts::default()
+        };
+        let vars: HashMap<String, String> = fact_builtin_vars(&facts).into_iter().collect();
+        let out = glidesh::config::template::interpolate(
+            "${@fact.hostname}/${@fact.cpu.count}/${@fact.mem.total-mb}/[${@fact.ip.default}]/[${@fact.kernel}]/[${@fact.arch}]",
+            &vars,
+        )
+        .unwrap();
+        assert_eq!(out, "web-1/4/7821/[]/[]/[]");
     }
 
     #[test]

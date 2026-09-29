@@ -1013,9 +1013,16 @@ fn validate_plan_file(
 
 /// A name in a namespace glidesh injects at run time, whatever the host.
 fn is_builtin_var(name: &str) -> bool {
-    ["@host.", "@os.", "@inventory.", "@item.", "@error."]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    [
+        "@host.",
+        "@os.",
+        "@fact.",
+        "@inventory.",
+        "@item.",
+        "@error.",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
         || name == "@item"
 }
 

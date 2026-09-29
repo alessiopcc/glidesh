@@ -550,6 +550,7 @@ mod tests {
                 init_system: crate::modules::detect::InitSystem::Systemd,
                 container_runtime: None,
                 nix_installed: false,
+                facts: Default::default(),
             },
             vars: &std::collections::HashMap::new(),
             dry_run: false,
@@ -576,6 +577,7 @@ mod tests {
             init_system: crate::modules::detect::InitSystem::Systemd,
             container_runtime: None,
             nix_installed: false,
+            facts: Default::default(),
         };
         let req = ModuleRequest {
             method: "check",
