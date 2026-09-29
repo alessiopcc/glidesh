@@ -1419,7 +1419,8 @@ fn guarded(targets: &[&str], login_uid: &str, then: &str) -> String {
 ///   carry an ACL that may grant writing: on Linux one on a group-writable directory
 ///   (the group bits show its mask); on macOS/BSD, where the mode bits do not show it, an
 ///   entry allowing `add_file`, `add_subdirectory`, `delete_child`, `writesecurity` or
-///   `chown`, or an unreadable one — not any ACL, as macOS homes carry a deny entry;
+///   `chown`, or one not listed in macOS's `ls -le` form (FreeBSD's, say) — not any ACL,
+///   as macOS homes carry a deny entry;
 /// - a sticky directory writable by others (`/tmp`) is accepted above an existing
 ///   directory or link, which others cannot rename there. Not above a file or a missing
 ///   entry, which anyone could create first — a link, or a hard link to a root file;
@@ -1439,6 +1440,7 @@ acl_writable() {
   case $(ls -ld "$1" 2>/dev/null) in ??????????+*) ;; *) return 1 ;; esac
   if [ -z "$bsd" ]; then [ $((m & 020)) -ne 0 ]; return; fi
   e=$(ls -led "$1" 2>/dev/null) || return 0
+  printf '%s\n' "$e" | grep -Eq '^ *[0-9]+: ' || return 0
   printf '%s\n' "$e" |
     grep -Eq '^ *[0-9]+: .* allow .*(add_file|add_subdirectory|delete_child|writesecurity|chown)'
 }
