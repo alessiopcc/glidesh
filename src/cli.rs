@@ -491,6 +491,7 @@ mod tests {
             "resolve from the plan file's directory",
             "beats the host's value",
             "$${NAME} writes a literal ${NAME}",
+            "Any other parameter on a built-in module is an error",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

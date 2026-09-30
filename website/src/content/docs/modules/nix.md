@@ -207,21 +207,15 @@ Systemd runs commands with an empty environment and no `PATH`, so unit files mus
 **Follow the profile symlink** — auto-upgrades when the package is reinstalled:
 
 ```kdl
-file "/etc/systemd/system/mytool.service" {
-    content "[Unit]
-Description=My tool
-After=network-online.target
-
-[Service]
-ExecStart=/nix/var/nix/profiles/default/bin/mytool --flag
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-"
+// `command` makes the systemd module write the unit file itself.
+systemd "mytool" state="started" enabled=#true {
+    command "/nix/var/nix/profiles/default/bin/mytool --flag"
+    description "My tool"
+    after "network-online.target"
 }
-systemd "mytool" state="started" enabled=#true
 ```
+
+To keep a hand-written unit instead, upload it with [`file`](/modules/file/) (`src="mytool.service"`) before the `systemd` task.
 
 **Pin the store path** (reproducible but requires a unit rewrite on every upgrade) — resolve with `readlink -f` and write the exact `/nix/store/<hash>-mytool-<ver>/bin/mytool` path into the unit.
 

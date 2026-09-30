@@ -73,6 +73,10 @@ impl Module for ContainerModule {
         "container"
     }
 
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(run_args::PARAMS.as_slice())
+    }
+
     async fn check(
         &self,
         ctx: &ModuleContext<'_>,

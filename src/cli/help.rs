@@ -264,9 +264,13 @@ MODULES (each checks the host first and changes only what differs)
                               state=mounted|unmounted|absent
   nix \"<package>\"             action=install|shell|build|channel|flake-update|gc
                               state= profile= packages= url= update= install=#true
-  host \"<label>\"              cmd= on=\"<inventory host>\" -- runs once for all hosts, on the
-                              controller or on one host, and shares register= with every host
+                              out-link= input= older-than=
+  host \"<label>\"              cmd= on=\"<inventory host>\" login=#true -- runs once for all
+                              hosts, on the controller or on one host, and shares register=
+                              with every host
   external \"<plugin>\" \"<res>\" a plugin from ./modules/ or ~/.glidesh/modules/
+  Any other parameter on a built-in module is an error, which `validate` reports and `run`
+  reports before it connects, listing the module's parameters. A plugin takes any.
 
 PREVIEW AND OUTPUT
   --dry-run runs every check and nothing else; each task reports `ok` or `would change`

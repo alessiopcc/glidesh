@@ -71,6 +71,10 @@ pub struct ModuleParams {
 pub trait Module: Send + Sync {
     fn name(&self) -> &str;
 
+    /// Every parameter the module reads, so a plan naming any other fails before
+    /// connecting instead of being ignored; `None` when glidesh cannot know them (a plugin).
+    fn params(&self) -> Option<&'static [&'static str]>;
+
     async fn check(
         &self,
         ctx: &ModuleContext<'_>,
@@ -159,27 +163,44 @@ impl ModuleRegistry {
         }
     }
 
+    /// Fails with every problem [`Self::plan_problems`] finds, one per line.
     pub fn validate_plan(
         &self,
         plan: &crate::config::types::Plan,
     ) -> Result<(), crate::error::GlideshError> {
+        let problems = self.plan_problems(plan);
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::error::GlideshError::ConfigParse {
+                message: problems.join("\n"),
+            })
+        }
+    }
+
+    /// Modules the registry does not have, and parameters a built-in module does not read.
+    pub fn plan_problems(&self, plan: &crate::config::types::Plan) -> Vec<String> {
         let mut missing = Vec::new();
+        let mut problems = Vec::new();
         for step in plan.steps() {
             for task in step.all_tasks() {
                 // `host` is not in the registry — it's intercepted directly
                 // by NodeRunner and routed through HostCoordinator for
                 // run-once-share-to-all semantics.
-                if task.module == host::MODULE_NAME {
-                    continue;
-                }
-                if self.get(&task.module).is_none() {
+                let accepted = if task.module == host::MODULE_NAME {
+                    Some(host::PARAMS)
+                } else if let Some(module) = self.get(&task.module) {
+                    module.params()
+                } else {
                     missing.push(task.module.clone());
+                    continue;
+                };
+                if let Some(accepted) = accepted {
+                    problems.extend(unknown_params(&step.name, task, accepted));
                 }
             }
         }
-        if missing.is_empty() {
-            Ok(())
-        } else {
+        if !missing.is_empty() {
             missing.sort();
             missing.dedup();
             let display: Vec<String> = missing
@@ -192,9 +213,153 @@ impl ModuleRegistry {
                     }
                 })
                 .collect();
-            Err(crate::error::GlideshError::ConfigParse {
-                message: format!("Unknown module(s): {}", display.join(", ")),
-            })
+            problems.insert(0, format!("Unknown module(s): {}", display.join(", ")));
         }
+        problems
+    }
+}
+
+/// One line per parameter of `task` that `accepted` does not list, naming the closest
+/// accepted one and all of them; a step attribute written on a task says where it goes.
+fn unknown_params(
+    step: &str,
+    task: &crate::config::types::TaskDef,
+    accepted: &[&str],
+) -> Vec<String> {
+    let mut unknown: Vec<&str> = task
+        .args
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !accepted.contains(key))
+        .collect();
+    unknown.sort_unstable();
+    unknown
+        .into_iter()
+        .map(|key| {
+            let module = &task.module;
+            let at = format!("step '{step}': {module} '{}'", task.resource);
+            if crate::config::plan::STEP_ATTRS.contains(&key) {
+                return format!(
+                    "{at}: {key}= is a step attribute, not a {module} parameter; \
+                     move it to the step"
+                );
+            }
+            let hint = crate::config::prompts::closest(key, accepted.iter().copied())
+                .map(|close| format!("did you mean '{close}'? "))
+                .unwrap_or_default();
+            format!(
+                "{at}: unknown parameter '{key}' ({hint}{module} accepts: {})",
+                accepted.join(", ")
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn problems(registry: &ModuleRegistry, body: &str) -> Vec<String> {
+        let plan =
+            crate::config::parse_plan(&format!(r#"plan "p" {{ step "s" {{ {body} }} }}"#)).unwrap();
+        registry.plan_problems(&plan)
+    }
+
+    #[test]
+    fn every_builtin_rejects_a_parameter_it_does_not_read() {
+        let registry = ModuleRegistry::new();
+        let modules: Vec<&str> = registry
+            .builtin_names()
+            .chain([host::MODULE_NAME])
+            .collect();
+        assert!(modules.len() >= 9, "{modules:?}");
+        for module in modules {
+            let found = problems(&registry, &format!(r#"{module} "x" bogus="yes""#));
+            assert_eq!(found.len(), 1, "{module}: {found:?}");
+            assert!(
+                found[0].starts_with(&format!(
+                    "step 's': {module} 'x': unknown parameter 'bogus' ("
+                )),
+                "{}",
+                found[0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_parameter_passes() {
+        let registry = ModuleRegistry::new();
+        let found = problems(
+            &registry,
+            r#"shell "make" check="test -f out" retries=2 delay=1 timeout=60 login=#true
+               package "nginx" state="absent"
+               file "/etc/a" src="a" template=#true mode="0644" diff=#false
+               host "tag" cmd="date" on="web-1"
+               container "app" image="nginx" memory="512m" wait="healthy""#,
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_misspelled_parameter_names_the_closest_and_all_accepted() {
+        let found = problems(
+            &ModuleRegistry::new(),
+            r#"file "/etc/a" src="a" mdoe="0644""#,
+        );
+        assert_eq!(
+            found,
+            [
+                "step 's': file '/etc/a': unknown parameter 'mdoe' (did you mean 'mode'? file accepts: diff, fetch, group, mode, owner, recurse, src, template)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_step_attribute_on_a_task_says_where_it_goes() {
+        let found = problems(&ModuleRegistry::new(), r#"shell "true" loop="${xs}""#);
+        assert_eq!(
+            found,
+            [
+                "step 's': shell 'true': loop= is a step attribute, not a shell parameter; move it to the step"
+            ]
+        );
+    }
+
+    #[test]
+    fn rescue_and_always_tasks_are_checked() {
+        let found = problems(
+            &ModuleRegistry::new(),
+            r#"shell "false"; rescue { shell "a" bogus=1 }; always { package "b" bogus=1 }"#,
+        );
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    #[test]
+    fn a_plugin_takes_any_parameter() {
+        let mut registry = ModuleRegistry::new();
+        registry.external_modules.insert(
+            "acme".to_string(),
+            Box::new(external::runner::ExternalModule::new(
+                external::discovery::ExternalModuleInfo {
+                    name: "acme".to_string(),
+                    path: "acme".into(),
+                    version: "1".to_string(),
+                    interpreter: None,
+                },
+            )),
+        );
+        let found = problems(&registry, r#"external "acme" "x" anything="yes""#);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_unknown_module_comes_first_and_its_parameters_are_not_checked() {
+        let found = problems(
+            &ModuleRegistry::new(),
+            r#"pakage "nginx" bogus=1; shell "true" bogus=1"#,
+        );
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0], "Unknown module(s): pakage");
+        assert!(found[1].starts_with("step 's': shell"), "{}", found[1]);
     }
 }

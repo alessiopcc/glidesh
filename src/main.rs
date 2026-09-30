@@ -564,6 +564,11 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     }
     let tags = TagFilter::from_args(args.tags.as_deref(), args.skip_tags.as_deref())?;
     tags.check_known(group_plans.iter().map(|gp| gp.plan.as_ref()))?;
+    // Before anything is asked, unlocked or loaded: a plan `run` would refuse fails first.
+    let registry = Arc::new(ModuleRegistry::with_external(Some(inv_base_dir)));
+    for gp in &group_plans {
+        registry.validate_plan(&gp.plan)?;
+    }
     for shadow in config::shadow::merged(shadows) {
         eprintln!("warning: {}", shadow.warning());
     }
@@ -580,11 +585,6 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
     let key = load_ssh_key(&args, &all_targets)?;
-    let registry = Arc::new(ModuleRegistry::with_external(Some(inv_base_dir)));
-
-    for gp in &group_plans {
-        registry.validate_plan(&gp.plan)?;
-    }
 
     let run_name = run_name_parts.join("+");
 
@@ -1108,9 +1108,7 @@ fn validate_plan_file(
     };
     let registry =
         ModuleRegistry::with_external(Some(inv_dir.unwrap_or_else(|| std::path::Path::new("."))));
-    if let Err(e) = registry.validate_plan(&plan) {
-        check.problems.push(e.to_string());
-    }
+    check.problems.extend(registry.plan_problems(&plan));
     check
         .problems
         .extend(config::checks::missing_file_sources(&plan, plan_dir));

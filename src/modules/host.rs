@@ -14,6 +14,9 @@ use russh_keys::key::PrivateKeyWithHashAlg;
 
 pub const MODULE_NAME: &str = "host";
 
+/// Every parameter a `host` task reads; any other is rejected before connecting.
+pub const PARAMS: &[&str] = &["cmd", "login", "on"];
+
 #[derive(Debug, Clone)]
 pub struct HostOutput {
     pub stdout: String,

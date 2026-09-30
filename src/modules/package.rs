@@ -5,10 +5,17 @@ use async_trait::async_trait;
 
 pub struct PackageModule;
 
+/// Every parameter the module reads; any other is rejected before connecting.
+const PARAMS: &[&str] = &["state"];
+
 #[async_trait]
 impl Module for PackageModule {
     fn name(&self) -> &str {
         "package"
+    }
+
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(PARAMS)
     }
 
     async fn check(

@@ -593,3 +593,112 @@ fn without_an_inventory_an_unknown_template_name_only_warns() {
         "{out}"
     );
 }
+
+/// A parameter no module reads used to be ignored: the task ran as if it were not there.
+#[test]
+fn an_unknown_task_parameter_fails_for_every_module() {
+    let tasks = [
+        ("shell", r#"shell "true" creates="/tmp/x""#),
+        ("package", r#"package "nginx" version="1.2""#),
+        ("user", r#"user "app" home="/srv/app""#),
+        ("systemd", r#"systemd "nginx" daemon-reload=#true"#),
+        (
+            "container",
+            r#"container "app" image="nginx" privledged=#true"#,
+        ),
+        (
+            "file",
+            r#"file "/etc/app.conf" src="app.conf" excludes="a""#,
+        ),
+        (
+            "disk",
+            r#"disk "/dev/sdb1" fs="ext4" mount="/data" label="x""#,
+        ),
+        ("nix", r#"nix "htop" channel="unstable""#),
+        ("host", r#"host "tag" cmd="date" register="tag" timeout=5"#),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app.conf", "x");
+    for (module, task) in tasks {
+        write(
+            dir.path(),
+            "plan.kdl",
+            &format!(r#"plan "p" {{ step "s" {{ {task} }} }}"#),
+        );
+        let (ok, out) = validate(dir.path());
+        assert!(!ok, "{module}: {out}");
+        assert!(out.contains(&format!("{module} '")), "{module}: {out}");
+        assert!(out.contains("unknown parameter '"), "{module}: {out}");
+        assert!(
+            out.contains(&format!("{module} accepts: ")),
+            "{module}: {out}"
+        );
+    }
+}
+
+#[test]
+fn a_misspelled_task_parameter_suggests_the_right_one() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app.conf", "x");
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" { file "/etc/app.conf" src="app.conf" mdoe="0644" } }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("unknown parameter 'mdoe' (did you mean 'mode'? file accepts: diff,"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_plugin_task_takes_any_parameter() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" { external "acme" "x" anything="yes" } }"#,
+    );
+    let (_, out) = validate(dir.path());
+    assert!(!out.contains("unknown parameter"), "{out}");
+}
+
+/// `run` refuses the plan before it asks for a prompted answer, unlocks secrets, loads the
+/// key or connects: the host is a TEST-NET address and the key does not exist.
+#[test]
+fn run_refuses_an_unknown_task_parameter_before_anything_else() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" {
+            vars-prompt { release "Release" }
+            step "s" { shell "echo ${release}" bogus="yes" }
+        }"#,
+    );
+    write(
+        dir.path(),
+        "inventory.kdl",
+        "host \"target\" \"192.0.2.1\" user=\"root\"\n",
+    );
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl", "--no-tui"])
+        .args(["--no-host-key-check", "--key", "absent-key"])
+        .timeout(std::time::Duration::from_secs(60))
+        .output()
+        .unwrap();
+    let err: String = String::from_utf8_lossy(&out.stderr)
+        .split_whitespace()
+        .collect::<String>()
+        .replace('│', "");
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("unknownparameter'bogus'"), "{err}");
+    assert!(
+        !err.contains("stdinisnotaterminal"),
+        "asked for the prompt first: {err}"
+    );
+}

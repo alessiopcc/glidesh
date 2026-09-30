@@ -307,6 +307,11 @@ without contacting a host:
 - **Step names** are unique across includes, and every `subscribe` names an earlier step.
 - **Modules exist.** A misspelled module name fails here. External modules are looked up next
   to the inventory when `-i` is given, otherwise in `./modules/` and `~/.glidesh/modules/`.
+- **Tasks name only parameters their module reads.** `shell "true" creates="/tmp/x"` fails
+  here, naming the module's parameters and the closest one to a misspelling; a step
+  attribute such as `loop=` written on a task says to move it to the step. External modules
+  take any parameter. `run` makes the same check before it asks for a prompted variable or
+  connects.
 - **Every `file` task has a `src`, and local sources exist.** A `src` is resolved from the
   directory of the plan the task is written in — an [included plan](/advanced/plan-includes/#path-resolution)'s
   own — as a run resolves it. Not checked: a `fetch` source, which is a path on the host, and

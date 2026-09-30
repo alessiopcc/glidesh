@@ -67,12 +67,16 @@ fn parse_var_flags(flags: &[String]) -> Result<Vec<(String, String)>, GlideshErr
 /// The declared name a mistyped `--var` name most likely meant, if one is close. Only a
 /// declared name is ever shown, so a typo is still easy to fix without echoing the flag.
 fn closest_prompt<'a>(name: &str, prompts: &'a [VarPrompt]) -> Option<&'a str> {
-    prompts
-        .iter()
-        .map(|p| (edit_distance(name, &p.name), p.name.as_str()))
-        .filter(|(distance, declared)| *distance <= 2 && *distance < declared.len())
+    closest(name, prompts.iter().map(|p| p.name.as_str()))
+}
+
+/// The one of `known` that a mistyped `name` most likely meant, if one is close.
+pub(crate) fn closest<'a>(name: &str, known: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    known
+        .map(|known| (edit_distance(name, known), known))
+        .filter(|(distance, known)| *distance <= 2 && *distance < known.len())
         .min_by_key(|(distance, _)| *distance)
-        .map(|(_, declared)| declared)
+        .map(|(_, known)| known)
 }
 
 fn edit_distance(a: &str, b: &str) -> usize {
