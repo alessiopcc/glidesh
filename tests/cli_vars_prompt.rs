@@ -204,10 +204,10 @@ fn a_malformed_var_flag_fails() {
     assert!(has(&out, "must be name=value"), "{out}");
 }
 
-/// Before connecting, a run warns about each plan variable that overrides what the
-/// inventory sets for a host it targets.
+/// Before connecting, a run warns about each plan variable the inventory overrides for a
+/// host it targets: before glidesh 2.0 the plan's value won.
 #[test]
-fn a_run_warns_when_a_plan_variable_overrides_the_inventory() {
+fn a_run_warns_when_the_inventory_overrides_a_plan_variable() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("plan.kdl"),
@@ -227,7 +227,7 @@ fn a_run_warns_when_a_plan_variable_overrides_the_inventory() {
     let (_, text) = run(dir.path(), &[]);
     assert!(
         text.contains(&squash(
-            "warning: plan 'deploy' overrides 'customer', which is also set by host 'target'"
+            "warning: plan 'deploy' sets 'customer' as a default, which host 'target' overrides"
         )),
         "{text}"
     );
@@ -282,8 +282,8 @@ group "db" plan="plan.kdl" {
         .unwrap();
     let text = squash(&String::from_utf8_lossy(&out.stderr));
     let warning = squash(
-        "warning: plan 'deploy' overrides 'customer', which is also set by group 'web' and \
-         host 'db-1'",
+        "warning: plan 'deploy' sets 'customer' as a default, which group 'web' and host \
+         'db-1' override",
     );
     assert_eq!(text.matches(&warning).count(), 1, "{text}");
 }

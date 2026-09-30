@@ -341,6 +341,7 @@ pub struct Plan {
     /// How many hosts may fail before no further batch starts. `None` stops only when a whole
     /// batch fails.
     pub max_fail: Option<Amount>,
+    /// Defaults: the secrets file and the inventory override them for a host.
     pub vars: HashMap<String, String>,
     /// Structured vars for template loops: each key maps to a list of named-field maps.
     pub structured_vars: HashMap<String, Vec<HashMap<String, String>>>,
@@ -348,6 +349,9 @@ pub struct Plan {
     pub vars_files: Vec<String>,
     /// Variables asked for at run time. Only the top-level plan may declare them.
     pub prompts: Vec<VarPrompt>,
+    /// The answers to `prompts` for this run, which override every other variable: the
+    /// operator gave them for this run.
+    pub answers: HashMap<String, String>,
     /// Plan-level escalation default, applied to every step (overridable per step/task).
     pub run_as: RunAsSpec,
     pub items: Vec<PlanItem>,

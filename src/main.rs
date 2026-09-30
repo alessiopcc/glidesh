@@ -387,9 +387,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
         let targets = if let Some(ref host) = args.host {
             let user = args.user.as_deref().unwrap_or("root").to_string();
-            // Without an inventory, secret-file scalars are the lowest tier under plan vars.
-            let mut host_vars = secret_vars.clone();
-            host_vars.extend(plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let host_vars = adhoc_host_vars(&plan, &secret_vars);
             vec![config::types::ResolvedHost {
                 name: host.clone(),
                 address: host.clone(),
@@ -608,9 +606,9 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     .await
 }
 
-/// Answer the run's `vars-prompt`s — from `--var`, else on the terminal — and make each
-/// answer a plan variable of the plans that ask for it. Runs before anything connects, and
-/// without a terminal never waits for input.
+/// Answer the run's `vars-prompt`s — from `--var`, else on the terminal — and give each
+/// answer to the plans that ask for it (`apply_answers`). Runs before anything connects,
+/// and without a terminal never waits for input.
 fn answer_prompts(
     group_plans: &mut [executor::GroupPlan],
     var_flags: &[String],
@@ -629,9 +627,10 @@ fn answer_prompts(
     Ok(answers)
 }
 
-/// Ask one prompt on the terminal. An empty answer takes the default; with no default the
-/// question is asked again, since an empty value is far more often a slip than intended.
-fn ask_prompt(prompt: &config::types::VarPrompt) -> Result<String, GlideshError> {
+/// Ask one prompt on the terminal: `None` when an empty answer takes the default. With no
+/// default the question is asked again, since an empty value is far more often a slip than
+/// intended.
+fn ask_prompt(prompt: &config::types::VarPrompt) -> Result<Option<String>, GlideshError> {
     use std::io::Write;
     let label = match (&prompt.default, prompt.secret) {
         (Some(_), true) => format!("{} [keep default]: ", prompt.text),
@@ -666,15 +665,24 @@ fn ask_prompt(prompt: &config::types::VarPrompt) -> Result<String, GlideshError>
     }
 }
 
-/// Merge secret-file structured vars into a plan (the plan's own value wins on conflict).
+/// A `--host` target's variables: without an inventory, the secrets file's scalars override
+/// the plan's defaults.
+fn adhoc_host_vars(
+    plan: &config::types::Plan,
+    secret_vars: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut vars = plan.vars.clone();
+    vars.extend(secret_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+    vars
+}
+
+/// Merge secret-file structured vars into a plan, over its own: the plan's are defaults.
 fn merge_secret_structured(
     plan: &mut config::types::Plan,
     secret_structured: &HashMap<String, Vec<HashMap<String, String>>>,
 ) {
     for (k, v) in secret_structured {
-        plan.structured_vars
-            .entry(k.clone())
-            .or_insert_with(|| v.clone());
+        plan.structured_vars.insert(k.clone(), v.clone());
     }
 }
 
@@ -1958,6 +1966,38 @@ fn expand_tilde(path: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plan vars are defaults: the secrets file's scalars and lists replace the plan's.
+    #[test]
+    fn the_secrets_file_overrides_the_plans_defaults() {
+        let mut plan = config::parse_plan(
+            r#"plan "p" {
+                vars {
+                    token "placeholder"
+                    region "eu"
+                    keys {
+                        - name="plan"
+                    }
+                    other {
+                        - name="kept"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let secrets = HashMap::from([("token".to_string(), "s3cret".to_string())]);
+        let vars = adhoc_host_vars(&plan, &secrets);
+        assert_eq!(vars["token"], "s3cret");
+        assert_eq!(vars["region"], "eu");
+
+        let lists = HashMap::from([(
+            "keys".to_string(),
+            vec![HashMap::from([("name".to_string(), "secret".to_string())])],
+        )]);
+        merge_secret_structured(&mut plan, &lists);
+        assert_eq!(plan.structured_vars["keys"][0]["name"], "secret");
+        assert_eq!(plan.structured_vars["other"][0]["name"], "kept");
+    }
     use executor::result::Section;
 
     #[test]

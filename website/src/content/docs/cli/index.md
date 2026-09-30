@@ -247,7 +247,7 @@ Combine `--host` with `--plan` to run a plan against a single host without an in
 glidesh run --host 192.168.1.10 -u deploy -p plan.kdl
 ```
 
-The host uses the `--user` (default `root`) and `--port` (default `22`) flags. Plan vars are applied as usual.
+The host uses the `--user` (default `root`) and `--port` (default `22`) flags. Plan vars are applied as usual, with the secrets file's values over them.
 
 ### Inventory-linked plans
 

@@ -111,7 +111,7 @@ PLAN SYNTAX
                                 next; async: each host runs at its own pace
       serial 1 \"25%\"            roll out in batches of these sizes; the last one repeats
       max-fail \"10%\"            stop starting batches once more hosts than this have failed
-      vars { name \"value\" }     variables for this plan (they override inventory variables)
+      vars { name \"value\" }     defaults: the inventory's values override them
       vars-file \"vars.kdl\"      more variables, from a file of `name \"value\"` lines
       vars-prompt { release \"Release to deploy\" default=\"main\" }
                                 variables asked for when the run starts (see PROMPTED
@@ -149,9 +149,10 @@ PLAN SYNTAX
 
 VARIABLES
   ${name} expands in resources, parameters and `file` templates (template=#true). Sources,
-  last wins: secrets file < inventory global vars < group vars < host vars < plan vars.
-  A plan var (or vars-prompt name) the inventory also sets for a host the plan runs on
-  beats the host's value: `validate -i` and `run` warn, naming the variable and scopes.
+  last wins: plan vars < secrets file < inventory global vars < group vars < host vars <
+  vars-prompt answers. Plan vars are defaults: a host's inventory value replaces them
+  (since glidesh 2.0; the plan's won before). `validate -i` and `run` warn about each plan
+  var the inventory also sets for a host the plan runs on, naming the variable and scopes.
   Built in: ${@host.name} ${@host.address} ${@host.user} ${@host.port}
             ${@os.id} ${@os.version} ${@os.family} ${@os.pkg-manager} ${@os.init}
             ${@os.container-runtime} ${@os.nix-installed}
@@ -169,8 +170,9 @@ PROMPTED VARIABLES (vars-prompt)
       release \"Release to deploy\" default=\"main\"
       db-password \"Database password\" secret=#true
   }
-  `glidesh run` asks for each one once, before connecting to any host; the answer is a
-  plan variable, ${release}. An empty answer takes default=. secret=#true reads without
+  `glidesh run` asks for each one once, before connecting to any host; the answer is
+  ${release}, and beats every other variable. An empty answer takes default=, which is a
+  plan default like a vars entry: the inventory overrides it. secret=#true reads without
   echo and shows the value as *** in output and run logs; a non-empty secret answer needs
   at least 4 bytes (4 plain ASCII characters), or it could not be masked.
   --var NAME=VALUE answers one without asking (repeatable; a name the plan does not

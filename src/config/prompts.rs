@@ -10,6 +10,9 @@ pub struct Answer {
     pub name: String,
     pub value: String,
     pub secret: bool,
+    /// Nobody gave a value: the prompt's `default=` was taken, which is a plan default like
+    /// a `vars` entry, so the inventory overrides it.
+    pub defaulted: bool,
 }
 
 /// Every variable the plans ask for, each once: several group plans may declare the same
@@ -107,7 +110,7 @@ pub fn resolve_answers(
     prompts: &[VarPrompt],
     var_flags: &[String],
     interactive: bool,
-    mut ask: impl FnMut(&VarPrompt) -> Result<String, GlideshError>,
+    mut ask: impl FnMut(&VarPrompt) -> Result<Option<String>, GlideshError>,
 ) -> Result<Vec<Answer>, GlideshError> {
     let given = parse_var_flags(var_flags)?;
     let unknown: Vec<String> = given
@@ -168,11 +171,13 @@ pub fn resolve_answers(
     prompts
         .iter()
         .map(|p| {
-            let value = match given_value(&p.name) {
-                Some(v) => v,
+            let given = match given_value(&p.name) {
+                Some(v) => Some(v),
                 None if interactive => ask(p)?,
-                None => p.default.clone().unwrap_or_default(),
+                None => None,
             };
+            let defaulted = given.is_none();
+            let value = given.or_else(|| p.default.clone()).unwrap_or_default();
             if too_short_to_mask(p, &value) {
                 return Err(GlideshError::Other(format!(
                     "{}: {}",
@@ -184,6 +189,7 @@ pub fn resolve_answers(
                 name: p.name.clone(),
                 value,
                 secret: p.secret,
+                defaulted,
             })
         })
         .collect()
@@ -204,28 +210,38 @@ pub fn short_secret_problem() -> String {
     )
 }
 
-/// What a line typed at the terminal answers: the line itself, or the default when it is
-/// empty. `Err` holds why to ask again — nothing typed and no default, or a secret too short
-/// to mask. The default is applied first, so a default too short to mask is asked again
+/// What a line typed at the terminal answers: the line itself, or `None` for the default when
+/// it is empty. `Err` holds why to ask again — nothing typed and no default, or a secret too
+/// short to mask. The default is checked here, so a default too short to mask is asked again
 /// rather than failing the run when the answers are checked.
-pub fn settle_typed_answer(prompt: &VarPrompt, typed: String) -> Result<String, String> {
+pub fn settle_typed_answer(prompt: &VarPrompt, typed: String) -> Result<Option<String>, String> {
     let answer = match (&prompt.default, typed.is_empty()) {
-        (_, false) => typed,
-        (Some(default), true) => default.clone(),
+        (_, false) => Some(typed),
+        (Some(_), true) => None,
         (None, true) => return Err(format!("'{}' needs a value.", prompt.name)),
     };
-    if too_short_to_mask(prompt, &answer) {
+    let value = answer
+        .as_deref()
+        .or(prompt.default.as_deref())
+        .unwrap_or_default();
+    if too_short_to_mask(prompt, value) {
         return Err(short_secret_problem());
     }
     Ok(answer)
 }
 
-/// Put each answer into the plan variables of the plans that asked for it — the same slot
-/// as plan `vars`, which `parse_plan` keeps from also naming a prompted variable.
+/// Give each plan the answers to the prompts it declares: one given for this run overrides
+/// every other variable, and a taken default joins the plan's `vars`, which the inventory
+/// overrides.
 pub fn apply_answers(plan: &mut Plan, answers: &[Answer]) {
     for answer in answers {
         if plan.prompts.iter().any(|p| p.name == answer.name) {
-            plan.vars.insert(answer.name.clone(), answer.value.clone());
+            let slot = if answer.defaulted {
+                &mut plan.vars
+            } else {
+                &mut plan.answers
+            };
+            slot.insert(answer.name.clone(), answer.value.clone());
         }
     }
 }
@@ -248,7 +264,7 @@ mod tests {
         f.iter().map(|s| s.to_string()).collect()
     }
 
-    fn never_ask(p: &VarPrompt) -> Result<String, GlideshError> {
+    fn never_ask(p: &VarPrompt) -> Result<Option<String>, GlideshError> {
         panic!("asked for {} without a terminal", p.name)
     }
 
@@ -262,7 +278,8 @@ mod tests {
             [Answer {
                 name: "release".into(),
                 value: "v1.2=rc".into(),
-                secret: false
+                secret: false,
+                defaulted: false,
             }]
         );
     }
@@ -272,6 +289,7 @@ mod tests {
         let prompts = [prompt("release", Some("main"), false)];
         let answers = resolve_answers(&prompts, &[], false, never_ask).unwrap();
         assert_eq!(answers[0].value, "main");
+        assert!(answers[0].defaulted);
     }
 
     #[test]
@@ -298,7 +316,7 @@ mod tests {
         let mut asked = Vec::new();
         let answers = resolve_answers(&prompts, &flags(&["release=v2"]), true, |p| {
             asked.push(p.name.clone());
-            Ok("typed".to_string())
+            Ok(Some("typed".to_string()))
         })
         .unwrap();
         assert_eq!(asked, ["tag"]);
@@ -340,12 +358,13 @@ mod tests {
         );
         assert_eq!(
             settle_typed_answer(&short_default, "1234".into()).unwrap(),
-            "1234"
+            Some("1234".to_string())
         );
         let long_default = prompt("pin", Some("4321"), true);
         assert_eq!(
             settle_typed_answer(&long_default, String::new()).unwrap(),
-            "4321"
+            None,
+            "an empty line takes the default"
         );
         let no_default = prompt("release", None, false);
         assert!(
@@ -476,10 +495,27 @@ mod tests {
             name: "release".into(),
             value: "v3".into(),
             secret: false,
+            defaulted: false,
         }];
         apply_answers(&mut asking, &answers);
         apply_answers(&mut other, &answers);
-        assert_eq!(asking.vars["release"], "v3");
-        assert!(other.vars.is_empty());
+        assert_eq!(asking.answers["release"], "v3");
+
+        let mut defaulted =
+            parse_plan("plan \"a\" {\n vars-prompt {\n release \"Release\"\n }\n}").unwrap();
+        let taken = [Answer {
+            name: "release".into(),
+            value: "main".into(),
+            secret: false,
+            defaulted: true,
+        }];
+        apply_answers(&mut defaulted, &taken);
+        assert_eq!(
+            defaulted.vars["release"], "main",
+            "a default is a plan default"
+        );
+        assert!(defaulted.answers.is_empty());
+        assert!(asking.vars.is_empty());
+        assert!(other.answers.is_empty());
     }
 }

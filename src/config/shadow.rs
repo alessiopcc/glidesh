@@ -1,8 +1,9 @@
-//! Plan variables that replace what the inventory sets for a host.
+//! Plan variables the inventory or the secrets file also sets for a host.
 //!
-//! Plan vars merge last, so a value a plan meant as a default beats what the inventory
-//! says about a specific host — silently, unless it is reported. Only names are compared
-//! and reported: either value may be a secret.
+//! Plan vars are defaults: what the inventory or the secrets file sets for a host overrides
+//! them. Before glidesh 2.0 the plan's value won, so a run after upgrading can use other
+//! values than before — reported, not silent. A prompted name overrides the inventory's
+//! value instead. Only names are compared and reported: either value may be a secret.
 
 use crate::config::types::{Inventory, Plan};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -21,34 +22,45 @@ impl std::fmt::Display for VarScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VarScope::SecretsFile => write!(f, "the secrets file"),
-            VarScope::Global => write!(f, "the inventory's global vars"),
+            VarScope::Global => write!(f, "the inventory's global `vars` block"),
             VarScope::Group(name) => write!(f, "group '{name}'"),
             VarScope::Host(name) => write!(f, "host '{name}'"),
         }
     }
 }
 
-/// A plan variable that replaces what the inventory sets for hosts running the plan.
+/// A plan variable the inventory or the secrets file also sets for hosts running the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shadow {
     pub plan: String,
     /// The plan file it was found in: two files may name their plans alike.
     pub source: PathBuf,
     pub name: String,
-    /// Every place the inventory sets it for those hosts.
+    /// A `vars-prompt` name, whose answer overrides the scopes; otherwise a plan var, which
+    /// they override.
+    pub prompted: bool,
+    /// Every place the inventory or the secrets file sets it for those hosts.
     pub scopes: BTreeSet<VarScope>,
 }
 
 impl Shadow {
     pub fn warning(&self) -> String {
         let scopes: Vec<String> = self.scopes.iter().map(ToString::to_string).collect();
-        format!(
-            "plan '{}' overrides '{}', which is also set by {}: the plan's value wins, as \
-             plan vars merge last",
-            self.plan,
-            self.name,
-            join_and(&scopes)
-        )
+        let s = if scopes.len() == 1 { "s" } else { "" };
+        let scopes = join_and(&scopes);
+        if self.prompted {
+            format!(
+                "plan '{}' asks for '{}', which {scopes} also set{s}: an answer overrides it, \
+                 the prompt's default does not",
+                self.plan, self.name
+            )
+        } else {
+            format!(
+                "plan '{}' sets '{}' as a default, which {scopes} override{s}; before \
+                 glidesh 2.0 the plan's value won",
+                self.plan, self.name
+            )
+        }
     }
 }
 
@@ -67,8 +79,8 @@ pub struct SecretNames {
     pub structured: HashSet<String>,
 }
 
-/// The plan's variables — its own, its includes', and the `vars-prompt` names that answer
-/// into them — that the inventory, or the secrets file, also sets for any of `hosts`.
+/// The plan's variables — its own, its includes', and its `vars-prompt` names — that the
+/// inventory, or the secrets file, also sets for any of `hosts`.
 /// Structured variables only meet the secrets file's: the inventory has none.
 ///
 /// `inventory` is the inventory as written, before secrets-file values are merged into
@@ -120,28 +132,41 @@ pub fn shadowed<'a>(
         }
     }
 
-    let plan_names: BTreeSet<&str> = plan
+    let plan_names: BTreeSet<(&str, bool)> = plan
         .vars
         .keys()
-        .map(String::as_str)
-        .chain(plan.prompts.iter().map(|p| p.name.as_str()))
+        .map(|name| (name.as_str(), false))
+        .chain(plan.prompts.iter().map(|p| (p.name.as_str(), true)))
         .collect();
     let structured = plan
         .structured_vars
         .keys()
         .filter(|name| secrets.structured.contains(*name))
-        .map(|name| (name.as_str(), BTreeSet::from([VarScope::SecretsFile])));
-    let scalars = plan_names
-        .into_iter()
-        .filter_map(|name| scopes.get(name).map(|found| (name, found.clone())));
+        .map(|name| {
+            (
+                name.as_str(),
+                false,
+                BTreeSet::from([VarScope::SecretsFile]),
+            )
+        });
+    let scalars = plan_names.into_iter().filter_map(|(name, prompted)| {
+        scopes
+            .get(name)
+            .map(|found| (name, prompted, found.clone()))
+    });
     // One file named two ways (`plan.kdl`, `sub/../plan.kdl`, a link) is one plan.
     let source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
-    merged(scalars.chain(structured).map(|(name, scopes)| Shadow {
-        plan: plan.name.clone(),
-        source: source.clone(),
-        name: name.to_string(),
-        scopes,
-    }))
+    merged(
+        scalars
+            .chain(structured)
+            .map(|(name, prompted, scopes)| Shadow {
+                plan: plan.name.clone(),
+                source: source.clone(),
+                name: name.to_string(),
+                prompted,
+                scopes,
+            }),
+    )
 }
 
 /// One shadow per plan file and variable, with the scopes of all: a plan several
@@ -268,6 +293,16 @@ host "lone" "10.0.2.1" {
         let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["customer", "token"]);
         assert_eq!(scopes(&found[1]), [VarScope::SecretsFile]);
+        assert_eq!(
+            found[0].warning(),
+            "plan 'p' asks for 'customer', which group 'web' also sets: an answer overrides \
+             it, the prompt's default does not"
+        );
+        assert_eq!(
+            found[1].warning(),
+            "plan 'p' sets 'token' as a default, which the secrets file overrides; before \
+             glidesh 2.0 the plan's value won"
+        );
     }
 
     #[test]
@@ -297,10 +332,25 @@ host "lone" "10.0.2.1" {
         let warning = found[0].warning();
         assert_eq!(
             warning,
-            "plan 'deploy' overrides 'customer', which is also set by group 'web' and host \
-             'lone': the plan's value wins, as plan vars merge last"
+            "plan 'deploy' sets 'customer' as a default, which group 'web' and host 'lone' \
+             override; before glidesh 2.0 the plan's value won"
         );
         assert!(!warning.contains("default-customer") && !warning.contains("acme"));
+    }
+
+    #[test]
+    fn a_single_scope_takes_a_singular_verb() {
+        let found = shadows(
+            r#"plan "p" { vars { region "us" }
+                step "s" { shell "true" } }"#,
+            &[],
+            &["web-2"],
+        );
+        assert_eq!(
+            found[0].warning(),
+            "plan 'p' sets 'region' as a default, which the inventory's global `vars` block \
+             overrides; before glidesh 2.0 the plan's value won"
+        );
     }
 
     #[test]
@@ -339,6 +389,7 @@ host "lone" "10.0.2.1" {
             plan: "deploy".to_string(),
             source: PathBuf::from(source),
             name: "customer".to_string(),
+            prompted: false,
             scopes: BTreeSet::from([scope]),
         };
         let found = merged([

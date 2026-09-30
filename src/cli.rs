@@ -489,7 +489,7 @@ mod tests {
             "refuses a destination others could redirect",
             "sudo and doas work for any user",
             "resolve from the plan file's directory",
-            "beats the host's value",
+            "Plan vars are defaults",
             "$${NAME} writes a literal ${NAME}",
             "Any other parameter on a built-in module is an error",
             "`jump #false`",
