@@ -138,7 +138,8 @@ pub struct SourceTree {
 }
 
 /// Walk `root`, following symlinks as reading a file does. The error names the first
-/// directory that could not be read, which a recursive upload fails on.
+/// directory that could not be read, or name that is not UTF-8, which a recursive upload
+/// fails on.
 pub fn walk(root: &Path, exclude: &Exclude) -> Result<SourceTree, String> {
     fn go(
         root: &Path,
@@ -349,11 +350,26 @@ fn same_mode(a: &str, b: &str) -> bool {
 
 /// `prune` with nothing to upload would empty the destination — a source directory left
 /// empty by mistake, or an `exclude` that leaves out everything.
+///
+/// A source name holding `U+FFFD` or a carriage return is refused too: the host's listing
+/// cannot be told from a garbled one with such a name, so every later run would stop there.
 pub fn check_prune_source(tree: &SourceTree, src: &str, dest: &str) -> Result<(), String> {
     if tree.files.is_empty() && tree.dirs.is_empty() {
         return Err(format!(
             "prune: the source {src} has nothing to upload (empty, or all of it excluded), \
              so it would remove everything under {dest}; refusing"
+        ));
+    }
+    if let Some(name) = tree
+        .files
+        .iter()
+        .chain(&tree.dirs)
+        .find(|p| p.contains(['\u{FFFD}', '\r']))
+    {
+        return Err(format!(
+            "prune: {src}/{} holds U+FFFD or a carriage return, which prune cannot read back \
+             from the host; rename it, or leave it out with `exclude`",
+            name.escape_debug()
         ));
     }
     Ok(())
@@ -438,7 +454,7 @@ pub fn options(
         match args.get(key) {
             None => Ok(None),
             Some(ParamValue::String(s)) => Ok(Some(s.clone())),
-            // `mode=644` read as a number: say how to write it.
+            // KDL reads an unquoted `mode=644` as a number, which was once silently ignored.
             Some(ParamValue::Integer(n)) => {
                 Err(format!("{key}= must be a quoted string: {key}=\"{n}\""))
             }
@@ -590,6 +606,14 @@ mod tests {
             dirs: vec!["cache".into()],
         };
         assert!(check_prune_source(&one_dir, "site", "/srv/site").is_ok());
+        for odd in ["a\u{FFFD}", "b\rc"] {
+            let tree = SourceTree {
+                files: vec![odd.into()],
+                dirs: vec![],
+            };
+            let err = check_prune_source(&tree, "site", "/srv/site").unwrap_err();
+            assert!(err.contains("cannot read back"), "{err}");
+        }
     }
 
     #[test]

@@ -177,7 +177,8 @@ upload (empty, or all of it excluded), which would empty the destination. It lis
 without following symlinks: a link under the destination is removed as a link, never what
 it points to. A host name it cannot be sure it read exactly stops it, since it could not be
 compared: one that is not UTF-8, or holds `U+FFFD` (which stands for bytes that were not
-UTF-8) or a carriage return (which `run-as-method="su"` adds to a line break). With `run-as`, it removes
+UTF-8) or a carriage return (which `run-as-method="su"` adds to a line break). For the same
+reason a source name holding either is refused with `prune`, before anything changes. With `run-as`, it removes
 only from directories no one else can write to, as uploads write only there.
 
 :::note

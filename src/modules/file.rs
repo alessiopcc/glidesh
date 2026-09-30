@@ -644,7 +644,8 @@ impl FileModule {
         let opted_out = Self::diff_opted_out(params)?;
         let show_diffs = ctx.diff && !opted_out;
         for ((rel_path, remote_path), stat) in tree.files.iter().zip(&files).zip(file_stats) {
-            // Rendered first, so a template error shows before anything is removed.
+            // Rendered even when a directory is in the way, so a template error fails the
+            // check, before an apply removes that directory.
             let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
             // A directory in the way has no content to compare; it is counted as a mismatch.
             if stat.as_ref().is_some_and(|s| s.mismatches(false)) {
@@ -803,17 +804,20 @@ impl FileModule {
         let (resolved_src, tree) = Self::source_tree(ctx, src, &options)?;
         let template = Self::is_template(params);
 
-        // Every file read — every template rendered — and kept before anything changes: a
-        // failure, or a source file changing, must not come after `prune` removed something.
+        // Every file read — every template rendered — before anything changes. With `prune`
+        // the contents are kept, so none is read again after something was removed; without
+        // it nothing is removed, and each file is read again as it is uploaded, one at a time.
         let mut warnings = Vec::new();
-        let mut contents = Vec::with_capacity(tree.files.len());
+        let mut kept = Vec::new();
         for rel_path in &tree.files {
             let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
             if !template {
                 let label = Self::shown_template(src, Path::new(rel_path));
                 warnings.extend(Self::literal_reference_warning(ctx, &label, &content));
             }
-            contents.push(content);
+            if options.prune {
+                kept.push(content);
+            }
         }
         let warnings = warnings.join("\n");
 
@@ -852,11 +856,17 @@ impl FileModule {
         let strays = Self::strays(ctx, &options, &tree, src, dest, &managed).await?;
         let removing: std::collections::HashSet<String> = strays.paths(dest).into_iter().collect();
         if let Some((blocked, _)) = mismatched.iter().find(|(p, _)| !removing.contains(p)) {
+            let fix = if options.prune {
+                "prune keeps it, as it holds a path `exclude` leaves out; remove it yourself, \
+                 or stop excluding what it holds"
+            } else {
+                "remove it, or set prune=#true"
+            };
             return Err(GlideshError::Module {
                 module: "file".to_string(),
                 message: format!(
                     "{blocked} is a file on the host where the source has a directory, or a \
-                     directory where it has a file; remove it, or set prune=#true"
+                     directory where it has a file; {fix}"
                 ),
             });
         }
@@ -875,7 +885,15 @@ impl FileModule {
         ctx.create_dirs(&to_create).await?;
 
         let mut uploaded = 0usize;
-        for (content, remote_path) in contents.iter().zip(&files) {
+        for (i, (rel_path, remote_path)) in tree.files.iter().zip(&files).enumerate() {
+            let read;
+            let content = match kept.get(i) {
+                Some(content) => content,
+                None => {
+                    read = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
+                    &read
+                }
+            };
             let needs_upload = match ctx.checksum_remote(remote_path).await? {
                 Some(remote_hash) => remote_hash != Self::sha256_hex(content),
                 None => true,

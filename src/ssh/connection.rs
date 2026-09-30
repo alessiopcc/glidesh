@@ -1389,8 +1389,9 @@ printf '%s' "$d""#;
     }
 
     /// Every entry under `dest`, relative to it, for `prune`; none when `dest` does not
-    /// exist. `prune` deletes, so it refuses a `dest` that is `/` or a symlink, and a listing
-    /// it could not finish or read: a name that is not UTF-8 could not be matched.
+    /// exist. `prune` deletes, so it refuses a `dest` that is `/` or a symlink, or whose real
+    /// path is less than two directories deep, and a listing it could not finish or read
+    /// exactly (see [`parse_tree_listing`]).
     pub async fn list_tree_as(
         &self,
         dest: &str,
@@ -1454,8 +1455,9 @@ printf '%s' "$d""#;
 
     /// Set the owner and group of `files` and `dirs`, then the mode of each kind: exactly
     /// the paths a recursive upload manages, under `root`. A symlink among them is never
-    /// followed — `chown -h` changes the link, `chmod` skips it — so, as `chown -R` did, the
-    /// escalated change needs [`trusted_paths`] to hold for `root` only.
+    /// followed — `chown -h` changes the link, `chmod` skips it — so the escalated change
+    /// needs [`trusted_paths`] to hold for `root` only; the directories below were held to it
+    /// when `create_dirs_as` made sure they exist.
     #[allow(clippy::too_many_arguments)]
     pub async fn set_tree_attrs_as(
         &self,
@@ -1499,7 +1501,15 @@ printf '%s' "$d""#;
         // path that is a symlink, which `chmod` would follow. A symlinked directory on the way
         // to a path is followed, as uploads follow it: escalated, `create_dirs_as` has
         // already held every directory of the tree to [`trusted_paths`].
-        for (mode, paths, kind) in [(dir_mode, dirs, "d"), (file_mode, files, "f")] {
+        // Files, then directories deepest first, the destination last: a mode may let others
+        // write to a directory, and then no later path goes through it.
+        let mut deepest_first = dirs.to_vec();
+        deepest_first
+            .sort_by_key(|d| std::cmp::Reverse(d.trim_end_matches('/').matches('/').count()));
+        for (mode, paths, kind) in [
+            (file_mode, files, "f"),
+            (dir_mode, deepest_first.as_slice(), "d"),
+        ] {
             if let Some(mode) = mode {
                 // No `-P`: busybox `find` does not take it, and not following is the default.
                 let tail = format!(
