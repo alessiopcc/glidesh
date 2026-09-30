@@ -1,7 +1,9 @@
 //! Checks `glidesh validate` runs on a resolved plan without contacting any host.
 
 use crate::config::plan::{is_error_var, is_item_var};
-use crate::config::template::{Token, defined_references, literal_hint, tokens};
+use crate::config::template::{
+    Token, bound_field, defined_references, literal_hint, structure_error, tokens,
+};
 use crate::config::types::{ParamValue, Plan, TaskDef};
 use std::path::{Path, PathBuf};
 
@@ -145,14 +147,25 @@ pub fn template_scope_problems(plan: &Plan, plan_dir: &Path) -> Vec<String> {
 /// What `validate` finds in templated `file` sources.
 #[derive(Debug, Default)]
 pub struct TemplateFindings {
-    /// What would fail the upload on any host: an unreadable `${for}`, a loop over a list
-    /// nothing defines, a reserved loop binding.
+    /// What fails the upload whatever the variables: a template `render` cannot read, a
+    /// loop over a list nothing defines.
     pub problems: Vec<String>,
     /// `${name}` references nothing defines — unless an inventory `validate` was not
     /// given does.
     pub undefined: Vec<String>,
+    /// `${name}` references only some of the plan's hosts define.
+    pub partial: Vec<String>,
     /// `$${name}` whose `name` is defined: see [`old_escape_warning`].
     pub warnings: Vec<String>,
+}
+
+/// Which of the hosts a plan may run on define a variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coverage {
+    All,
+    /// Defined for some: these hosts lack it.
+    Partial(Vec<String>),
+    None,
 }
 
 /// The names the plan's tasks register, which later tasks read like any variable.
@@ -173,105 +186,128 @@ fn old_escape_warning(at: &str, name: &str) -> String {
     )
 }
 
-/// Checks every local templated `file` source the way `render` will read it: each
-/// `${name}` must be defined — `is_defined`, a name a task registers, or the binding of a
-/// `${for}` around it — and each `${for}` must be readable and loop over a list `is_list`
-/// accepts or an inventory group (`@group.<name>`). Each name is reported once per file,
-/// at its first line.
+/// Checks every local templated `file` source the way `render` will read it. The template
+/// must be readable, each `${for}` must loop over a list `is_list` accepts, and each
+/// `${name}` must be defined: `is_defined` (for every host), a name a task before this one
+/// registers, the binding of a `${for}` around it, or a host variable — `hosts` tells which
+/// hosts define it. Each name is reported once per file, at its first line.
 pub fn template_reference_findings(
     plan: &Plan,
     plan_dir: &Path,
     is_defined: impl Fn(&str) -> bool,
+    hosts: impl Fn(&str) -> Coverage,
     is_list: impl Fn(&str) -> bool,
 ) -> TemplateFindings {
-    let registered = registered(plan);
-    let defined = |name: &str| is_defined(name) || registered.contains(name);
+    let mut registered: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut findings = TemplateFindings::default();
     for step in plan.steps() {
         for task in step.all_tasks() {
-            if !matches!(task.args.get("template"), Some(ParamValue::Bool(true))) {
-                continue;
-            }
-            let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) else {
-                continue;
-            };
-            let mut files = Vec::new();
-            if resolved.is_dir() {
-                files_under(&resolved, &mut files);
-            } else {
-                files.push(resolved.clone());
-            }
-            for file in files {
-                let Ok(text) = std::fs::read_to_string(&file) else {
-                    continue;
-                };
-                let shown = shown_source(&src, &resolved, &file);
-                let at = |line: usize| {
-                    format!(
-                        "step '{}': file '{}': template {}, line {}",
-                        step.name, task.resource, shown, line
-                    )
-                };
-                let mut seen_names = std::collections::HashSet::new();
-                let mut seen_lists = std::collections::HashSet::new();
-                let mut seen_escapes = std::collections::HashSet::new();
-                let mut bindings: Vec<&str> = Vec::new();
-                for (line, token) in tokens(&text) {
-                    match token {
-                        Token::Invalid(message) => {
-                            findings.problems.push(format!("{}: {}", at(line), message));
-                        }
-                        Token::For {
-                            binding,
-                            collection,
-                            ..
-                        } => {
-                            if binding.starts_with('@') {
-                                findings.problems.push(format!(
-                                    "{}: loop binding '{}' cannot use the reserved '@' namespace",
-                                    at(line),
-                                    binding
-                                ));
-                            }
-                            if !collection.starts_with("@group.")
-                                && !is_list(collection)
-                                && seen_lists.insert(collection)
-                            {
-                                findings.problems.push(format!(
-                                    "{}: loops over '{}', which is not a defined list",
-                                    at(line),
-                                    collection
-                                ));
-                            }
-                            bindings.push(binding);
-                        }
-                        Token::EndFor => {
-                            bindings.pop();
-                        }
-                        Token::Var(name) => {
-                            let bound = name
-                                .split_once('.')
-                                .is_some_and(|(head, _)| bindings.contains(&head));
-                            if !bound && !defined(name) && seen_names.insert(name) {
-                                findings.undefined.push(format!(
-                                    "{}: ${{{}}} is not defined{}",
-                                    at(line),
-                                    name,
-                                    literal_hint(name)
-                                ));
-                            }
-                        }
-                        Token::Escaped(name) => {
-                            if defined(name) && seen_escapes.insert(name) {
-                                findings.warnings.push(old_escape_warning(&at(line), name));
-                            }
-                        }
+            if matches!(task.args.get("template"), Some(ParamValue::Bool(true))) {
+                if let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) {
+                    let at = |shown: &str, line: usize| {
+                        format!(
+                            "step '{}': file '{}': template {}, line {}",
+                            step.name, task.resource, shown, line
+                        )
+                    };
+                    let defined = |name: &str| is_defined(name) || registered.contains(name);
+                    let mut files = Vec::new();
+                    if resolved.is_dir() {
+                        files_under(&resolved, &mut files);
+                    } else {
+                        files.push(resolved.clone());
+                    }
+                    for file in files {
+                        let Ok(text) = std::fs::read_to_string(&file) else {
+                            continue;
+                        };
+                        let shown = shown_source(&src, &resolved, &file);
+                        check_template(
+                            &text,
+                            &|line| at(&shown, line),
+                            &defined,
+                            &hosts,
+                            &is_list,
+                            &mut findings,
+                        );
                     }
                 }
+            }
+            if let Some(name) = task.register.as_deref() {
+                registered.insert(name);
             }
         }
     }
     findings
+}
+
+fn check_template(
+    text: &str,
+    at: &dyn Fn(usize) -> String,
+    defined: &dyn Fn(&str) -> bool,
+    hosts: &dyn Fn(&str) -> Coverage,
+    is_list: &dyn Fn(&str) -> bool,
+    findings: &mut TemplateFindings,
+) {
+    if let Some((line, message)) = structure_error(text) {
+        findings.problems.push(format!("{}: {}", at(line), message));
+        return;
+    }
+    let mut seen_names = std::collections::HashSet::new();
+    let mut seen_lists = std::collections::HashSet::new();
+    let mut seen_escapes = std::collections::HashSet::new();
+    let mut bindings: Vec<&str> = Vec::new();
+    for (line, token) in tokens(text) {
+        match token {
+            Token::For {
+                binding,
+                collection,
+                ..
+            } => {
+                if !is_list(collection) && seen_lists.insert(collection) {
+                    findings.problems.push(format!(
+                        "{}: loops over '{}', which is not a defined list",
+                        at(line),
+                        collection
+                    ));
+                }
+                bindings.push(binding);
+            }
+            Token::EndFor => {
+                bindings.pop();
+            }
+            Token::Var(name) => {
+                let bound = bindings
+                    .iter()
+                    .any(|binding| bound_field(name, binding).is_some());
+                if bound || defined(name) || !seen_names.insert(name) {
+                    continue;
+                }
+                match hosts(name) {
+                    Coverage::All => {}
+                    Coverage::Partial(missing) => findings.partial.push(format!(
+                        "{}: ${{{}}} is not set for host{} {}",
+                        at(line),
+                        name,
+                        if missing.len() == 1 { "" } else { "s" },
+                        missing.join(", ")
+                    )),
+                    Coverage::None => findings.undefined.push(format!(
+                        "{}: ${{{}}} is not defined{}",
+                        at(line),
+                        name,
+                        literal_hint(name)
+                    )),
+                }
+            }
+            Token::Escaped(name) => {
+                if (defined(name) || hosts(name) != Coverage::None) && seen_escapes.insert(name) {
+                    findings.warnings.push(old_escape_warning(&at(line), name));
+                }
+            }
+            Token::Invalid(_) => {}
+        }
+    }
 }
 
 /// [`old_escape_warning`]s for the `$${name}` in the plan itself: task resources and
@@ -600,7 +636,12 @@ mod tests {
             &p,
             dir.path(),
             |name| ["port", "db-host"].contains(&name) || name.starts_with("@host."),
-            |list| list == "api-keys",
+            |name| match name {
+                "region" => Coverage::All,
+                "tier" => Coverage::Partial(vec!["db-1".to_string(), "db-2".to_string()]),
+                _ => Coverage::None,
+            },
+            |list| ["api-keys", "hosts", "@group.web"].contains(&list),
         )
     }
 
@@ -662,15 +703,17 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_name_is_defined() {
+    fn a_name_an_earlier_task_registers_is_defined_and_a_later_one_not() {
         let found = template_findings(
-            "${disks}\n",
+            "${disks} ${later}\n",
             &format!(
                 r#"step "List" {{ shell "lsblk" register="disks" }}
-                {TEMPLATED}"#
+                {TEMPLATED}
+                step "After" {{ shell "true" register="later" }}"#
             ),
         );
-        assert!(found.undefined.is_empty(), "{:?}", found.undefined);
+        assert_eq!(found.undefined.len(), 1, "{:?}", found.undefined);
+        assert!(found.undefined[0].contains("${later} is not defined"));
     }
 
     #[test]
@@ -700,21 +743,66 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_loop_and_a_reserved_binding_are_problems() {
+    fn a_template_render_cannot_read_is_a_problem_at_its_line() {
+        for (template, expected) in [
+            (
+                "ok\n${for x of api-keys}${endfor}",
+                "line 2: Invalid for-loop syntax",
+            ),
+            (
+                "${for @k in api-keys}${endfor}",
+                "line 1: for-loop binding '@k' cannot use the reserved",
+            ),
+            (
+                "a\n\n${for k in api-keys}${k.name}",
+                "line 3: Missing ${endfor} for loop over 'api-keys'",
+            ),
+            ("port=${port\n", "line 1: Unclosed variable reference"),
+        ] {
+            let found = template_findings(template, TEMPLATED);
+            assert_eq!(
+                found.problems.len(),
+                1,
+                "{template:?}: {:?}",
+                found.problems
+            );
+            assert!(
+                found.problems[0].contains(expected),
+                "{template:?}: {}",
+                found.problems[0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_loop_over_an_unknown_group_is_a_problem() {
         let found = template_findings(
-            "${for x of api-keys}${endfor}\n${for @k in api-keys}${endfor}\n",
+            "${for h in @group.web}${endfor}${for h in @group.wbe}${endfor}",
             TEMPLATED,
         );
-        assert_eq!(found.problems.len(), 2, "{:?}", found.problems);
-        assert!(
-            found.problems[0].contains("line 1: Invalid for-loop syntax"),
-            "{}",
-            found.problems[0]
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(found.problems[0].contains("loops over '@group.wbe'"));
+    }
+
+    #[test]
+    fn a_dotted_binding_is_matched_whole() {
+        let found = template_findings(
+            "${for host.item in hosts}${host.item.name}${endfor}${host.name}",
+            TEMPLATED,
         );
+        assert_eq!(found.undefined.len(), 1, "{:?}", found.undefined);
+        assert!(found.undefined[0].contains("${host.name} is not defined"));
+    }
+
+    #[test]
+    fn a_host_variable_some_hosts_lack_is_partial() {
+        let found = template_findings("${region} ${tier}\n", TEMPLATED);
+        assert!(found.undefined.is_empty(), "{:?}", found.undefined);
+        assert_eq!(found.partial.len(), 1, "{:?}", found.partial);
         assert!(
-            found.problems[1].contains("line 2: loop binding '@k' cannot use the reserved"),
+            found.partial[0].contains("line 1: ${tier} is not set for hosts db-1, db-2"),
             "{}",
-            found.problems[1]
+            found.partial[0]
         );
     }
 

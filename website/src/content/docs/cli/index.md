@@ -316,12 +316,14 @@ without contacting a host:
   `always`](/advanced/rescue/) may not use `${@item}`: neither exists there, so the task
   would fail when it runs.
 - **Templates read only what is defined.** Each local `file` template is read as a run
-  renders it: every `${name}` must be a plan, inventory, secrets-file or prompted variable,
-  a name a task registers, a built-in, or the binding of a `${for}` around it, and every
-  `${for}` must be well formed and loop over a list the plan or the secrets file defines, or
-  an inventory group. A problem names the template, the line and the name. Without `-i`, a
-  name the inventory might set is a warning instead. A literal `${…}` is written
-  [`$${…}`](/concepts/variables/#interpolation).
+  renders it: every `${name}` must be a plan, secrets-file or prompted variable, a name an
+  earlier task registers, a built-in (`${@host.nmae}` is not one), an `@inventory.*` value the
+  inventory has, the binding of a `${for}` around it — or an inventory variable of every host
+  the plan runs on. Every `${for}` must be well formed and loop over a list the plan or the
+  secrets file defines, or a group the inventory has. A problem names the template, the line
+  and the name. Without `-i`, a name the inventory might set is a warning instead; with `-p`,
+  so is one only some hosts set, as the run may not target the others. A literal `${…}` is
+  written [`$${…}`](/concepts/variables/#interpolation).
 
 Every problem is listed, not only the first, and the command exits non-zero if there is any.
 

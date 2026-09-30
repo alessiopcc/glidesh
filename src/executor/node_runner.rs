@@ -1771,6 +1771,30 @@ mod tests {
         }
     }
 
+    /// `validate` checks built-in names against its own list; one a run injects but the
+    /// list lacks would fail a plan that works.
+    #[test]
+    fn validate_knows_every_builtin_a_run_injects() {
+        let host = ResolvedHost {
+            name: "web-1".into(),
+            address: "10.0.0.1".into(),
+            user: "root".into(),
+            port: 22,
+            vars: HashMap::new(),
+            jump: None,
+            run_as: Default::default(),
+        };
+        let os = os_info(OsFamily::Debian, None);
+        let names = host_builtin_vars(&host)
+            .into_iter()
+            .chain(os_builtin_vars(&os))
+            .chain(fact_builtin_vars(&os.facts))
+            .map(|(name, _)| name);
+        for name in names {
+            assert!(crate::is_builtin_var(&name, None), "{name}");
+        }
+    }
+
     #[test]
     fn os_builtins_expose_detected_facts() {
         let os = os_info(OsFamily::Debian, Some(ContainerRuntime::Podman));

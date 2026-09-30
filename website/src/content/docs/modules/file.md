@@ -60,9 +60,10 @@ A name nothing defines fails the upload, naming the template, the line and the n
 `template files/run.sh, line 3: undefined variable HOME (if it is meant for the shell,
 write $${HOME} to keep ${HOME} as is)`. [`glidesh validate`](/cli/#glidesh-validate) finds
 it before any run: it reads each local templated source and reports every `${name}` that
-is not a plan, inventory, secret or prompted variable, a name a task registers, a
-built-in, or the binding of a `${for}` around it — and every `${for}` over a list nothing
-defines. Without `-i`, a name the inventory might set only warns. A `src` that itself
+is not a plan, secret or prompted variable, an inventory variable of every host that runs
+the plan, a name an earlier task registers, a built-in, or the binding of a `${for}` around
+it — and every `${for}` over a list nothing defines. Without `-i`, a name the inventory might
+set only warns ([details](/cli/#glidesh-validate)). A `src` that itself
 contains `${…}` is only known at run time, so it is not read.
 
 ### Forgetting `template`

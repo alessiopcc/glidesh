@@ -101,6 +101,20 @@ pub fn tokens(template: &str) -> Vec<(usize, Token<'_>)> {
         .collect()
 }
 
+/// The field `name` reads from a loop over `binding` — `${h.address}` in `${for h …}` —
+/// or `None`. A binding may itself hold a dot, so it is matched as a whole prefix.
+pub fn bound_field<'a>(name: &'a str, binding: &str) -> Option<&'a str> {
+    name.strip_prefix(binding)?.strip_prefix('.')
+}
+
+/// Why `template` cannot be rendered whatever the variables — an unclosed `${`, a
+/// `${for}` that cannot be read or has no `${endfor}`, a reserved binding — with the line.
+pub fn structure_error(template: &str) -> Option<(usize, String)> {
+    parse(template)
+        .err()
+        .map(|(at, message)| (template[..at].matches('\n').count() + 1, message))
+}
+
 /// A render error, at the byte offset of the `${…}` it is about.
 type AtError = (usize, String);
 
@@ -285,13 +299,12 @@ fn write_nodes<'a>(
         match node {
             Node::Text(text) => out.push_str(text),
             Node::Var { at, name } => {
-                let item = name.split_once('.').and_then(|(head, field)| {
-                    bindings
-                        .iter()
-                        .rev()
-                        .find(|(binding, _, _)| *binding == head)
-                        .map(|(_, collection, item)| (field, *collection, *item))
-                });
+                let item = bindings
+                    .iter()
+                    .rev()
+                    .find_map(|(binding, collection, item)| {
+                        bound_field(name, binding).map(|field| (field, *collection, *item))
+                    });
                 let value = match item {
                     Some((field, collection, item)) => item.get(field).ok_or_else(|| {
                         let mut fields: Vec<&str> = item.keys().map(String::as_str).collect();
@@ -702,6 +715,26 @@ mod tests {
             "home=${HOME} host=web $${x}"
         );
         assert_eq!(interpolate("cost $5, $${}", &vars).unwrap(), "cost $5, ${}");
+    }
+
+    #[test]
+    fn a_binding_holding_a_dot_reads_its_fields() {
+        let data = TemplateData {
+            collections: HashMap::from([(
+                "hosts".to_string(),
+                vec![HashMap::from([("name".to_string(), "a".to_string())])],
+            )]),
+            ..TemplateData::default()
+        };
+        assert_eq!(
+            render(
+                "${for host.item in hosts}${host.item.name}${endfor}",
+                &HashMap::new(),
+                &data
+            )
+            .unwrap(),
+            "a"
+        );
     }
 
     #[test]

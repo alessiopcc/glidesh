@@ -102,7 +102,6 @@ impl FileModule {
         hex_encode(hasher.finalize().as_slice())
     }
 
-    /// Recursively walk a local directory, returning relative paths of all files (sorted).
     /// A file of a recursive copy as the plan names it, `src/<path>`, as `validate` does.
     fn shown_template(src: &str, rel_path: &Path) -> String {
         format!(
@@ -112,6 +111,7 @@ impl FileModule {
         )
     }
 
+    /// Recursively walk a local directory, returning relative paths of all files (sorted).
     fn walk_dir(base: &Path) -> Result<Vec<PathBuf>, GlideshError> {
         let mut files = Vec::new();
         Self::walk_dir_inner(base, base, &mut files)?;
