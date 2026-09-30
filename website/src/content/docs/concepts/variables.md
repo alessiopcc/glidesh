@@ -144,6 +144,50 @@ Inventory global vars → Group vars → Host vars → Plan vars
 
 [Prompted variables](#prompted-variables) take the plan-vars slot.
 
+The [secrets file](#secret-variables) sits under all of them.
+
+### A plan var overrides the host's
+
+Plan vars come last, so a plan's value beats what the inventory says about a specific
+host — even when the plan meant it as a default:
+
+```kdl
+// inventory.kdl
+host "web-1" "10.0.0.1" {
+    vars {
+        customer "acme"
+    }
+}
+```
+
+```kdl
+// plan.kdl
+plan "enroll" {
+    vars {
+        customer "default"   // web-1 is enrolled as "default", not "acme"
+    }
+    step "Enroll" {
+        shell "enroll --customer ${customer}"
+    }
+}
+```
+
+Because that is easy to miss, glidesh warns whenever a plan variable — its own, an
+included plan's, or a `vars-prompt` name — is also set by the inventory or the secrets file
+for a host the plan runs on, and when a [structured variable](#structured-variables) the
+plan defines is also in the secrets file. `glidesh validate -i` reports it, and `glidesh run` prints it
+before connecting to any host, once per plan and variable:
+
+```
+warning: plan 'enroll' overrides 'customer', which is also set by host 'web-1': the plan's value wins, as plan vars merge last
+```
+
+The warning names the variable and where the inventory sets it (the secrets file, the
+inventory's global vars, a group, a host), never a value: either may be a secret. To let
+the inventory decide, leave the variable out of the plan. `validate -p` checks the plan
+against every host of the inventory given with `-i`, since `run -p` may target any of them;
+`validate -i` alone checks each plan the inventory names against the hosts that run it.
+
 Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@fact`, `@item`, `@inventory`, `@group`, `@error`) that user variables cannot collide with — a variable name may not begin with `@`. `${@error.msg}` and `${@error.task}` describe a step's failure to its [`rescue` and `always`](/advanced/rescue/#reading-the-failure) tasks.
 
 ## Built-in Host Variables

@@ -344,6 +344,15 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         vars: secret_vars,
         structured: secret_structured,
     } = parse_secrets(&args.secrets, inv_base_dir)?;
+    // As written, for telling which scope sets a variable a plan overrides.
+    let written_inventory = inventory.clone();
+    let secret_names = config::shadow::SecretNames {
+        vars: secret_vars.keys().cloned().collect(),
+        structured: secret_structured.keys().cloned().collect(),
+    };
+    // A host given with --host takes no inventory variables.
+    let shadowable = written_inventory.as_ref().filter(|_| args.host.is_none());
+    let mut shadows = Vec::new();
     let inventory = inventory.map(|mut inv| {
         add_secret_vars(&mut inv, &secret_vars);
         inv
@@ -373,7 +382,6 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
         config::resolve_includes(&mut plan, plan_base_dir)?;
-        merge_secret_structured(&mut plan, &secret_structured);
 
         apply_mode_override(&mut plan, args.mode.as_deref());
         apply_rollout_override(&mut plan, args.serial.as_deref(), args.max_fail.as_deref())?;
@@ -404,6 +412,15 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                 "Plan mode requires --inventory or --host".to_string(),
             ));
         };
+
+        shadows.extend(config::shadow::shadowed(
+            &plan,
+            fp_path,
+            shadowable,
+            &secret_names,
+            targets.iter().map(|h| h.name.as_str()),
+        ));
+        merge_secret_structured(&mut plan, &secret_structured);
 
         let pn = plan.name.clone();
         run_name_parts.push(pn.clone());
@@ -506,6 +523,13 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             let mut plan = config::parse_plan(&fp_content)?;
             let include_base = resolved_path.parent().unwrap_or(inv_base_dir);
             config::resolve_includes(&mut plan, include_base)?;
+            shadows.extend(config::shadow::shadowed(
+                &plan,
+                &resolved_path,
+                shadowable,
+                &secret_names,
+                filtered_targets.iter().map(|h| h.name.as_str()),
+            ));
             merge_secret_structured(&mut plan, &secret_structured);
 
             apply_mode_override(&mut plan, args.mode.as_deref());
@@ -540,6 +564,9 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     }
     let tags = TagFilter::from_args(args.tags.as_deref(), args.skip_tags.as_deref())?;
     tags.check_known(group_plans.iter().map(|gp| gp.plan.as_ref()))?;
+    for shadow in config::shadow::merged(shadows) {
+        eprintln!("warning: {}", shadow.warning());
+    }
     let answers = answer_prompts(&mut group_plans, &args.vars)?;
     let secrets = open_secrets(
         &args.secrets,
@@ -1043,6 +1070,7 @@ fn validate_plan_file(
     plan_path: &std::path::Path,
     inv_dir: Option<&std::path::Path>,
     known_vars: &std::collections::HashSet<String>,
+    shadows: impl Fn(&config::types::Plan) -> Vec<String>,
 ) -> PlanCheck {
     let fatal = |e: String| PlanCheck {
         problems: vec![e],
@@ -1084,7 +1112,29 @@ fn validate_plan_file(
             || known_vars.contains(name)
             || is_builtin_var(name)
     });
+    check.warnings.extend(shadows(&plan));
     check
+}
+
+/// `validate`'s warnings for `plan`'s variables that the inventory or the secrets file
+/// also sets for one of `hosts`.
+fn shadow_warnings(
+    plan: &config::types::Plan,
+    source: &std::path::Path,
+    inventory: Option<&Inventory>,
+    secret_names: &config::shadow::SecretNames,
+    hosts: &[String],
+) -> Vec<String> {
+    config::shadow::shadowed(
+        plan,
+        source,
+        inventory,
+        secret_names,
+        hosts.iter().map(String::as_str),
+    )
+    .iter()
+    .map(config::shadow::Shadow::warning)
+    .collect()
 }
 
 /// A name in a namespace glidesh injects at run time, whatever the host.
@@ -1134,10 +1184,15 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     // Names a run could define outside the plan: the secrets file's, plus inventory
     // variables — any host's for `-p`, the plan's own hosts' for an inventory `plan=`.
     let mut secret_vars = std::collections::HashSet::new();
+    let mut secret_names = config::shadow::SecretNames::default();
     if let Some(secrets) = secrets_config::discover_secrets_path(None, inv_dir)
         .and_then(|p| secret_store::read(&p).ok())
         .and_then(|c| secrets_config::parse_secrets_file(&c).ok())
     {
+        secret_names
+            .structured
+            .extend(secrets.structured.into_keys());
+        secret_names.vars.extend(secrets.vars.keys().cloned());
         secret_vars.extend(secrets.vars.into_keys());
     }
 
@@ -1146,8 +1201,17 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
         for host in inventory.iter().flat_map(|inv| inv.resolve_targets(None)) {
             known_vars.extend(host.vars.into_keys());
         }
+        // `run -p` may target any of the inventory's hosts.
+        let hosts: Vec<String> = inventory
+            .iter()
+            .flat_map(|inv| inv.resolve_targets(None))
+            .map(|h| h.name)
+            .collect();
+        let shadows = |plan: &config::types::Plan| {
+            shadow_warnings(plan, fp_path, inventory.as_ref(), &secret_names, &hosts)
+        };
         print!("Validating plan '{}'... ", fp_path.display());
-        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars));
+        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars, shadows));
     }
 
     if let Some(ref inv_path) = args.inventory {
@@ -1193,7 +1257,11 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
                 hosts.len(),
                 if hosts.len() == 1 { "" } else { "s" }
             );
-            valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars));
+            let hosts: Vec<String> = hosts.into_iter().map(|h| h.name).collect();
+            let shadows = |plan: &config::types::Plan| {
+                shadow_warnings(plan, &path, Some(inventory), &secret_names, &hosts)
+            };
+            valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars, shadows));
         }
     }
 

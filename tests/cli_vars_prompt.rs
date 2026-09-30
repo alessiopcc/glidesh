@@ -1,5 +1,6 @@
-//! `vars-prompt` answers are settled before `run` connects anywhere: without a terminal a
-//! missing answer must fail at once, never wait for input.
+//! What `run` settles about variables before it connects anywhere: `vars-prompt` answers —
+//! without a terminal a missing answer must fail at once, never wait for input — and the
+//! warning for a plan variable that overrides the inventory.
 //!
 //! Drives the binary with stdin not a terminal; no host or container needed. The inventory
 //! host is a TEST-NET address, so reaching the connection stage would show up as a hang or
@@ -201,4 +202,88 @@ fn a_malformed_var_flag_fails() {
     let (ok, out) = run(dir.path(), &["--var", "release"]);
     assert!(!ok, "{out}");
     assert!(has(&out, "must be name=value"), "{out}");
+}
+
+/// Before connecting, a run warns about each plan variable that overrides what the
+/// inventory sets for a host it targets.
+#[test]
+fn a_run_warns_when_a_plan_variable_overrides_the_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        r#"plan "deploy" {
+    vars {
+        customer "default-customer"
+    }
+    step "s" { shell "echo ${customer}" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        "host \"target\" \"192.0.2.1\" user=\"root\" {\n    vars {\n        customer \"acme\"\n    }\n}\n",
+    )
+    .unwrap();
+    let (_, text) = run(dir.path(), &[]);
+    assert!(
+        text.contains(&squash(
+            "warning: plan 'deploy' overrides 'customer', which is also set by host 'target'"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("acme"), "{text}");
+}
+
+/// Two groups running one plan give one warning with the scopes of both.
+#[test]
+fn a_plan_several_groups_run_warns_once_per_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        r#"plan "deploy" {
+    vars {
+        customer "default-customer"
+    }
+    step "s" { shell "echo ${customer}" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        r#"group "web" plan="plan.kdl" {
+    vars {
+        customer "acme"
+    }
+    host "web-1" "192.0.2.1" user="root"
+}
+group "db" plan="plan.kdl" {
+    host "db-1" "192.0.2.2" user="root" {
+        vars {
+            customer "globex"
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .args([
+            "run",
+            "-i",
+            "inventory.kdl",
+            "--no-tui",
+            "--no-host-key-check",
+        ])
+        .args(["--key", "absent-key"])
+        .timeout(Duration::from_secs(60))
+        .output()
+        .unwrap();
+    let text = squash(&String::from_utf8_lossy(&out.stderr));
+    let warning = squash(
+        "warning: plan 'deploy' overrides 'customer', which is also set by group 'web' and \
+         host 'db-1'",
+    );
+    assert_eq!(text.matches(&warning).count(), 1, "{text}");
 }

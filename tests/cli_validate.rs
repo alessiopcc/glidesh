@@ -405,3 +405,113 @@ fn an_explicit_plan_replaces_the_inventory_plans() {
     assert!(out.status.success(), "{text}");
     assert!(!text.contains("missing.kdl"), "{text}");
 }
+
+const SHADOW_INVENTORY: &str = r#"group "web" plan="plan.kdl" {
+    vars {
+        customer "acme"
+    }
+    host "web-1" "10.0.0.1"
+}
+host "db-1" "10.0.0.2" {
+    vars {
+        tier "gold"
+    }
+}
+"#;
+
+const SHADOW_PLAN: &str = r#"plan "deploy" {
+    vars {
+        customer "default-customer"
+        region "eu"
+    }
+    step "s" { shell "echo ${customer} ${region}" }
+}"#;
+
+/// A plan var beats what the inventory sets for a host: `validate` names the variable and
+/// the scopes, never a value, and still passes.
+#[test]
+fn a_plan_variable_the_inventory_also_sets_warns_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "inventory.kdl", SHADOW_INVENTORY);
+    write(dir.path(), "plan.kdl", SHADOW_PLAN);
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["validate", "-p", "plan.kdl", "-i", "inventory.kdl"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "warning: plan 'deploy' overrides 'customer', which is also set by group 'web'"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("'region'"), "{text}");
+    assert!(
+        !text.contains("acme") && !text.contains("default-customer"),
+        "{text}"
+    );
+}
+
+/// For a plan the inventory names, only the hosts that run it count.
+#[test]
+fn validate_inventory_warns_only_for_the_plans_own_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "inventory.kdl", SHADOW_INVENTORY);
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "deploy" {
+    vars {
+        customer "default-customer"
+        tier "silver"
+    }
+    step "s" { shell "true" }
+}"#,
+    );
+    let (ok, text) = validate_inventory(dir.path());
+    assert!(ok, "{text}");
+    assert!(text.contains("overrides 'customer'"), "{text}");
+    assert!(
+        !text.contains("overrides 'tier'"),
+        "db-1 does not run the plan:\n{text}"
+    );
+}
+
+/// A list variable the plan and the secrets file both define: the plan's wins.
+#[test]
+fn a_structured_plan_variable_the_secrets_file_also_defines_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "inventory.kdl", "host \"web-1\" \"10.0.0.1\"\n");
+    write(
+        dir.path(),
+        "secrets.kdl",
+        "api-keys {\n    - name=\"a\" value=\"secret:v1:one\"\n}\n",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "deploy" {
+    vars {
+        api-keys {
+            - name="placeholder" value="x"
+        }
+    }
+    step "s" { shell "true" }
+}"#,
+    );
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["validate", "-p", "plan.kdl", "-i", "inventory.kdl"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("overrides 'api-keys', which is also set by the secrets file"),
+        "{text}"
+    );
+}
