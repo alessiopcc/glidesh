@@ -1,4 +1,4 @@
-use crate::config::types::{Group, Host, Inventory, JumpHost, RunAsSpec};
+use crate::config::types::{Group, Host, Inventory, Jump, JumpHost, RunAsSpec};
 use crate::error::GlideshError;
 use std::collections::HashMap;
 
@@ -14,6 +14,7 @@ pub fn parse_inventory(input: &str) -> Result<Inventory, GlideshError> {
     let mut groups = Vec::new();
     let mut ungrouped_hosts = Vec::new();
     let mut run_as = RunAsSpec::default();
+    let mut jump = None;
 
     for node in doc.nodes() {
         match node.name().to_string().as_str() {
@@ -25,6 +26,20 @@ pub fn parse_inventory(input: &str) -> Result<Inventory, GlideshError> {
             "run-as" => {
                 // Top-level default escalation: `run-as "root" run-as-method="sudo"`.
                 run_as = parse_run_as_global(node)?;
+            }
+            "jump" => {
+                let parsed = match parse_jump(node, "the inventory")? {
+                    Jump::Via(bastion) => bastion,
+                    Jump::Direct => {
+                        return Err(GlideshError::ConfigParse {
+                            message: "the inventory: `jump #false` belongs on a group or \
+                                      host, to reach it directly; at the top level, leave \
+                                      `jump` out"
+                                .to_string(),
+                        });
+                    }
+                };
+                set_jump(&mut jump, parsed, "the inventory")?;
             }
             "group" => {
                 groups.push(parse_group(node)?);
@@ -79,7 +94,20 @@ pub fn parse_inventory(input: &str) -> Result<Inventory, GlideshError> {
         ungrouped_hosts,
         global_vars,
         run_as,
+        jump,
     })
+}
+
+/// Stores a scope's `jump`: a second one in the same scope is an error, since only one could
+/// apply.
+fn set_jump<T>(slot: &mut Option<T>, jump: T, scope: &str) -> Result<(), GlideshError> {
+    if slot.is_some() {
+        return Err(GlideshError::ConfigParse {
+            message: format!("{scope} has more than one `jump`; keep one"),
+        });
+    }
+    *slot = Some(jump);
+    Ok(())
 }
 
 /// Read the top-level `run-as "<user>" run-as-method="<m>"` node (the global default).
@@ -164,7 +192,8 @@ fn parse_group(node: &kdl::KdlNode) -> Result<Group, GlideshError> {
                     }
                 }
                 "jump" => {
-                    jump = Some(parse_jump(child)?);
+                    let scope = format!("group '{name}'");
+                    set_jump(&mut jump, parse_jump(child, &scope)?, &scope)?;
                 }
                 other => {
                     return Err(GlideshError::ConfigParse {
@@ -235,7 +264,8 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         for child in children.nodes() {
             match child.name().to_string().as_str() {
                 "jump" => {
-                    jump = Some(parse_jump(child)?);
+                    let scope = format!("host '{name}'");
+                    set_jump(&mut jump, parse_jump(child, &scope)?, &scope)?;
                 }
                 "vars" => {
                     if let Some(vc) = child.children() {
@@ -265,48 +295,78 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
     })
 }
 
-fn parse_jump(node: &kdl::KdlNode) -> Result<JumpHost, GlideshError> {
-    let address = node
-        .entries()
-        .iter()
-        .find(|e| e.name().is_none())
-        .and_then(|e| e.value().as_string())
-        .ok_or_else(|| GlideshError::ConfigParse {
-            message: "Jump node requires an address argument".to_string(),
-        })?
-        .to_string();
-
-    let user = node
-        .entries()
-        .iter()
-        .find(|e| e.name().map(|n| n.to_string()).as_deref() == Some("user"))
-        .and_then(|e| e.value().as_string())
-        .map(|s| s.to_string());
-
-    let raw_port = node
-        .entries()
-        .iter()
-        .find(|e| e.name().map(|n| n.to_string()).as_deref() == Some("port"))
-        .and_then(|e| e.value().as_integer());
-
-    let port = match raw_port {
-        Some(p) if (1..=65535).contains(&p) => Some(p as u16),
-        Some(p) => {
-            return Err(GlideshError::ConfigParse {
-                message: format!(
-                    "Invalid port {} in jump node; expected a value between 1 and 65535",
-                    p
-                ),
-            });
-        }
-        None => None,
+/// The `jump` node of `scope`. Anything on it that is not used is an error: a bastion setting
+/// silently dropped would connect the host some other way.
+fn parse_jump(node: &kdl::KdlNode, scope: &str) -> Result<Jump, GlideshError> {
+    let error = |message: String| GlideshError::ConfigParse {
+        message: format!("{scope}: {message}"),
     };
-
-    Ok(JumpHost {
-        address,
-        user,
-        port,
-    })
+    if node.children().is_some() {
+        return Err(error("`jump` takes no child nodes".to_string()));
+    }
+    let mut arguments = Vec::new();
+    let mut user = None;
+    let mut port = None;
+    for entry in node.entries() {
+        let value = entry.value();
+        match entry.name().map(|n| n.value()) {
+            None => arguments.push(value),
+            Some(name @ ("user" | "port"))
+                if (name == "user" && user.is_some()) || (name == "port" && port.is_some()) =>
+            {
+                return Err(error(format!("`jump` sets {name}= twice; keep one")));
+            }
+            Some("user") => {
+                let name = value
+                    .as_string()
+                    .ok_or_else(|| error("`jump` user= must be a string".to_string()))?;
+                user = Some(name.to_string());
+            }
+            Some("port") => {
+                let number = value
+                    .as_integer()
+                    .filter(|p| (1..=65535).contains(p))
+                    .ok_or_else(|| {
+                        error(format!(
+                            "`jump` port={value} must be an integer from 1 to 65535"
+                        ))
+                    })?;
+                port = Some(number as u16);
+            }
+            Some(other) => {
+                return Err(error(format!(
+                    "`jump` has no property '{other}' (it takes user= and port=)"
+                )));
+            }
+        }
+    }
+    match arguments.as_slice() {
+        [only] if only.as_bool() == Some(false) => {
+            if user.is_some() || port.is_some() {
+                return Err(error(
+                    "`jump #false` takes nothing else: it means no jump host".to_string(),
+                ));
+            }
+            Ok(Jump::Direct)
+        }
+        [only] => {
+            let address = only.as_string().ok_or_else(|| {
+                error("`jump` needs a bastion address, or #false for none".to_string())
+            })?;
+            Ok(Jump::Via(JumpHost {
+                address: address.to_string(),
+                user,
+                port,
+            }))
+        }
+        [] => Err(error(
+            "`jump` needs a bastion address, or #false for none".to_string(),
+        )),
+        many => Err(error(format!(
+            "`jump` takes one address, or #false, not {} arguments",
+            many.len()
+        ))),
+    }
 }
 
 fn parse_vars_block(doc: &kdl::KdlDocument) -> Result<HashMap<String, String>, GlideshError> {
@@ -492,7 +552,9 @@ group "web" {
 }
 "#;
         let inv = parse_inventory(input).unwrap();
-        let jump = inv.groups[0].jump.as_ref().unwrap();
+        let Some(Jump::Via(jump)) = &inv.groups[0].jump else {
+            panic!("{:?}", inv.groups[0].jump);
+        };
         assert_eq!(jump.address, "bastion.example.com");
         assert_eq!(jump.user.as_deref(), Some("admin"));
         assert_eq!(jump.port, Some(2222));
@@ -579,6 +641,160 @@ host "standalone" "10.0.0.2"
         let resolved = inv.resolve_targets(None);
         assert!(resolved[0].jump.is_none());
         assert!(resolved[1].jump.is_none());
+    }
+
+    /// Host `jump` beats group `jump` beats the top-level one; `jump #false` reaches the host
+    /// directly at any level below it.
+    #[test]
+    fn a_top_level_jump_applies_to_every_host_unless_a_closer_scope_decides() {
+        let input = r#"
+jump "bastion.example.com" user="ops" port=2222
+group "web" {
+    host "web-1" "10.0.0.1" user="deploy"
+    host "web-2" "10.0.0.2" {
+        jump "host-bastion.example.com"
+    }
+    host "web-3" "10.0.0.3" {
+        jump #false
+    }
+}
+group "dmz" {
+    jump #false
+    host "edge-1" "203.0.113.10"
+    host "edge-2" "203.0.113.11" {
+        jump "edge-bastion.example.com"
+    }
+}
+group "db" {
+    jump "db-bastion.example.com"
+    host "db-1" "10.0.2.1"
+}
+host "solo" "10.0.3.1"
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let jumps: Vec<(String, Option<String>)> = inv
+            .resolve_targets(None)
+            .into_iter()
+            .map(|h| {
+                (
+                    h.name,
+                    h.jump
+                        .map(|j| format!("{}@{}:{}", j.user, j.address, j.port)),
+                )
+            })
+            .collect();
+        let expected = [
+            ("web-1", Some("ops@bastion.example.com:2222")),
+            ("web-2", Some("root@host-bastion.example.com:22")),
+            ("web-3", None),
+            ("edge-1", None),
+            ("edge-2", Some("root@edge-bastion.example.com:22")),
+            ("db-1", Some("root@db-bastion.example.com:22")),
+            ("solo", Some("ops@bastion.example.com:2222")),
+        ];
+        for (name, jump) in expected {
+            let found = jumps.iter().find(|(n, _)| n == name).unwrap();
+            assert_eq!(found.1.as_deref(), jump, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_top_level_jump_defaults_its_user_to_each_hosts() {
+        let input = r#"
+jump "bastion.example.com"
+host "a" "10.0.0.1" user="deploy"
+host "b" "10.0.0.2"
+"#;
+        let resolved = parse_inventory(input).unwrap().resolve_targets(None);
+        assert_eq!(resolved[0].jump.as_ref().unwrap().user, "deploy");
+        assert_eq!(resolved[1].jump.as_ref().unwrap().user, "root");
+    }
+
+    #[test]
+    fn jump_false_is_rejected_where_it_means_nothing_or_carries_more() {
+        for (input, needle) in [
+            (
+                "jump #false\nhost \"a\" \"10.0.0.1\"",
+                "belongs on a group or host",
+            ),
+            (
+                "host \"a\" \"10.0.0.1\" {\n    jump #false user=\"x\"\n}",
+                "host 'a': `jump #false` takes nothing else",
+            ),
+            (
+                "host \"a\" \"10.0.0.1\" {\n    jump #true\n}",
+                "host 'a': `jump` needs a bastion address, or #false for none",
+            ),
+        ] {
+            let err = parse_inventory(input).unwrap_err().to_string();
+            assert!(err.contains(needle), "{input}: {err}");
+        }
+    }
+
+    /// A setting on `jump` that is not used would connect the host some other way than written.
+    #[test]
+    fn a_jump_setting_that_would_be_ignored_is_rejected() {
+        for (jump, needle) in [
+            (
+                r#"jump "a" "b""#,
+                "takes one address, or #false, not 2 arguments",
+            ),
+            (
+                r#"jump "a" #false"#,
+                "takes one address, or #false, not 2 arguments",
+            ),
+            (
+                r#"jump "a" usr="x""#,
+                "has no property 'usr' (it takes user= and port=)",
+            ),
+            (
+                r#"jump "a" port="22""#,
+                "port=\"22\" must be an integer from 1 to 65535",
+            ),
+            (
+                r#"jump "a" port=70000"#,
+                "port=70000 must be an integer from 1 to 65535",
+            ),
+            (r#"jump "a" user=5"#, "user= must be a string"),
+            (
+                r#"jump "a" user="x" user="y""#,
+                "sets user= twice; keep one",
+            ),
+            (
+                r#"jump "a" port=22 port=2222"#,
+                "sets port= twice; keep one",
+            ),
+            (r#"jump "a" { user "x" }"#, "takes no child nodes"),
+            (r#"jump #false { x }"#, "takes no child nodes"),
+        ] {
+            let input = format!("host \"h\" \"10.0.0.1\" {{\n    {jump}\n}}");
+            let err = parse_inventory(&input).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("host 'h': `jump` {needle}")),
+                "{jump}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_jump_in_one_scope_is_rejected() {
+        for (input, scope) in [
+            ("jump \"a\"\njump \"b\"", "the inventory"),
+            (
+                "group \"g\" {\n    jump \"a\"\n    jump #false\n}",
+                "group 'g'",
+            ),
+            (
+                "host \"h\" \"10.0.0.1\" {\n    jump \"a\"\n    jump \"b\"\n}",
+                "host 'h'",
+            ),
+        ] {
+            let err = parse_inventory(input).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("{scope} has more than one `jump`")),
+                "{err}"
+            );
+        }
     }
 
     #[test]

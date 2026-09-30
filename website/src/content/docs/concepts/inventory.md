@@ -65,11 +65,13 @@ A `group` node collects hosts under a name that can be targeted in plans or via 
 
 ## Jump Hosts
 
-A `jump` node configures an SSH bastion (jump host) that glidesh connects through before reaching the target. Jump hosts can be set at group level (inherited by all hosts) or per-host.
+A `jump` node configures an SSH bastion (jump host) that glidesh connects through before reaching the target. Jump hosts can be set once at the top level (every host), at group level (inherited by the group's hosts) or per-host; `jump #false` on a group or host reaches it directly.
 
 ```kdl
+jump "bastion.example.com" user="jumpuser"
+
 group "internal" {
-    jump "bastion.example.com" user="jumpuser" port=2222
+    jump "bastion-internal.example.com" user="jumpuser" port=2222
 
     host "app-1" "10.0.1.10" user="deploy"
     host "app-2" "10.0.1.11" user="deploy"
@@ -79,8 +81,8 @@ group "internal" {
     }
 }
 
-host "db-backup" "10.0.2.50" user="root" {
-    jump "bastion.example.com"
+host "edge" "203.0.113.10" user="deploy" {
+    jump #false
 }
 ```
 
@@ -88,7 +90,7 @@ Optional properties on `jump`:
 - `user` — SSH username for the bastion (defaults to the target host's user)
 - `port` — SSH port on the bastion (default: 22)
 
-**Resolution order:** a host-level `jump` overrides the group-level `jump`. If no `user` is set on the jump node, it inherits the resolved user of the target host.
+**Resolution order:** a host-level `jump` overrides the group-level `jump`, which overrides the top-level one; `jump #false` on a group or host means no bastion for it (at the top level it is an error). If no `user` is set on the jump node, it inherits the resolved user of the target host. See [Jump Hosts](/advanced/jump-hosts/).
 
 ## Privilege Escalation
 

@@ -4,7 +4,8 @@ Connect to internal hosts through an SSH bastion (jump host).
 
 ## Files
 
-- `inventory.kdl` — inventory with a group-level jump host and a per-host override
+- `inventory.kdl` — inventory with one jump host for every host, a per-host override, and a
+  host reached directly
 - `plan.kdl` — simple connectivity check that verifies the tunnel works
 
 ## What It Does
@@ -22,5 +23,6 @@ glidesh run -i examples/jump-host/inventory.kdl -p examples/jump-host/plan.kdl
 ## Customization
 
 - Edit `inventory.kdl` to point at your own bastion and internal hosts
-- The `jump` node on the group applies to all hosts; override it per-host by adding a `jump` child node to any `host` entry
+- The top-level `jump` node applies to every host; a `jump` inside a `group` or `host` overrides
+  it (the most specific wins), and `jump #false` reaches that group or host directly
 - Omit `user` on the jump node to inherit the target host's SSH user

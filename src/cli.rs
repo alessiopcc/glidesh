@@ -492,6 +492,7 @@ mod tests {
             "beats the host's value",
             "$${NAME} writes a literal ${NAME}",
             "Any other parameter on a built-in module is an error",
+            "`jump #false`",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

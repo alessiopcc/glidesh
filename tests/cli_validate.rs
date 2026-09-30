@@ -708,3 +708,33 @@ fn run_refuses_an_unknown_task_parameter_before_anything_else() {
         "asked for the password first: {err}"
     );
 }
+
+#[test]
+fn validate_inventory_accepts_a_top_level_jump_and_rejects_a_top_level_opt_out() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "inventory.kdl",
+        r#"jump "bastion.example.com" user="ops"
+group "dmz" {
+    jump #false
+    host "edge-1" "203.0.113.10"
+}
+host "app-1" "10.0.0.1"
+"#,
+    );
+    let (ok, out) = validate_inventory(dir.path());
+    assert!(ok, "{out}");
+
+    write(
+        dir.path(),
+        "inventory.kdl",
+        "jump #false\nhost \"app-1\" \"10.0.0.1\"\n",
+    );
+    let (ok, out) = validate_inventory(dir.path());
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("the inventory: `jump #false` belongs on a group or host"),
+        "{out}"
+    );
+}

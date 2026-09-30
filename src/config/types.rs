@@ -8,6 +8,14 @@ pub struct JumpHost {
     pub port: Option<u16>,
 }
 
+/// A `jump` node: through a bastion, or `jump #false` to reach the host directly although a
+/// wider scope names one.
+#[derive(Debug, Clone)]
+pub enum Jump {
+    Via(JumpHost),
+    Direct,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedJumpHost {
     pub address: String,
@@ -96,7 +104,7 @@ pub struct Host {
     pub port: Option<u16>,
     pub vars: HashMap<String, String>,
     pub plan: Option<String>,
-    pub jump: Option<JumpHost>,
+    pub jump: Option<Jump>,
     pub run_as: RunAsSpec,
 }
 
@@ -106,7 +114,7 @@ pub struct Group {
     pub hosts: Vec<Host>,
     pub vars: HashMap<String, String>,
     pub plan: Option<String>,
-    pub jump: Option<JumpHost>,
+    pub jump: Option<Jump>,
     pub run_as: RunAsSpec,
 }
 
@@ -116,6 +124,8 @@ pub struct Inventory {
     pub ungrouped_hosts: Vec<Host>,
     pub global_vars: HashMap<String, String>,
     pub run_as: RunAsSpec,
+    /// The top-level `jump`: every host's bastion unless its group or itself names another.
+    pub jump: Option<JumpHost>,
 }
 
 impl Inventory {
@@ -250,10 +260,12 @@ impl Inventory {
             .or_else(|| vars.get("deploy-user").cloned())
             .unwrap_or_else(|| "root".to_string());
 
-        let jump_source = host
-            .jump
-            .as_ref()
-            .or_else(|| group.and_then(|g| g.jump.as_ref()));
+        // The most specific `jump` decides, `jump #false` included.
+        let jump_source = match host.jump.as_ref().or_else(|| group?.jump.as_ref()) {
+            Some(Jump::Via(jump)) => Some(jump),
+            Some(Jump::Direct) => None,
+            None => self.jump.as_ref(),
+        };
         let jump = jump_source.map(|j| ResolvedJumpHost {
             address: j.address.clone(),
             user: j.user.clone().unwrap_or_else(|| user.clone()),
