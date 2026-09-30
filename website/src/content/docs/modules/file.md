@@ -102,10 +102,13 @@ Recursive copy supports:
   destination directory, the directories under it, and the files. A host file or directory
   the source does not have, or that `exclude` leaves out, keeps its own. The check compares
   each of them, directories included, so a second run is `ok`. A path that is a symlink on
-  the host is never followed: `owner`/`group` change the link itself, and the mode skips it.
-  A copy to `/` — however it is named,
-  `/tmp/..` or a symlink to it too — is refused with any of them, before anything is
-  uploaded. Without them, a copy to `/` works.
+  the host is never followed: `owner`/`group` change the link itself (and the check reads
+  the link's), and it gets no mode. A copy to `/` — however it is named, `/tmp/..` or a
+  symlink to it too — is refused with any of them, before anything is uploaded. Without
+  them, a copy to `/` works.
+- **The other kind in the way** — a file on the host where the source has a directory, or a
+  directory where it has a file, keeps the task pending, and without `prune` fails it,
+  naming the path, before anything changes. With `prune` it is removed and replaced.
 - **Per-kind modes** — `dir-mode` and `file-mode` set directories and files apart;
   `mode` sets whichever kind has no mode of its own:
 
@@ -155,15 +158,18 @@ file "/srv/site/" src="site/" recurse=#true prune=#true {
 
 The check reports what would go — the task stays pending, naming the paths, and
 [`--diff`](#--diff) lists every one — so `--dry-run` shows a removal before it happens. A
-directory holding an excluded entry stays, with that entry.
+directory holding an excluded entry stays, with that entry. An entry of another kind than
+the source's at the same path — a file or a link where the source has a directory, a
+directory where it has a file — is removed too, and the source's takes its place.
 
 `prune` deletes, so it is refused, before anything changes, for a destination that is not
 an absolute path at least two directories deep (`/srv/site`, not `/srv`), that goes through
 `.` or `..`, that resolves to `/`, or that is a symlink — and for a source with nothing to
 upload (empty, or all of it excluded), which would empty the destination. It lists the tree
 without following symlinks: a link under the destination is removed as a link, never what
-it points to. A host name it cannot read exactly — not UTF-8, or holding a line break under
-`run-as-method="su"` — stops it, since it could not be compared. With `run-as`, it removes
+it points to. A host name it cannot be sure it read exactly stops it, since it could not be
+compared: one that is not UTF-8, or holds `U+FFFD` (which stands for bytes that were not
+UTF-8) or a carriage return (which `run-as-method="su"` adds to a line break). With `run-as`, it removes
 only from directories no one else can write to, as uploads write only there.
 
 :::note

@@ -2,7 +2,7 @@ use crate::config::template::{TemplateData, defined_references, render_file};
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::file_diff;
-use crate::modules::file_tree::{self, SourceTree, Strays};
+use crate::modules::file_tree::{self, PathStat, SourceTree, Strays};
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -497,20 +497,24 @@ impl FileModule {
         (files, dirs)
     }
 
-    /// Whether a host path's attributes are what `options` asks for.
-    fn attrs_match(
-        options: &file_tree::Options,
-        is_dir: bool,
-        (owner, group, mode): &(String, String, String),
-    ) -> bool {
-        let wanted_mode = if is_dir {
-            options.dir_mode.as_deref()
-        } else {
-            options.file_mode.as_deref()
-        };
-        options.owner.as_deref().is_none_or(|o| o == owner)
-            && options.group.as_deref().is_none_or(|g| g == group)
-            && wanted_mode.is_none_or(|m| normalize_mode(m) == normalize_mode(mode))
+    /// What each managed path is on the host — directories first, then files, as
+    /// [`Self::managed_paths`] lists them — and every one of the other kind than the source's:
+    /// in the way of the upload unless `prune` removes it.
+    async fn managed_stats(
+        ctx: &ModuleContext<'_>,
+        files: &[String],
+        dirs: &[String],
+    ) -> Result<(Vec<Option<PathStat>>, Vec<String>), GlideshError> {
+        let paths: Vec<String> = dirs.iter().chain(files).cloned().collect();
+        let stats = ctx.stat_many(&paths).await?;
+        let mismatched = paths
+            .iter()
+            .zip(&stats)
+            .enumerate()
+            .filter(|(i, (_, stat))| stat.as_ref().is_some_and(|s| s.mismatches(*i < dirs.len())))
+            .map(|(_, (path, _))| path.trim_end_matches('/').to_string())
+            .collect();
+        Ok((stats, mismatched))
     }
 
     /// `paths`, the first few named and the rest counted.
@@ -556,17 +560,22 @@ impl FileModule {
     ) -> Result<ModuleStatus, GlideshError> {
         let options = Self::tree_options(params, dest)?;
         let (resolved_src, tree) = Self::source_tree(ctx, src, &options)?;
+        let (files, dirs) = Self::managed_paths(dest, &tree);
+        let (stats, mismatched) = Self::managed_stats(ctx, &files, &dirs).await?;
+        let (dir_stats, file_stats) = stats.split_at(dirs.len());
 
         let mut content_changed = 0usize;
         let mut diffs = Vec::new();
         let opted_out = Self::diff_opted_out(params)?;
         let show_diffs = ctx.diff && !opted_out;
-
-        for rel_path in &tree.files {
+        for ((rel_path, remote_path), stat) in tree.files.iter().zip(&files).zip(file_stats) {
+            // A directory in the way has no content to compare; it is counted as a mismatch.
+            if stat.as_ref().is_some_and(|s| s.mismatches(false)) {
+                continue;
+            }
             let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
             let local_hash = Self::sha256_hex(&content);
-            let remote_path = file_tree::join(dest, rel_path);
-            match ctx.checksum_remote(&remote_path).await? {
+            match ctx.checksum_remote(remote_path).await? {
                 Some(remote_hash) if remote_hash == local_hash => {}
                 remote_hash => {
                     content_changed += 1;
@@ -575,7 +584,7 @@ impl FileModule {
                             Self::diff_against_remote(
                                 ctx,
                                 params,
-                                &remote_path,
+                                remote_path,
                                 remote_hash.is_some(),
                                 &content,
                             )
@@ -587,37 +596,31 @@ impl FileModule {
         }
 
         // Directories always, since an empty one has no file to upload into it; files only
-        // for their attributes.
-        let (files, dirs) = Self::managed_paths(dest, &tree);
-        let checked: Vec<(String, bool)> = if options.changes_attrs() {
-            dirs.iter()
-                .map(|d| (d.clone(), true))
-                .chain(files.iter().map(|f| (f.clone(), false)))
-                .collect()
+        // for their attributes (a missing one is new content, counted above).
+        let missing_dirs = dir_stats.iter().filter(|stat| stat.is_none()).count();
+        let attrs_changed = if options.changes_attrs() {
+            dir_stats
+                .iter()
+                .map(|stat| (stat, true))
+                .chain(file_stats.iter().map(|stat| (stat, false)))
+                .filter(|(stat, want_dir)| {
+                    stat.as_ref().is_some_and(|s| {
+                        !s.mismatches(*want_dir) && !s.attrs_match(&options, *want_dir)
+                    })
+                })
+                .count()
         } else {
-            dirs.iter().map(|d| (d.clone(), true)).collect()
+            0
         };
-        let paths: Vec<String> = checked.iter().map(|(p, _)| p.clone()).collect();
-        let stats = ctx.stat_many(&paths).await?;
-        let mut missing_dirs = 0usize;
-        let mut attrs_changed = 0usize;
-        for ((_, is_dir), stat) in checked.iter().zip(&stats) {
-            match stat {
-                None if *is_dir => missing_dirs += 1,
-                // A missing file is new content, counted above.
-                None => {}
-                Some(found)
-                    if options.changes_attrs() && !Self::attrs_match(&options, *is_dir, found) =>
-                {
-                    attrs_changed += 1
-                }
-                Some(_) => {}
-            }
-        }
 
         let strays = Self::strays(ctx, &options, &tree, src, dest).await?;
 
-        if content_changed == 0 && attrs_changed == 0 && missing_dirs == 0 && strays.is_empty() {
+        if content_changed == 0
+            && attrs_changed == 0
+            && missing_dirs == 0
+            && mismatched.is_empty()
+            && strays.is_empty()
+        {
             return Ok(ModuleStatus::Satisfied);
         }
         let mut parts = Vec::new();
@@ -629,6 +632,9 @@ impl FileModule {
         }
         if missing_dirs > 0 {
             parts.push(format!("{} new dirs", missing_dirs));
+        }
+        if !mismatched.is_empty() {
+            parts.push(format!("{} of the other kind", mismatched.len()));
         }
         let mut plan = format!("Upload dir {} -> {}", src, dest);
         if !parts.is_empty() {
@@ -758,12 +764,23 @@ impl FileModule {
         let strays = Self::strays(ctx, &options, &tree, src, dest).await?;
 
         let (files, dirs) = Self::managed_paths(dest, &tree);
-        let missing_dirs = ctx
-            .stat_many(&dirs)
-            .await?
-            .iter()
-            .filter(|stat| stat.is_none())
-            .count();
+        let (stats, mismatched) = Self::managed_stats(ctx, &files, &dirs).await?;
+        let removing: std::collections::HashSet<String> = strays.paths(dest).into_iter().collect();
+        if let Some(blocked) = mismatched.iter().find(|p| !removing.contains(*p)) {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "{blocked} is a file on the host where the source has a directory, or a \
+                     directory where it has a file; remove it, or set prune=#true"
+                ),
+            });
+        }
+        let missing_dirs = stats[..dirs.len()].iter().filter(|s| s.is_none()).count();
+
+        // Strays first: one of the other kind would be in the way of the source's.
+        ctx.remove_strays(dest, &strays).await?;
+        let removed = strays.len();
+
         // `/` exists, and `mkdir -p` rejects the "" a copy to it would name.
         let to_create: Vec<&str> = dirs
             .iter()
@@ -784,9 +801,6 @@ impl FileModule {
                 uploaded += 1;
             }
         }
-
-        ctx.remove_strays(dest, &strays).await?;
-        let removed = strays.len();
 
         ctx.set_tree_attrs(dest, &files, &dirs, &options).await?;
 

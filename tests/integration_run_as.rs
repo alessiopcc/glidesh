@@ -550,9 +550,8 @@ async fn test_run_as_recursive_owner_does_not_follow_a_link_in_the_tree() {
     let root = container.ssh_session().await;
     root.exec(
         "printf secret > /etc/glidesh-rvictim && \
-         mkdir -p /srv/glidesh-rtree/uploads && chmod 0777 /srv/glidesh-rtree/uploads && \
-         ln -s /etc/glidesh-rvictim /srv/glidesh-rtree/uploads/evil && \
-         chown -h nobody /srv/glidesh-rtree/uploads/evil",
+         mkdir -p /srv/glidesh-rtree/uploads && \
+         ln -s /etc/glidesh-rvictim /srv/glidesh-rtree/uploads/evil",
     )
     .await
     .unwrap();
@@ -589,6 +588,12 @@ async fn test_run_as_recursive_owner_does_not_follow_a_link_in_the_tree() {
     assert_eq!(
         stat(&root, "/srv/glidesh-rtree/app.conf").await,
         "600 nobody:root"
+    );
+    // The check compares the link's own owner and no mode, as the apply sets them.
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run should be ok, got {status:?}"
     );
 }
 

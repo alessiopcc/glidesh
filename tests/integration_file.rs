@@ -854,3 +854,45 @@ async fn prune_refuses_an_empty_source() {
     assert!(err.to_string().contains("nothing to upload"), "{err}");
     assert!(exists(&ssh, "/srv/glidesh-empty/data").await);
 }
+
+/// A host entry of the other kind than the source's is in the way: without `prune` the
+/// task says so and changes nothing; with it the entry is replaced, and a second run is `ok`.
+#[tokio::test]
+async fn an_entry_of_the_other_kind_is_replaced_only_with_prune() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-kinds/conf.d && touch /srv/glidesh-kinds/conf.d/old /srv/glidesh-kinds/cache")
+        .await
+        .unwrap();
+    let src = source_tree(&[("conf.d", "a file now")]);
+    std::fs::create_dir_all(src.path().join("cache")).unwrap();
+    let dest = "/srv/glidesh-kinds";
+
+    let plain = tree_params(src.path(), dest, vec![]);
+    let ModuleStatus::Pending { plan, .. } = FileModule.check(&ctx, &plain).await.unwrap() else {
+        panic!("entries of the other kind should be pending");
+    };
+    assert!(plan.contains("2 of the other kind"), "{plan}");
+    let err = FileModule.apply(&ctx, &plain).await.unwrap_err();
+    assert!(err.to_string().contains("set prune=#true"), "{err}");
+    assert!(
+        exists(&ssh, "/srv/glidesh-kinds/conf.d/old").await,
+        "nothing changed"
+    );
+
+    let prune = tree_params(src.path(), dest, vec![("prune", ParamValue::Bool(true))]);
+    FileModule.apply(&ctx, &prune).await.unwrap();
+    let kinds = ssh
+        .exec("cd /srv/glidesh-kinds && stat -c '%n %F' cache conf.d")
+        .await
+        .unwrap()
+        .stdout;
+    assert_eq!(kinds, "cache directory\nconf.d regular file\n");
+    let status = FileModule.check(&ctx, &prune).await.unwrap();
+    assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
+}

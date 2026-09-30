@@ -122,7 +122,7 @@ impl ModuleContext<'_> {
     pub async fn stat_many(
         &self,
         paths: &[String],
-    ) -> Result<Vec<Option<(String, String, String)>>, GlideshError> {
+    ) -> Result<Vec<Option<crate::modules::file_tree::PathStat>>, GlideshError> {
         self.ssh.stat_many_as(paths, self.run_as.as_ref()).await
     }
 

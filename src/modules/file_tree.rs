@@ -200,15 +200,17 @@ impl Strays {
     }
 }
 
-/// The entries of `remote` that neither `source` has nor `exclude` leaves out. A directory
-/// holding an excluded entry stays, as that entry does.
+/// The entries of `remote` that neither `source` has, as the same kind, nor `exclude` leaves
+/// out: a file (or link) where the source has a directory, or a directory where it has a
+/// file, goes too, so the source's can take its place. A directory holding an excluded entry
+/// stays, as that entry does.
 pub fn strays(remote: &[(RemoteKind, String)], source: &SourceTree, exclude: &Exclude) -> Strays {
-    let kept: HashSet<&str> = source
-        .files
-        .iter()
-        .chain(&source.dirs)
-        .map(String::as_str)
-        .collect();
+    let files: HashSet<&str> = source.files.iter().map(String::as_str).collect();
+    let dirs_kept: HashSet<&str> = source.dirs.iter().map(String::as_str).collect();
+    let kept = |kind: &RemoteKind, path: &str| match kind {
+        RemoteKind::Dir => dirs_kept.contains(path),
+        RemoteKind::Other => files.contains(path),
+    };
     // Directories above an excluded entry: removing them would remove it.
     let mut holding: HashSet<&str> = HashSet::new();
     for (_, path) in remote.iter().filter(|(_, path)| exclude.excludes(path)) {
@@ -221,7 +223,7 @@ pub fn strays(remote: &[(RemoteKind, String)], source: &SourceTree, exclude: &Ex
     let mut strays = Strays::default();
     let mut dirs = BTreeSet::new();
     for (kind, path) in remote {
-        if kept.contains(path.as_str()) || exclude.excludes(path) {
+        if kept(kind, path) || exclude.excludes(path) {
             continue;
         }
         match kind {
@@ -241,6 +243,61 @@ pub fn strays(remote: &[(RemoteKind, String)], source: &SourceTree, exclude: &Ex
             .then(a.cmp(b))
     });
     strays
+}
+
+/// What a path of the destination is on the host, as a recursive upload's check sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Dir,
+    File,
+    /// A symlink: an upload writes through it, and its attributes are its own — `chown -h`
+    /// changes the link, and no mode is set on it.
+    Link,
+}
+
+/// A path's kind, owner, group and mode; a link's own owner and group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathStat {
+    pub kind: PathKind,
+    pub owner: String,
+    pub group: String,
+    pub mode: String,
+}
+
+impl PathStat {
+    /// Whether the host has something other than what the source puts at this path: a file
+    /// where it has a directory, or a directory where it has a file. A link may stand for
+    /// either, as an upload through it does.
+    pub fn mismatches(&self, want_dir: bool) -> bool {
+        match self.kind {
+            PathKind::Dir => !want_dir,
+            PathKind::File => want_dir,
+            PathKind::Link => false,
+        }
+    }
+
+    /// Whether the attributes `options` asks for hold. A link has no mode of its own.
+    pub fn attrs_match(&self, options: &Options, want_dir: bool) -> bool {
+        let wanted_mode = match (self.kind, want_dir) {
+            (PathKind::Link, _) => None,
+            (_, true) => options.dir_mode.as_deref(),
+            (_, false) => options.file_mode.as_deref(),
+        };
+        options.owner.as_deref().is_none_or(|o| o == self.owner)
+            && options.group.as_deref().is_none_or(|g| g == self.group)
+            && wanted_mode.is_none_or(|m| same_mode(m, &self.mode))
+    }
+}
+
+/// Modes compared without leading zeros: `0644` and `644` are one mode.
+fn same_mode(a: &str, b: &str) -> bool {
+    let bare = |m: &'_ str| -> String {
+        match m.trim_start_matches('0') {
+            "" => "0".to_string(),
+            rest => rest.to_string(),
+        }
+    };
+    bare(a) == bare(b)
 }
 
 /// `prune` with nothing to upload would empty the destination — a source directory left
@@ -547,6 +604,46 @@ mod tests {
             "/srv/app/gone/deep/f",
             "joined once, without a double slash"
         );
+    }
+
+    /// A host entry of the other kind is in the way of the source's: prune removes it.
+    #[test]
+    fn an_entry_of_the_other_kind_is_a_stray() {
+        let source = SourceTree {
+            files: vec!["conf".into()],
+            dirs: vec!["cache".into()],
+        };
+        let found = strays(
+            &remote(&[("conf", true), ("conf/old", false), ("cache", false)]),
+            &source,
+            &Exclude::default(),
+        );
+        assert_eq!(found.files, ["cache", "conf/old"]);
+        assert_eq!(found.dirs, ["conf"]);
+    }
+
+    #[test]
+    fn a_link_has_no_mode_and_stands_for_either_kind() {
+        let stat = |kind| PathStat {
+            kind,
+            owner: "app".into(),
+            group: "app".into(),
+            mode: "777".into(),
+        };
+        let options = Options {
+            owner: Some("app".into()),
+            file_mode: Some("0640".into()),
+            dir_mode: Some("0750".into()),
+            ..Options::default()
+        };
+        assert!(stat(PathKind::Link).attrs_match(&options, false));
+        assert!(!stat(PathKind::File).attrs_match(&options, false));
+        assert!(!stat(PathKind::Link).mismatches(true));
+        assert!(stat(PathKind::File).mismatches(true));
+        assert!(stat(PathKind::Dir).mismatches(false));
+        let mut dir = stat(PathKind::Dir);
+        dir.mode = "750".into();
+        assert!(dir.attrs_match(&options, true));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::config::types::{ResolvedJumpHost, ResolvedRunAs, RunAsMethod};
 use crate::error::GlideshError;
 use crate::modules::escalation;
-use crate::modules::file_tree::{RemoteKind, Strays, join as tree_join};
+use crate::modules::file_tree::{PathKind, PathStat, RemoteKind, Strays, join as tree_join};
 use crate::ssh::HostKeyPolicy;
 use crate::ssh::handler::{ForwardRegistry, SshHandler, new_forward_registry};
 use crate::util::shell_escape;
@@ -1430,46 +1430,24 @@ printf '%s' "$d""#;
         self.each_chunk_as("rmdir --", &dirs, run_as, true).await
     }
 
-    /// The owner, group and mode of each of `paths` (a symlink's target, as uploads write
-    /// through it), `None` for one that does not exist.
+    /// What each of `paths` is on the host — kind, owner, group, mode; a link's own — or
+    /// `None` for one that does not exist.
     pub async fn stat_many_as(
         &self,
         paths: &[String],
         run_as: Option<&ResolvedRunAs>,
-    ) -> Result<Vec<Option<(String, String, String)>>, GlideshError> {
+    ) -> Result<Vec<Option<PathStat>>, GlideshError> {
         let mut found = Vec::with_capacity(paths.len());
         for chunk in path_chunks(paths) {
-            let list: Vec<String> = chunk.iter().map(|p| shell_escape(p)).collect();
-            // BSD stat for macOS targets, as in `get_file_attrs`.
-            let script = format!(
-                "printf '%s\\n' {TREE_MARK}\n\
-                 for p in {}; do stat -L -c '%U %G %a' -- \"$p\" 2>/dev/null || \
-                 stat -L -f '%Su %Sg %Lp' -- \"$p\" 2>/dev/null || echo -; done",
-                list.join(" ")
-            );
-            let out = self
-                .exec_as(&format!("sh -c {}", shell_escape(&script)), run_as)
-                .await?;
-            let lines: Vec<&str> = after_tree_mark(&out.stdout)
-                .unwrap_or_default()
-                .lines()
-                .map(str::trim)
-                .collect();
-            if out.exit_code != 0 || lines.len() != chunk.len() {
-                return Err(GlideshError::Module {
+            let out = self.exec_as(&stat_listing(chunk), run_as).await?;
+            let stats = (out.exit_code == 0)
+                .then(|| parse_stats(&out.stdout, chunk.len()))
+                .flatten()
+                .ok_or_else(|| GlideshError::Module {
                     module: "file".to_string(),
                     message: format!("stat of {} paths failed: {}", chunk.len(), out.failure()),
-                });
-            }
-            found.extend(lines.into_iter().map(|line| {
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                match parts.as_slice() {
-                    [owner, group, mode] => {
-                        Some((owner.to_string(), group.to_string(), mode.to_string()))
-                    }
-                    _ => None,
-                }
-            }));
+                })?;
+            found.extend(stats);
         }
         Ok(found)
     }
@@ -1518,14 +1496,17 @@ printf '%s' "$d""#;
             (None, None) => {}
         }
         // Last, because chown and chgrp clear setuid/setgid bits. `find -type` leaves out a
-        // path that is a symlink, which `chmod` would follow.
+        // path that is a symlink, which `chmod` would follow. A symlinked directory on the way
+        // to a path is followed, as uploads follow it: escalated, `create_dirs_as` has
+        // already held every directory of the tree to [`trusted_paths`].
         for (mode, paths, kind) in [(dir_mode, dirs, "d"), (file_mode, files, "f")] {
             if let Some(mode) = mode {
+                // No `-P`: busybox `find` does not take it, and not following is the default.
                 let tail = format!(
                     "-prune -type {kind} -exec chmod {} {{}} +",
                     shell_escape(mode)
                 );
-                self.each_chunk_around_as("find -P", &tail, paths, run_as)
+                self.each_chunk_around_as("find", &tail, paths, run_as)
                     .await?;
             }
         }
@@ -1960,15 +1941,67 @@ fn parse_tree_listing(dest: &str, stdout: &str) -> Result<Vec<(RemoteKind, Strin
     Ok(listed)
 }
 
+/// The command printing, after [`TREE_MARK`], one line per path: `-` when it does not exist,
+/// else its kind (`d`, `f`, `l` — tested first, so a link is itself) then owner, group and
+/// mode, a link's own. `dest/` names the directory a symlinked destination points to.
+fn stat_listing(paths: &[String]) -> String {
+    let list: Vec<String> = paths.iter().map(|p| shell_escape(p)).collect();
+    // BSD stat for macOS targets, as in `get_file_attrs`.
+    let script = format!(
+        "printf '%s\\n' {TREE_MARK}\n\
+         for p in {}; do\n\
+         if [ -L \"$p\" ]; then k=l; elif [ -d \"$p\" ]; then k=d; \
+         elif [ -e \"$p\" ]; then k=f; else echo -; continue; fi\n\
+         a=$(stat -c '%U %G %a' -- \"$p\" 2>/dev/null || \
+         stat -f '%Su %Sg %Lp' -- \"$p\" 2>/dev/null) || a='? ? ?'\n\
+         printf '%s %s\\n' \"$k\" \"$a\"\n\
+         done",
+        list.join(" ")
+    );
+    format!("sh -c {}", shell_escape(&script))
+}
+
+/// The `count` lines [`stat_listing`] printed, or `None` when they are not all there.
+fn parse_stats(stdout: &str, count: usize) -> Option<Vec<Option<PathStat>>> {
+    let lines: Vec<&str> = after_tree_mark(stdout)?.lines().map(str::trim).collect();
+    if lines.len() != count {
+        return None;
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            if line == "-" {
+                return Some(None);
+            }
+            let parts: Vec<&str> = line.split(' ').collect();
+            let [kind, owner, group, mode] = parts.as_slice() else {
+                return None;
+            };
+            let kind = match *kind {
+                "d" => PathKind::Dir,
+                "f" => PathKind::File,
+                "l" => PathKind::Link,
+                _ => return None,
+            };
+            Some(Some(PathStat {
+                kind,
+                owner: owner.to_string(),
+                group: group.to_string(),
+                mode: mode.to_string(),
+            }))
+        })
+        .collect()
+}
+
 /// `paths` in runs whose quoted length stays well under the 128 KiB a single argument may
-/// have — an escalated command is one `sh -c` argument.
+/// have — an escalated command is one `sh -c` argument, and quoting grows a path.
 fn path_chunks(paths: &[String]) -> Vec<&[String]> {
     const LIMIT: usize = 32 * 1024;
     let mut chunks = Vec::new();
     let mut start = 0;
     let mut length = 0;
     for (i, path) in paths.iter().enumerate() {
-        let quoted = path.len() + 3;
+        let quoted = shell_escape(path).len() + 1;
         if i > start && length + quoted > LIMIT {
             chunks.push(&paths[start..i]);
             start = i;
@@ -2251,9 +2284,69 @@ mod tests {
         assert!(chunks.len() > 1);
         assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), paths.len());
         for chunk in chunks {
-            assert!(chunk.iter().map(|p| p.len() + 3).sum::<usize>() <= 32 * 1024);
+            let quoted: usize = chunk.iter().map(|p| shell_escape(p).len() + 1).sum();
+            assert!(quoted <= 32 * 1024);
         }
         assert!(path_chunks(&[]).is_empty());
+
+        // Every `'` quotes to four bytes: the limit counts what is sent.
+        let quotes: Vec<String> = (0..20)
+            .map(|_| format!("/srv/{}", "'".repeat(2000)))
+            .collect();
+        for chunk in path_chunks(&quotes) {
+            let quoted: usize = chunk.iter().map(|p| shell_escape(p).len() + 1).sum();
+            assert!(quoted <= 32 * 1024, "{quoted}");
+        }
+    }
+
+    #[test]
+    fn stats_read_the_kind_and_a_link_s_own_attributes() {
+        let stdout = format!(
+            "Password: \r\n{TREE_MARK}\r\nd root root 755\r\n-\r\nl app app 777\r\nf root root 644\r\n"
+        );
+        let stats = parse_stats(&stdout, 4).unwrap();
+        assert_eq!(stats[0].as_ref().unwrap().kind, PathKind::Dir);
+        assert!(stats[1].is_none());
+        assert_eq!(stats[2].as_ref().unwrap().kind, PathKind::Link);
+        assert_eq!(stats[3].as_ref().unwrap().mode, "644");
+        assert!(parse_stats(&stdout, 3).is_none(), "a line short");
+        assert!(parse_stats("d root root 755\n", 1).is_none(), "no mark");
+    }
+
+    /// The batch stat, run by a real `sh`: kinds, a link's own owner, a missing path.
+    #[cfg(unix)]
+    #[test]
+    fn the_stat_listing_tells_each_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink(&dir, tmp.path().join("l")).unwrap();
+        let paths: Vec<String> = [
+            format!("{}/", tmp.path().join("l").display()),
+            dir.join("f").display().to_string(),
+            tmp.path().join("l").display().to_string(),
+            tmp.path().join("missing").display().to_string(),
+        ]
+        .to_vec();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(stat_listing(&paths))
+            .output()
+            .unwrap();
+        let stats = parse_stats(&String::from_utf8_lossy(&out.stdout), paths.len()).unwrap();
+        let kinds: Vec<Option<PathKind>> =
+            stats.iter().map(|s| s.as_ref().map(|s| s.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(PathKind::Dir),
+                Some(PathKind::File),
+                Some(PathKind::Link),
+                None
+            ],
+            "a symlinked destination named `dest/` is its directory"
+        );
     }
 
     #[cfg(unix)]
