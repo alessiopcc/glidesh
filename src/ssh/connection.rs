@@ -2012,15 +2012,17 @@ fn parse_stats(stdout: &str, count: usize) -> Option<Vec<Option<PathStat>>> {
         .collect()
 }
 
-/// `paths` in runs whose quoted length stays well under the 128 KiB a single argument may
-/// have — an escalated command is one `sh -c` argument, and quoting grows a path.
+/// `paths` in runs short enough for the 128 KiB a single argument may have: an escalated
+/// command is one argument, and a path in it is quoted up to three times — in its list, in
+/// the `sh -c` script, and by the escalation's wrapper — each `'` growing fourfold. The limit
+/// leaves room for the script and a guard's copy of the parent directories.
 fn path_chunks(paths: &[String]) -> Vec<&[String]> {
     const LIMIT: usize = 32 * 1024;
     let mut chunks = Vec::new();
     let mut start = 0;
     let mut length = 0;
     for (i, path) in paths.iter().enumerate() {
-        let quoted = shell_escape(path).len() + 1;
+        let quoted = sent_length(path);
         if i > start && length + quoted > LIMIT {
             chunks.push(&paths[start..i]);
             start = i;
@@ -2032,6 +2034,11 @@ fn path_chunks(paths: &[String]) -> Vec<&[String]> {
         chunks.push(&paths[start..]);
     }
     chunks
+}
+
+/// How long `path` is once quoted three times over, as [`path_chunks`] counts it.
+fn sent_length(path: &str) -> usize {
+    shell_escape(&shell_escape(&shell_escape(path))).len() + 1
 }
 
 /// The error for a recursive owner, group or mode change whose destination is `/`: it
@@ -2322,18 +2329,23 @@ mod tests {
         assert!(chunks.len() > 1);
         assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), paths.len());
         for chunk in chunks {
-            let quoted: usize = chunk.iter().map(|p| shell_escape(p).len() + 1).sum();
+            let quoted: usize = chunk.iter().map(|p| sent_length(p)).sum();
             assert!(quoted <= 32 * 1024);
         }
         assert!(path_chunks(&[]).is_empty());
 
-        // Every `'` quotes to four bytes: the limit counts what is sent.
-        let quotes: Vec<String> = (0..20)
-            .map(|_| format!("/srv/{}", "'".repeat(2000)))
+        // A `'` grows fourfold at each of three quotings: the limit counts what is sent.
+        let quotes: Vec<String> = (0..40)
+            .map(|_| format!("/srv/{}", "'".repeat(100)))
             .collect();
-        for chunk in path_chunks(&quotes) {
-            let quoted: usize = chunk.iter().map(|p| shell_escape(p).len() + 1).sum();
-            assert!(quoted <= 32 * 1024, "{quoted}");
+        let chunks = path_chunks(&quotes);
+        assert!(chunks.len() > 1, "6 KiB each once quoted three times");
+        for chunk in chunks {
+            let sent: usize = chunk
+                .iter()
+                .map(|p| shell_escape(&shell_escape(&shell_escape(p))).len() + 1)
+                .sum();
+            assert!(sent <= 32 * 1024, "{sent}");
         }
     }
 

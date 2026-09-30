@@ -508,6 +508,21 @@ impl FileModule {
     ) -> Result<(Vec<Option<PathStat>>, Vec<(String, bool)>), GlideshError> {
         let paths: Vec<String> = dirs.iter().chain(files).cloned().collect();
         let stats = ctx.stat_many(&paths).await?;
+        // `dest/` does not resolve when `dest` is a file or a link to nowhere, which would
+        // read as a directory still to create: asked again without the slash, it is refused,
+        // as nothing it holds could be kept and prune removes only what is under `dest`.
+        if stats[0].is_none() {
+            let bare = dirs[0].trim_end_matches('/').to_string();
+            if !bare.is_empty() && ctx.stat_many(std::slice::from_ref(&bare)).await?[0].is_some() {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!(
+                        "{bare} is not a directory on the host; a recursive upload needs one \
+                         there, so remove it first"
+                    ),
+                });
+            }
+        }
         let mismatched = paths
             .iter()
             .zip(&stats)
@@ -521,13 +536,27 @@ impl FileModule {
         Ok((stats, mismatched))
     }
 
+    /// A host path as output shows it: a name may hold a line break or a terminal escape,
+    /// which would forge output lines or drive the terminal.
+    fn shown_path(path: &str) -> String {
+        path.chars()
+            .map(|c| {
+                if c.is_control() {
+                    c.escape_default().to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect()
+    }
+
     /// `paths`, the first few named and the rest counted.
     fn some_paths(paths: &[String]) -> String {
         const SHOWN: usize = 5;
         let mut shown = paths
             .iter()
             .take(SHOWN)
-            .cloned()
+            .map(|p| Self::shown_path(p))
             .collect::<Vec<_>>()
             .join(", ");
         if paths.len() > SHOWN {
@@ -670,17 +699,19 @@ impl FileModule {
                 Self::some_paths(&removed)
             ));
         }
-        let removals: Vec<String> = removed.iter().map(|p| format!("remove {p}")).collect();
+        let removals: Vec<String> = removed
+            .iter()
+            .map(|p| format!("remove {}", Self::shown_path(p)))
+            .collect();
 
         if !ctx.diff {
             return Ok(ModuleStatus::pending(plan));
         }
-        let mut shown = Vec::new();
+        // Removals first: the diff is cut at a line limit, and they are what cannot be undone.
+        let mut shown = removals;
         if opted_out && content_changed > 0 {
             shown.push(file_diff::opted_out(dest));
         }
-        // Removals first: the diff is cut at a line limit, and they are what cannot be undone.
-        shown.extend(removals);
         shown.extend(diffs);
         if shown.is_empty() {
             Ok(ModuleStatus::pending(plan))
@@ -982,5 +1013,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("'diff' must be #true or #false"), "{err}");
+    }
+
+    /// A host name can hold a line break or a terminal escape: shown escaped, it can neither
+    /// forge an output line nor drive the terminal.
+    #[test]
+    fn a_host_path_is_shown_with_its_control_characters_escaped() {
+        assert_eq!(
+            FileModule::shown_path("/srv/a\nremove /etc\u{1b}[2J"),
+            "/srv/a\\nremove /etc\\u{1b}[2J"
+        );
+        assert_eq!(
+            FileModule::shown_path("/srv/caf\u{e9} x"),
+            "/srv/caf\u{e9} x"
+        );
     }
 }

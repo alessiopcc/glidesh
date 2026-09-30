@@ -108,7 +108,9 @@ Recursive copy supports:
   them, a copy to `/` works.
 - **The other kind in the way** — a file on the host where the source has a directory, or a
   directory where it has a file, keeps the task pending, and without `prune` fails it,
-  naming the path, before anything changes. With `prune` it is removed and replaced.
+  naming the path, before anything changes. With `prune` it is removed and replaced. A
+  destination that is itself a file, or a link to nothing, is refused either way. A host
+  name shown in the output has its control characters escaped (`\n`, `\u{1b}`).
 - **Per-kind modes** — `dir-mode` and `file-mode` set directories and files apart;
   `mode` sets whichever kind has no mode of its own:
 

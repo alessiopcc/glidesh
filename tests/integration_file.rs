@@ -963,3 +963,32 @@ async fn prune_replaces_a_link_to_a_directory_where_the_source_has_a_file() {
     let status = FileModule.check(&ctx, &params).await.unwrap();
     assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
 }
+
+/// A file where the destination directory should be is refused, not taken for a directory
+/// still to create.
+#[tokio::test]
+async fn a_destination_that_is_a_file_is_refused() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec(
+        "mkdir -p /srv && echo keep > /srv/glidesh-notadir && ln -s /nowhere /srv/glidesh-dangling",
+    )
+    .await
+    .unwrap();
+    let src = source_tree(&[("a", "a")]);
+    for dest in ["/srv/glidesh-notadir", "/srv/glidesh-dangling"] {
+        let params = tree_params(src.path(), dest, vec![("prune", ParamValue::Bool(true))]);
+        let err = FileModule.check(&ctx, &params).await.unwrap_err();
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "{dest}: {err}"
+        );
+    }
+    let kept = ssh.exec("cat /srv/glidesh-notadir").await.unwrap();
+    assert_eq!(kept.stdout, "keep\n");
+}
