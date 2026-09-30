@@ -17,168 +17,327 @@ pub struct TemplateData {
 
 /// Render a template with full support for `${for}` loops and `${var}` interpolation.
 ///
-/// Two-pass process:
-/// 1. Expand `${for binding in collection}...${endfor}` blocks using `data.collections`
-/// 2. Interpolate remaining `${var}` references using `vars`
+/// One pass over the template: `${for binding in collection}…${endfor}` repeats its body
+/// for each item of `data.collections`, `${binding.field}` reads the item, and any other
+/// `${name}` reads `data.extra_vars`, then `vars` — so user variables cannot spoof the
+/// reserved `@inventory.*`/`@group.*` ones. A value is written as it is, never read as
+/// template text.
+///
+/// `$${` writes a literal `${`: `$${HOME}` renders as `${HOME}`, and is no reference, nor
+/// a loop.
 pub fn render(
     template: &str,
     vars: &HashMap<String, String>,
     data: &TemplateData,
 ) -> Result<String, GlideshError> {
-    let expanded = expand_for_blocks(template, data)?;
-    if data.extra_vars.is_empty() {
-        interpolate(&expanded, vars)
+    render_at(template, vars, data).map_err(|(_, message)| GlideshError::TemplateError { message })
+}
+
+/// [`render`] for a template file: an error names `source` and the line of the `${…}` it
+/// is about.
+pub fn render_file(
+    template: &str,
+    vars: &HashMap<String, String>,
+    data: &TemplateData,
+    source: &str,
+) -> Result<String, GlideshError> {
+    render_at(template, vars, data).map_err(|(at, message)| {
+        let line = template[..at].matches('\n').count() + 1;
+        let message = match message.strip_prefix("Undefined variable: ") {
+            Some(name) => format!(
+                "template {source}, line {line}: undefined variable {name}{}",
+                literal_hint(name)
+            ),
+            None => format!("template {source}, line {line}: {message}"),
+        };
+        GlideshError::TemplateError { message }
+    })
+}
+
+/// For a name that reads like the shell's rather than glidesh's — upper case, or holding a
+/// character a glidesh variable does not (`${VAR:-default}`) — how to write it literally.
+pub fn literal_hint(name: &str) -> String {
+    let shell_like = !name.chars().any(|c| c.is_ascii_lowercase())
+        || name.contains(|c: char| !(c.is_ascii_alphanumeric() || "-_.@".contains(c)));
+    if shell_like {
+        format!(" (if it is meant for the shell, write $${{{name}}} to keep ${{{name}}} as is)")
     } else {
-        // User vars first, then extra_vars override — this prevents user-defined
-        // keys from spoofing reserved @inventory.*/@group.* references.
-        let mut merged = vars.clone();
-        merged.extend(data.extra_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
-        interpolate(&expanded, &merged)
+        String::new()
     }
 }
 
-/// Expand all `${for <binding> in <collection>}...${endfor}` blocks.
-///
-/// For each block, iterates over the named collection and resolves `${binding.field}`
-/// references from the current item. Other `${...}` references are left untouched
-/// for the subsequent `interpolate()` pass.
-fn expand_for_blocks(template: &str, data: &TemplateData) -> Result<String, GlideshError> {
-    let mut result = template.to_string();
+/// A `${…}` in a template, as [`render`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Token<'a> {
+    /// `${name}`: a variable, or `${binding.field}` inside a loop over `binding`.
+    Var(&'a str),
+    /// `$${name}`: a literal `${name}`.
+    Escaped(&'a str),
+    /// `${for binding in collection}`, with its `separator="…"`.
+    For {
+        binding: &'a str,
+        collection: &'a str,
+        separator: Option<&'a str>,
+    },
+    /// `${endfor}`.
+    EndFor,
+    /// A `${for …}` that cannot be read, and why.
+    Invalid(String),
+}
 
-    while let Some(for_start) = result.find("${for ") {
-        let header_end =
-            result[for_start..]
-                .find('}')
-                .ok_or_else(|| GlideshError::TemplateError {
-                    message: "Unclosed ${for ...} tag".to_string(),
-                })?
-                + for_start;
+/// Every [`Token`] in `template`, with its 1-based line, in order — for `validate`, which
+/// checks a template without rendering it. A `${` never closed ends the list, as it fails
+/// the render.
+pub fn tokens(template: &str) -> Vec<(usize, Token<'_>)> {
+    let (found, _) = lex(template);
+    let (mut line, mut counted) = (1, 0);
+    found
+        .into_iter()
+        .map(|(at, _, token)| {
+            line += template[counted..at].matches('\n').count();
+            counted = at;
+            (line, token)
+        })
+        .collect()
+}
 
-        let header = &result[for_start + 2..header_end]; // "for binding in collection ..."
-        let parts: Vec<&str> = header.split_whitespace().collect();
-        if parts.len() < 4 || parts[0] != "for" || parts[2] != "in" {
-            return Err(GlideshError::TemplateError {
-                message: format!(
-                    "Invalid for-loop syntax: expected '${{for <binding> in <collection>}}', got '${{{}}}' ",
-                    header
-                ),
-            });
+/// A render error, at the byte offset of the `${…}` it is about.
+type AtError = (usize, String);
+
+/// Each `${…}` of `template` with its byte offset and length, in order, and the error of a
+/// `${` never closed, which ends the scan.
+fn lex(template: &str) -> (Vec<(usize, usize, Token<'_>)>, Option<AtError>) {
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = template[from..].find('$') {
+        let at = from + offset;
+        let rest = &template[at..];
+        if let Some(after) = rest.strip_prefix("$${") {
+            let name = after.find('}').map_or("", |end| &after[..end]);
+            found.push((at, 3, Token::Escaped(name)));
+            // What follows `$${` is text, and a `${` in it is a reference again.
+            from = at + 3;
+            continue;
         }
-        let binding = parts[1];
-        // The for-binding introduces `${binding.*}` into the loop body's scope, so it is a
-        // variable-name declaration like any other: it may not shadow a reserved `@` namespace.
-        if binding.starts_with('@') {
-            return Err(GlideshError::TemplateError {
-                message: format!(
-                    "for-loop binding '{}' cannot use the reserved '@' namespace",
-                    binding
-                ),
-            });
-        }
-        let collection_name = parts[3];
-
-        // Parse optional separator="..." from the header
-        let separator = if let Some(start) = header.find("separator=\"") {
-            let val_start = start + "separator=\"".len();
-            let val_end =
-                header[val_start..]
-                    .find('"')
-                    .ok_or_else(|| GlideshError::TemplateError {
-                        message: "Unclosed separator value in for-loop (missing closing quote)"
-                            .to_string(),
-                    })?
-                    + val_start;
-            Some(&header[val_start..val_end])
-        } else {
-            None
+        let Some(after) = rest.strip_prefix("${") else {
+            from = at + 1;
+            continue;
         };
+        let Some(end) = after.find('}') else {
+            let message = if after.starts_with("for ") {
+                "Unclosed ${for ...} tag".to_string()
+            } else {
+                format!("Unclosed variable reference: ${{{after}")
+            };
+            return (found, Some((at, message)));
+        };
+        let inner = &after[..end];
+        let token = if inner.starts_with("for ") {
+            for_header(inner)
+        } else if inner == "endfor" {
+            Token::EndFor
+        } else {
+            Token::Var(inner)
+        };
+        found.push((at, 2 + end + 1, token));
+        from = at + 2 + end + 1;
+    }
+    (found, None)
+}
 
-        // Find matching ${endfor}, tracking nesting depth
-        let body_start = header_end + 1;
-        let mut depth = 1u32;
-        let mut search_pos = body_start;
-        let mut endfor_start = None;
+/// A `${for binding in collection [separator="…"]}` header, without its `${` and `}`.
+fn for_header(header: &str) -> Token<'_> {
+    let parts: Vec<&str> = header.split_whitespace().collect();
+    if parts.len() < 4 || parts[2] != "in" {
+        return Token::Invalid(format!(
+            "Invalid for-loop syntax: expected '${{for <binding> in <collection>}}', got '${{{header}}}'"
+        ));
+    }
+    let separator = match header.find("separator=\"") {
+        Some(start) => {
+            let value = &header[start + "separator=\"".len()..];
+            match value.find('"') {
+                Some(end) => Some(&value[..end]),
+                None => {
+                    return Token::Invalid(
+                        "Unclosed separator value in for-loop (missing closing quote)".to_string(),
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+    Token::For {
+        binding: parts[1],
+        collection: parts[3],
+        separator,
+    }
+}
 
-        while depth > 0 {
-            let next_for = result[search_pos..].find("${for ");
-            let next_endfor = result[search_pos..].find("${endfor}");
+/// A template read into its loops.
+enum Node<'a> {
+    Text(&'a str),
+    Var {
+        at: usize,
+        name: &'a str,
+    },
+    For {
+        at: usize,
+        binding: &'a str,
+        collection: &'a str,
+        separator: Option<&'a str>,
+        body: Vec<Node<'a>>,
+    },
+}
 
-            match (next_for, next_endfor) {
-                (_, None) => {
-                    return Err(GlideshError::TemplateError {
-                        message: format!("Missing ${{endfor}} for loop over '{}'", collection_name),
+fn parse(template: &str) -> Result<Vec<Node<'_>>, AtError> {
+    struct Open<'a> {
+        at: usize,
+        binding: &'a str,
+        collection: &'a str,
+        separator: Option<&'a str>,
+        outer: Vec<Node<'a>>,
+    }
+    let (found, unclosed) = lex(template);
+    let mut open: Vec<Open> = Vec::new();
+    let mut nodes = Vec::new();
+    let mut text_from = 0;
+    for (at, len, token) in found {
+        if at > text_from {
+            nodes.push(Node::Text(&template[text_from..at]));
+        }
+        text_from = at + len;
+        match token {
+            Token::Escaped(_) => nodes.push(Node::Text("${")),
+            Token::Var(name) => nodes.push(Node::Var { at, name }),
+            Token::Invalid(message) => return Err((at, message)),
+            // The binding introduces `${binding.*}` into the loop body's scope, so it is a
+            // variable-name declaration like any other: it may not shadow a reserved `@` one.
+            Token::For { binding, .. } if binding.starts_with('@') => {
+                return Err((
+                    at,
+                    format!("for-loop binding '{binding}' cannot use the reserved '@' namespace"),
+                ));
+            }
+            Token::For {
+                binding,
+                collection,
+                separator,
+            } => open.push(Open {
+                at,
+                binding,
+                collection,
+                separator,
+                outer: std::mem::take(&mut nodes),
+            }),
+            Token::EndFor => match open.pop() {
+                Some(loop_) => {
+                    let body = std::mem::replace(&mut nodes, loop_.outer);
+                    nodes.push(Node::For {
+                        at: loop_.at,
+                        binding: loop_.binding,
+                        collection: loop_.collection,
+                        separator: loop_.separator,
+                        body,
                     });
                 }
-                (Some(f), Some(e)) if f < e => {
-                    depth += 1;
-                    search_pos += f + 6; // skip past "${for "
-                }
-                (_, Some(e)) => {
-                    depth -= 1;
-                    if depth == 0 {
-                        endfor_start = Some(search_pos + e);
-                    } else {
-                        search_pos += e + 9; // skip past "${endfor}"
-                    }
-                }
-            }
+                None => nodes.push(Node::Var { at, name: "endfor" }),
+            },
         }
-
-        let endfor_start = endfor_start.unwrap();
-        let endfor_end = endfor_start + 9; // "${endfor}".len()
-
-        let body = &result[body_start..endfor_start];
-
-        let items =
-            data.collections
-                .get(collection_name)
-                .ok_or_else(|| GlideshError::TemplateError {
-                    message: format!("Undefined collection in for-loop: {}", collection_name),
-                })?;
-
-        let binding_prefix = format!("${{{binding}."); // "${binding."
-        let mut rendered_items: Vec<String> = Vec::new();
-
-        for item in items {
-            let mut line = body.to_string();
-            while let Some(ref_start) = line.find(&binding_prefix) {
-                let ref_end =
-                    line[ref_start..]
-                        .find('}')
-                        .ok_or_else(|| GlideshError::TemplateError {
-                            message: format!("Unclosed ${{{}.…}} reference", binding),
-                        })?
-                        + ref_start;
-
-                let field = &line[ref_start + binding_prefix.len()..ref_end];
-                let value = item.get(field).ok_or_else(|| GlideshError::TemplateError {
-                    message: format!(
-                        "Undefined field '{}' in collection '{}' (available: {})",
-                        field,
-                        collection_name,
-                        item.keys().cloned().collect::<Vec<_>>().join(", ")
-                    ),
-                })?;
-
-                line = format!("{}{}{}", &line[..ref_start], value, &line[ref_end + 1..]);
-            }
-            rendered_items.push(line);
-        }
-
-        let expanded = match separator {
-            Some(sep) => rendered_items.join(sep),
-            None => rendered_items.concat(),
-        };
-
-        result = format!(
-            "{}{}{}",
-            &result[..for_start],
-            expanded,
-            &result[endfor_end..]
-        );
     }
+    if let Some(error) = unclosed {
+        return Err(error);
+    }
+    if let Some(loop_) = open.pop() {
+        return Err((
+            loop_.at,
+            format!("Missing ${{endfor}} for loop over '{}'", loop_.collection),
+        ));
+    }
+    if text_from < template.len() {
+        nodes.push(Node::Text(&template[text_from..]));
+    }
+    Ok(nodes)
+}
 
-    Ok(result)
+/// The loops a node sits in, innermost last: binding, collection, and the current item.
+type Bindings<'a> = Vec<(&'a str, &'a str, &'a HashMap<String, String>)>;
+
+fn render_at(
+    template: &str,
+    vars: &HashMap<String, String>,
+    data: &TemplateData,
+) -> Result<String, AtError> {
+    let nodes = parse(template)?;
+    let mut out = String::with_capacity(template.len());
+    write_nodes(&nodes, vars, data, &Vec::new(), &mut out)?;
+    Ok(out)
+}
+
+fn write_nodes<'a>(
+    nodes: &'a [Node<'a>],
+    vars: &'a HashMap<String, String>,
+    data: &'a TemplateData,
+    bindings: &Bindings<'a>,
+    out: &mut String,
+) -> Result<(), AtError> {
+    for node in nodes {
+        match node {
+            Node::Text(text) => out.push_str(text),
+            Node::Var { at, name } => {
+                let item = name.split_once('.').and_then(|(head, field)| {
+                    bindings
+                        .iter()
+                        .rev()
+                        .find(|(binding, _, _)| *binding == head)
+                        .map(|(_, collection, item)| (field, *collection, *item))
+                });
+                let value = match item {
+                    Some((field, collection, item)) => item.get(field).ok_or_else(|| {
+                        let mut fields: Vec<&str> = item.keys().map(String::as_str).collect();
+                        fields.sort_unstable();
+                        (
+                            *at,
+                            format!(
+                                "Undefined field '{field}' in collection '{collection}' \
+                                 (available: {})",
+                                fields.join(", ")
+                            ),
+                        )
+                    })?,
+                    None => data
+                        .extra_vars
+                        .get(*name)
+                        .or_else(|| vars.get(*name))
+                        .ok_or_else(|| (*at, format!("Undefined variable: {name}")))?,
+                };
+                out.push_str(value);
+            }
+            Node::For {
+                at,
+                binding,
+                collection,
+                separator,
+                body,
+            } => {
+                let items = data.collections.get(*collection).ok_or_else(|| {
+                    (
+                        *at,
+                        format!("Undefined collection in for-loop: {collection}"),
+                    )
+                })?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(separator.unwrap_or(""));
+                    }
+                    let mut inner = bindings.clone();
+                    inner.push((binding, collection, item));
+                    write_nodes(body, vars, data, &inner, out)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The `${name}` references in `content` whose name `is_defined` accepts, sorted and without
@@ -192,6 +351,10 @@ pub fn defined_references(content: &[u8], is_defined: impl Fn(&str) -> bool) -> 
     let mut rest = content;
     while let Some(start) = rest.windows(2).position(|w| w == b"${") {
         let after = &rest[start + 2..];
+        if start > 0 && rest[start - 1] == b'$' {
+            rest = after;
+            continue;
+        }
         let Some(end) = after.iter().position(|&b| b == b'}') else {
             break;
         };
@@ -214,29 +377,26 @@ pub fn defined_references(content: &[u8], is_defined: impl Fn(&str) -> bool) -> 
     found.into_iter().collect()
 }
 
-/// Interpolate `${var-name}` patterns in a string using the provided variables.
+/// Interpolate `${var-name}` patterns in a string using the provided variables. `$${`
+/// writes a literal `${`.
 pub fn interpolate(template: &str, vars: &HashMap<String, String>) -> Result<String, GlideshError> {
     let mut result = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-            let mut var_name = String::new();
-            let mut found_close = false;
-            for ch in chars.by_ref() {
-                if ch == '}' {
-                    found_close = true;
-                    break;
-                }
-                var_name.push(ch);
-            }
-            if !found_close {
+    let mut at = 0;
+    while let Some(offset) = template[at..].find('$') {
+        let start = at + offset;
+        result.push_str(&template[at..start]);
+        let rest = &template[start..];
+        if rest.starts_with("$${") {
+            result.push_str("${");
+            at = start + 3;
+        } else if let Some(after) = rest.strip_prefix("${") {
+            let Some(end) = after.find('}') else {
                 return Err(GlideshError::TemplateError {
-                    message: format!("Unclosed variable reference: ${{{}", var_name),
+                    message: format!("Unclosed variable reference: ${{{}", after),
                 });
-            }
-            match vars.get(&var_name) {
+            };
+            let var_name = &after[..end];
+            match vars.get(var_name) {
                 Some(value) => result.push_str(value),
                 None => {
                     return Err(GlideshError::TemplateError {
@@ -244,11 +404,13 @@ pub fn interpolate(template: &str, vars: &HashMap<String, String>) -> Result<Str
                     });
                 }
             }
+            at = start + 2 + end + 1;
         } else {
-            result.push(ch);
+            result.push('$');
+            at = start + 1;
         }
     }
-
+    result.push_str(&template[at..]);
     Ok(result)
 }
 
@@ -306,6 +468,12 @@ mod tests {
     fn only_names_glidesh_defines_are_reported() {
         let env = "CUDA_VISIBLE_DEVICES=${cuda-devices}\nHOME_DIR=${HOME}\n";
         assert_eq!(refs(env, &["cuda-devices"]), ["cuda-devices"]);
+    }
+
+    #[test]
+    fn an_escaped_reference_is_not_reported() {
+        assert!(refs("a=$${cuda-devices}", &["cuda-devices"]).is_empty());
+        assert_eq!(refs("$${x} ${x}", &["x"]), ["x"]);
     }
 
     #[test]
@@ -524,5 +692,155 @@ mod tests {
         let template = "[${for x in items separator=\",\"}${x.name}${endfor}]";
         let result = render(template, &vars, &data).unwrap();
         assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn an_escaped_reference_is_written_literally_next_to_a_real_one() {
+        let vars = HashMap::from([("name".to_string(), "web".to_string())]);
+        assert_eq!(
+            interpolate("home=$${HOME} host=${name} $$${x}", &vars).unwrap(),
+            "home=${HOME} host=web $${x}"
+        );
+        assert_eq!(interpolate("cost $5, $${}", &vars).unwrap(), "cost $5, ${}");
+    }
+
+    #[test]
+    fn an_escaped_loop_is_text_and_a_loop_body_keeps_its_escapes() {
+        let data = TemplateData {
+            collections: HashMap::from([(
+                "hosts".to_string(),
+                vec![HashMap::from([("name".to_string(), "a".to_string())])],
+            )]),
+            ..TemplateData::default()
+        };
+        let template = "$${for x in y}$${endfor}\n\
+                        ${for h in hosts}${h.name} $${h.name} $${HOME}${endfor}";
+        assert_eq!(
+            render(template, &HashMap::new(), &data).unwrap(),
+            "${for x in y}${endfor}\na ${h.name} ${HOME}"
+        );
+    }
+
+    #[test]
+    fn tokens_are_read_as_render_reads_them() {
+        let found = tokens("a ${x}\n$${HOME}\n${for h in @group.web}${h.addr}${endfor} $${a${b}}");
+        assert_eq!(
+            found,
+            [
+                (1, Token::Var("x")),
+                (2, Token::Escaped("HOME")),
+                (
+                    3,
+                    Token::For {
+                        binding: "h",
+                        collection: "@group.web",
+                        separator: None,
+                    }
+                ),
+                (3, Token::Var("h.addr")),
+                (3, Token::EndFor),
+                (3, Token::Escaped("a${b")),
+                (3, Token::Var("b")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_undefined_variable_in_a_template_file_names_the_file_and_line() {
+        let err = render_file(
+            "one\ntwo ${PATH}\n",
+            &HashMap::new(),
+            &TemplateData::default(),
+            "files/run.sh",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("template files/run.sh, line 2: undefined variable PATH"),
+            "{err}"
+        );
+        assert!(err.contains("write $${PATH}"), "{err}");
+
+        let err = render_file(
+            "${db-host}",
+            &HashMap::new(),
+            &TemplateData::default(),
+            "app.conf",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("line 1: undefined variable db-host"), "{err}");
+        assert!(
+            !err.contains("$${"),
+            "a glidesh-like name gets no shell hint: {err}"
+        );
+    }
+
+    #[test]
+    fn a_value_ending_in_a_dollar_does_not_escape_what_follows() {
+        let data = TemplateData {
+            collections: HashMap::from([(
+                "c".to_string(),
+                vec![HashMap::from([
+                    ("a".to_string(), "x$".to_string()),
+                    ("b".to_string(), "B".to_string()),
+                ])],
+            )]),
+            ..TemplateData::default()
+        };
+        let vars = HashMap::from([
+            ("s".to_string(), "S".to_string()),
+            ("p".to_string(), "pa$".to_string()),
+        ]);
+        assert_eq!(
+            render(
+                "${for h in c}${h.a}${h.b}|${h.a}${s}${endfor} ${p}${s}",
+                &vars,
+                &data
+            )
+            .unwrap(),
+            "x$B|x$S pa$S"
+        );
+    }
+
+    #[test]
+    fn an_error_points_at_the_reference_it_is_about() {
+        let data = TemplateData {
+            collections: HashMap::from([(
+                "c".to_string(),
+                vec![HashMap::from([("b".to_string(), "B".to_string())])],
+            )]),
+            ..TemplateData::default()
+        };
+        let err = render_file(
+            "${for h in c}${h.b}${endfor}\n\n${h.b}\n",
+            &HashMap::new(),
+            &data,
+            "a.conf",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("template a.conf, line 3: undefined variable h.b"),
+            "{err}"
+        );
+
+        let err = render_file(
+            "ok\n${for h in c}\n${h.missing}${endfor}",
+            &HashMap::new(),
+            &data,
+            "a.conf",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("line 3: Undefined field 'missing' in collection 'c' (available: b)"),
+            "{err}"
+        );
+
+        let err = render_file("\n${for x of c}", &HashMap::new(), &data, "a.conf")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line 2: Invalid for-loop syntax"), "{err}");
     }
 }

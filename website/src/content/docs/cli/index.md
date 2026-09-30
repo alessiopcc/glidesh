@@ -315,6 +315,13 @@ without contacting a host:
   step's own tasks may not use `${@error.*}`, and one in its [`rescue` or
   `always`](/advanced/rescue/) may not use `${@item}`: neither exists there, so the task
   would fail when it runs.
+- **Templates read only what is defined.** Each local `file` template is read as a run
+  renders it: every `${name}` must be a plan, inventory, secrets-file or prompted variable,
+  a name a task registers, a built-in, or the binding of a `${for}` around it, and every
+  `${for}` must be well formed and loop over a list the plan or the secrets file defines, or
+  an inventory group. A problem names the template, the line and the name. Without `-i`, a
+  name the inventory might set is a warning instead. A literal `${…}` is written
+  [`$${…}`](/concepts/variables/#interpolation).
 
 Every problem is listed, not only the first, and the command exits non-zero if there is any.
 
@@ -327,7 +334,10 @@ with `-p` does not use them.
 It also **warns**, without failing, when a `file` upload without `template #true` contains
 `${name}` for a variable a run would define — a plan variable, any host's inventory variable
 when `-i` is given, a secrets-file name, or a built-in such as `${@host.name}`. See
-[Forgetting `template`](/modules/file/#forgetting-template).
+[Forgetting `template`](/modules/file/#forgetting-template). It warns, too, about a
+`$${name}` — in a template, a task's resource or parameters, or an `until=` command — whose
+`name` is a defined variable: it writes a literal `${name}` now, where it used to write `$`
+and then the value.
 
 `validate` never connects, so it cannot tell whether a plan's settings suit a particular host —
 whether a package exists in its repositories, a service is installed, or a container would be

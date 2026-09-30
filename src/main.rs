@@ -1070,6 +1070,8 @@ fn validate_plan_file(
     plan_path: &std::path::Path,
     inv_dir: Option<&std::path::Path>,
     known_vars: &std::collections::HashSet<String>,
+    known_lists: &std::collections::HashSet<String>,
+    with_inventory: bool,
     shadows: impl Fn(&config::types::Plan) -> Vec<String>,
 ) -> PlanCheck {
     let fatal = |e: String| PlanCheck {
@@ -1106,12 +1108,35 @@ fn validate_plan_file(
     check
         .problems
         .extend(config::checks::template_scope_problems(&plan, plan_dir));
-    check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, |name| {
+    let is_defined = |name: &str| {
         plan.vars.contains_key(name)
             || plan.prompts.iter().any(|p| p.name == name)
             || known_vars.contains(name)
             || is_builtin_var(name)
-    });
+    };
+    check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, is_defined);
+    let templates =
+        config::checks::template_reference_findings(&plan, plan_dir, is_defined, |list| {
+            plan.structured_vars.contains_key(list) || known_lists.contains(list)
+        });
+    check.problems.extend(templates.problems);
+    // Without an inventory, the name may still be a host's variable.
+    if with_inventory {
+        check.problems.extend(templates.undefined);
+    } else {
+        check.warnings.extend(
+            templates
+                .undefined
+                .into_iter()
+                .map(|undefined| format!("{undefined}, unless the inventory sets it (pass -i)")),
+        );
+    }
+    check.warnings.extend(templates.warnings);
+    check
+        .warnings
+        .extend(config::checks::escaped_parameter_warnings(
+            &plan, is_defined,
+        ));
     check.warnings.extend(shadows(&plan));
     check
 }
@@ -1211,7 +1236,14 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
             shadow_warnings(plan, fp_path, inventory.as_ref(), &secret_names, &hosts)
         };
         print!("Validating plan '{}'... ", fp_path.display());
-        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars, shadows));
+        valid &= report_plan(&validate_plan_file(
+            fp_path,
+            inv_dir,
+            &known_vars,
+            &secret_names.structured,
+            inventory.is_some(),
+            shadows,
+        ));
     }
 
     if let Some(ref inv_path) = args.inventory {
@@ -1261,7 +1293,14 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
             let shadows = |plan: &config::types::Plan| {
                 shadow_warnings(plan, &path, Some(inventory), &secret_names, &hosts)
             };
-            valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars, shadows));
+            valid &= report_plan(&validate_plan_file(
+                &path,
+                inv_dir,
+                &known_vars,
+                &secret_names.structured,
+                true,
+                shadows,
+            ));
         }
     }
 

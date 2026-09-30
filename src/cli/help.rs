@@ -160,7 +160,9 @@ VARIABLES
             ${@inventory.<host>.address|user|port|vars.<name>}
             ${@error.msg} ${@error.task} (in rescue and always blocks only)
   In `file` templates: ${for h in @group.web}${h.address}${endfor}, and loops over list
-  variables. An undefined variable fails the task.
+  variables. An undefined variable fails the task; `validate` finds it in local templates.
+  $${NAME} writes a literal ${NAME} (a shell's ${HOME}, a unit's ${MAINPID}), in templates
+  and parameters alike; it is no reference.
 
 PROMPTED VARIABLES (vars-prompt)
   vars-prompt {

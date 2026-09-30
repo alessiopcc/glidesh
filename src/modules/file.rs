@@ -1,4 +1,4 @@
-use crate::config::template::{TemplateData, defined_references, render};
+use crate::config::template::{TemplateData, defined_references, render_file};
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::file_diff;
@@ -81,7 +81,7 @@ impl FileModule {
                 module: "file".to_string(),
                 message: format!("Template file '{}' is not valid UTF-8: {}", src, e),
             })?;
-            let rendered = render(&text, vars, template_data)?;
+            let rendered = render_file(&text, vars, template_data, src)?;
             Ok(rendered.into_bytes())
         } else {
             Ok(content)
@@ -103,6 +103,15 @@ impl FileModule {
     }
 
     /// Recursively walk a local directory, returning relative paths of all files (sorted).
+    /// A file of a recursive copy as the plan names it, `src/<path>`, as `validate` does.
+    fn shown_template(src: &str, rel_path: &Path) -> String {
+        format!(
+            "{}/{}",
+            src.trim_end_matches('/'),
+            rel_path.to_string_lossy().replace('\\', "/")
+        )
+    }
+
     fn walk_dir(base: &Path) -> Result<Vec<PathBuf>, GlideshError> {
         let mut files = Vec::new();
         Self::walk_dir_inner(base, base, &mut files)?;
@@ -470,7 +479,12 @@ impl FileModule {
                         module: "file".to_string(),
                         message: format!("Failed to read '{}': {}", local_path.display(), e),
                     })?;
-                let rendered = render(&text, ctx.vars, ctx.template_data)?;
+                let rendered = render_file(
+                    &text,
+                    ctx.vars,
+                    ctx.template_data,
+                    &Self::shown_template(src, rel_path),
+                )?;
                 rendered.into_bytes()
             } else {
                 std::fs::read(&local_path).map_err(|e| GlideshError::Module {
@@ -693,7 +707,12 @@ impl FileModule {
                         module: "file".to_string(),
                         message: format!("Failed to read '{}': {}", local_path.display(), e),
                     })?;
-                let rendered = render(&text, ctx.vars, ctx.template_data)?;
+                let rendered = render_file(
+                    &text,
+                    ctx.vars,
+                    ctx.template_data,
+                    &Self::shown_template(src, rel_path),
+                )?;
                 rendered.into_bytes()
             } else {
                 std::fs::read(&local_path).map_err(|e| GlideshError::Module {

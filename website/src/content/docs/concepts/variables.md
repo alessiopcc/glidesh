@@ -384,3 +384,22 @@ step "Configure" {
 The `${var-name}` syntax performs string replacement. It works in all module parameters and in template files (when `template=#true` on the file module).
 
 Undefined variables cause an error — glidesh does not silently pass through unresolved references.
+
+### A literal `${`
+
+To keep a `${…}` for something else to read — a shell script's `${HOME}`, a unit file's
+`${MAINPID}`, a Dockerfile's `${VERSION}` — write it with a doubled `$`: `$${HOME}` becomes
+`${HOME}`, and is no reference. The same holds in module parameters, `until=` commands and
+`file` templates — not in `when=` conditions, which only read variables — and `$${for …}` /
+`$${endfor}` are text, not a loop:
+
+```kdl
+shell "echo $${HOME} deploys ${app}"   // runs: echo ${HOME} deploys api
+```
+
+:::caution[Earlier versions]
+Before `$${` was an escape, `$${name}` meant a `$` followed by the value of `name`. Now it
+writes `${name}` as it is. For a `$` before a value, put the `$` into the value.
+`glidesh validate` warns about a `$${name}` whose `name` is a defined variable, as that
+is likely the old meaning.
+:::
