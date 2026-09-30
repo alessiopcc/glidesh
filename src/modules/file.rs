@@ -498,21 +498,25 @@ impl FileModule {
     }
 
     /// What each managed path is on the host — directories first, then files, as
-    /// [`Self::managed_paths`] lists them — and every one of the other kind than the source's:
-    /// in the way of the upload unless `prune` removes it.
+    /// [`Self::managed_paths`] lists them — and every one of the other kind than the source's,
+    /// with whether the host's is a directory: in the way of the upload unless `prune`
+    /// removes it.
     async fn managed_stats(
         ctx: &ModuleContext<'_>,
         files: &[String],
         dirs: &[String],
-    ) -> Result<(Vec<Option<PathStat>>, Vec<String>), GlideshError> {
+    ) -> Result<(Vec<Option<PathStat>>, Vec<(String, bool)>), GlideshError> {
         let paths: Vec<String> = dirs.iter().chain(files).cloned().collect();
         let stats = ctx.stat_many(&paths).await?;
         let mismatched = paths
             .iter()
             .zip(&stats)
             .enumerate()
-            .filter(|(i, (_, stat))| stat.as_ref().is_some_and(|s| s.mismatches(*i < dirs.len())))
-            .map(|(_, (path, _))| path.trim_end_matches('/').to_string())
+            .filter_map(|(i, (path, stat))| {
+                let stat = stat.as_ref().filter(|s| s.mismatches(i < dirs.len()))?;
+                let host_dir = matches!(stat.kind, file_tree::PathKind::Dir);
+                Some((path.trim_end_matches('/').to_string(), host_dir))
+            })
             .collect();
         Ok((stats, mismatched))
     }
@@ -539,6 +543,7 @@ impl FileModule {
         tree: &SourceTree,
         src: &str,
         dest: &str,
+        mismatched: &[(String, bool)],
     ) -> Result<Strays, GlideshError> {
         if !options.prune {
             return Ok(Strays::default());
@@ -548,7 +553,19 @@ impl FileModule {
             message,
         })?;
         let listed = ctx.list_tree(dest).await?;
-        Ok(file_tree::strays(&listed, tree, &options.exclude))
+        let mut strays = file_tree::strays(&listed, tree, &options.exclude);
+        // A link to a directory where the source has a file lists as a non-directory — the
+        // kind the source has there — so only its stat tells it is in the way.
+        let prefix = format!("{}/", dest.trim_end_matches('/'));
+        for (path, _) in mismatched.iter().filter(|(_, host_dir)| !host_dir) {
+            if let Some(rel) = path.strip_prefix(&prefix).filter(|rel| !rel.is_empty()) {
+                if !strays.files.iter().any(|file| file == rel) {
+                    strays.files.push(rel.to_string());
+                }
+            }
+        }
+        strays.files.sort();
+        Ok(strays)
     }
 
     async fn check_recurse(
@@ -569,11 +586,12 @@ impl FileModule {
         let opted_out = Self::diff_opted_out(params)?;
         let show_diffs = ctx.diff && !opted_out;
         for ((rel_path, remote_path), stat) in tree.files.iter().zip(&files).zip(file_stats) {
+            // Rendered first, so a template error shows before anything is removed.
+            let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
             // A directory in the way has no content to compare; it is counted as a mismatch.
             if stat.as_ref().is_some_and(|s| s.mismatches(false)) {
                 continue;
             }
-            let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
             let local_hash = Self::sha256_hex(&content);
             match ctx.checksum_remote(remote_path).await? {
                 Some(remote_hash) if remote_hash == local_hash => {}
@@ -613,7 +631,7 @@ impl FileModule {
             0
         };
 
-        let strays = Self::strays(ctx, &options, &tree, src, dest).await?;
+        let strays = Self::strays(ctx, &options, &tree, src, dest, &mismatched).await?;
 
         if content_changed == 0
             && attrs_changed == 0
@@ -661,8 +679,9 @@ impl FileModule {
         if opted_out && content_changed > 0 {
             shown.push(file_diff::opted_out(dest));
         }
-        shown.extend(diffs);
+        // Removals first: the diff is cut at a line limit, and they are what cannot be undone.
         shown.extend(removals);
+        shown.extend(diffs);
         if shown.is_empty() {
             Ok(ModuleStatus::pending(plan))
         } else {
@@ -724,10 +743,12 @@ impl FileModule {
         let (resolved_src, tree) = Self::source_tree(ctx, src, &options)?;
         let template = Self::is_template(params);
 
+        // Every file read — every template rendered — before anything changes: a failure here
+        // must not come after `prune` removed something.
         let mut warnings = Vec::new();
-        if !template {
-            for rel_path in &tree.files {
-                let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
+        for rel_path in &tree.files {
+            let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
+            if !template {
                 let label = Self::shown_template(src, Path::new(rel_path));
                 warnings.extend(Self::literal_reference_warning(ctx, &label, &content));
             }
@@ -741,7 +762,9 @@ impl FileModule {
                 dest,
                 tree.files.len()
             );
-            let strays = Self::strays(ctx, &options, &tree, src, dest).await?;
+            let (files, dirs) = Self::managed_paths(dest, &tree);
+            let (_, mismatched) = Self::managed_stats(ctx, &files, &dirs).await?;
+            let strays = Self::strays(ctx, &options, &tree, src, dest, &mismatched).await?;
             if !strays.is_empty() {
                 output.push_str(&format!(" and remove {}", strays.len()));
             }
@@ -761,12 +784,11 @@ impl FileModule {
         }
         // Listed before uploading, so a destination prune refuses is refused before any
         // change; what the upload adds is the source's, never a stray.
-        let strays = Self::strays(ctx, &options, &tree, src, dest).await?;
-
         let (files, dirs) = Self::managed_paths(dest, &tree);
         let (stats, mismatched) = Self::managed_stats(ctx, &files, &dirs).await?;
+        let strays = Self::strays(ctx, &options, &tree, src, dest, &mismatched).await?;
         let removing: std::collections::HashSet<String> = strays.paths(dest).into_iter().collect();
-        if let Some(blocked) = mismatched.iter().find(|p| !removing.contains(*p)) {
+        if let Some((blocked, _)) = mismatched.iter().find(|(p, _)| !removing.contains(p)) {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
                 message: format!(

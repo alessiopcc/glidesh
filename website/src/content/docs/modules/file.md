@@ -156,8 +156,12 @@ file "/srv/site/" src="site/" recurse=#true prune=#true {
 }
 ```
 
-The check reports what would go — the task stays pending, naming the paths, and
-[`--diff`](#--diff) lists every one — so `--dry-run` shows a removal before it happens. A
+The check reports what would go — the task stays pending, its reason giving the count and
+the first paths, and [`--diff`](#--diff) listing them, as `remove <path>` lines ahead of the
+content diffs, up to the diff's 500-line limit — so `--dry-run` shows a removal before it
+happens. Every template is rendered before anything is removed, so a template error fails
+the task with the host unchanged. A symlinked directory on the way to the destination is
+allowed, but its real path must be two directories deep too. A
 directory holding an excluded entry stays, with that entry. An entry of another kind than
 the source's at the same path — a file or a link where the source has a directory, a
 directory where it has a file — is removed too, and the source's takes its place.

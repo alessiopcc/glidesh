@@ -1884,15 +1884,16 @@ fn after_tree_mark(stdout: &str) -> Option<&str> {
 }
 
 /// The command listing every entry under `dest` for [`SshSession::list_tree_as`]: after
-/// [`TREE_MARK`], NUL-separated names, each after `d` (a directory) or `f`, then `@@` and
-/// find's status — a name may hold any other byte. `@@link` and `@@none` stand for a `dest`
-/// that is a symlink or missing.
+/// [`TREE_MARK`], NUL-separated entries — `dest`'s real path after `r`, then each name after
+/// `d` (a directory) or `f` — then `@@` and find's status; a name may hold any other byte.
+/// `@@link` and `@@none` stand for a `dest` that is a symlink or missing.
 fn tree_listing(dest: &str) -> String {
     let script = format!(
         "printf '%s\\n' {TREE_MARK}\nd={}\n\
          if [ -L \"$d\" ]; then printf '@@link'; exit 0; fi\n\
          [ -d \"$d\" ] || {{ printf '@@none'; exit 0; }}\n\
          cd \"$d\" || exit 1\n\
+         printf 'r%s\\0' \"$(pwd -P)\"\n\
          find . -mindepth 1 \\( -type d -exec printf 'd%s\\0' {{}} + \\) -o \
          -exec printf 'f%s\\0' {{}} + 2>/dev/null\n\
          printf '@@%s' \"$?\"",
@@ -1919,8 +1920,20 @@ fn parse_tree_listing(dest: &str, stdout: &str) -> Result<Vec<(RemoteKind, Strin
             ));
         }
     }
+    let mut entries = entries.split('\0').filter(|_| !entries.is_empty());
+    // A symlinked directory on the way may put the destination anywhere: prune holds its
+    // real path to the same depth as the one written.
+    let real = entries
+        .next()
+        .and_then(|first| first.strip_prefix('r'))
+        .ok_or_else(|| format!("could not list {dest}: no real path"))?;
+    if real.split('/').filter(|n| !n.is_empty()).count() < 2 {
+        return Err(format!(
+            "{dest} is {real} on the host, less than two directories deep; refusing to prune it"
+        ));
+    }
     let mut listed = Vec::new();
-    for entry in entries.split('\0').filter(|_| !entries.is_empty()) {
+    for entry in entries {
         let unreadable = || format!("{dest} holds a name that cannot be read exactly: {entry:?}");
         if entry.contains(['\u{FFFD}', '\r']) {
             return Err(unreadable());
@@ -1942,16 +1955,18 @@ fn parse_tree_listing(dest: &str, stdout: &str) -> Result<Vec<(RemoteKind, Strin
 }
 
 /// The command printing, after [`TREE_MARK`], one line per path: `-` when it does not exist,
-/// else its kind (`d`, `f`, `l` — tested first, so a link is itself) then owner, group and
-/// mode, a link's own. `dest/` names the directory a symlinked destination points to.
+/// else its kind (`d`, `f`, or a link — tested first — as `ld`, `lf` or `l-` by what it
+/// points to) then owner, group and mode, a link's own. `dest/` names the directory a
+/// symlinked destination points to.
 fn stat_listing(paths: &[String]) -> String {
     let list: Vec<String> = paths.iter().map(|p| shell_escape(p)).collect();
     // BSD stat for macOS targets, as in `get_file_attrs`.
     let script = format!(
         "printf '%s\\n' {TREE_MARK}\n\
          for p in {}; do\n\
-         if [ -L \"$p\" ]; then k=l; elif [ -d \"$p\" ]; then k=d; \
-         elif [ -e \"$p\" ]; then k=f; else echo -; continue; fi\n\
+         if [ -L \"$p\" ]; then \
+         if [ -d \"$p\" ]; then k=ld; elif [ -e \"$p\" ]; then k=lf; else k=l-; fi; \
+         elif [ -d \"$p\" ]; then k=d; elif [ -e \"$p\" ]; then k=f; else echo -; continue; fi\n\
          a=$(stat -c '%U %G %a' -- \"$p\" 2>/dev/null || \
          stat -f '%Su %Sg %Lp' -- \"$p\" 2>/dev/null) || a='? ? ?'\n\
          printf '%s %s\\n' \"$k\" \"$a\"\n\
@@ -1980,7 +1995,11 @@ fn parse_stats(stdout: &str, count: usize) -> Option<Vec<Option<PathStat>>> {
             let kind = match *kind {
                 "d" => PathKind::Dir,
                 "f" => PathKind::File,
-                "l" => PathKind::Link,
+                "ld" => PathKind::Link { to_dir: Some(true) },
+                "lf" => PathKind::Link {
+                    to_dir: Some(false),
+                },
+                "l-" => PathKind::Link { to_dir: None },
                 _ => return None,
             };
             Some(Some(PathStat {
@@ -2227,7 +2246,7 @@ mod tests {
 
     #[test]
     fn a_listing_that_did_not_finish_or_holds_a_foreign_name_stops_prune() {
-        let listing = |body: &str| format!("{TREE_MARK}\n{body}");
+        let listing = |body: &str| format!("{TREE_MARK}\nr/srv/a\0{body}");
         let err = |body: &str| parse_tree_listing("/srv/a", &listing(body)).unwrap_err();
         assert!(err("f./x\0@@1").contains("could not list every entry under /srv/a (1)"));
         for foreign in [
@@ -2260,10 +2279,29 @@ mod tests {
         );
     }
 
+    /// A symlinked directory on the way can make a deep destination `/` or `/etc`: prune
+    /// holds the real path to the same depth.
+    #[test]
+    fn a_destination_shallow_on_the_host_stops_prune() {
+        for real in ["/", "/etc"] {
+            let stdout = format!("{TREE_MARK}\nr{real}\0f./passwd\0@@0");
+            let err = parse_tree_listing("/srv/link/etc", &stdout).unwrap_err();
+            assert!(
+                err.contains("less than two directories deep"),
+                "{real}: {err}"
+            );
+        }
+        assert!(
+            parse_tree_listing("/srv/a", &format!("{TREE_MARK}\nf./x\0@@0"))
+                .unwrap_err()
+                .contains("no real path")
+        );
+    }
+
     /// Under `su` a PTY puts the password prompt ahead of stdout and turns `\n` into `\r\n`.
     #[test]
     fn a_su_prompt_ahead_of_the_mark_is_skipped() {
-        let stdout = format!("Password: \r\n{TREE_MARK}\r\nd./x\0f./x/y\0@@0");
+        let stdout = format!("Password: \r\n{TREE_MARK}\r\nr/srv/a\0d./x\0f./x/y\0@@0");
         assert_eq!(
             parse_tree_listing("/srv/a", &stdout).unwrap(),
             [
@@ -2302,12 +2340,15 @@ mod tests {
     #[test]
     fn stats_read_the_kind_and_a_link_s_own_attributes() {
         let stdout = format!(
-            "Password: \r\n{TREE_MARK}\r\nd root root 755\r\n-\r\nl app app 777\r\nf root root 644\r\n"
+            "Password: \r\n{TREE_MARK}\r\nd root root 755\r\n-\r\nld app app 777\r\nf root root 644\r\n"
         );
         let stats = parse_stats(&stdout, 4).unwrap();
         assert_eq!(stats[0].as_ref().unwrap().kind, PathKind::Dir);
         assert!(stats[1].is_none());
-        assert_eq!(stats[2].as_ref().unwrap().kind, PathKind::Link);
+        assert_eq!(
+            stats[2].as_ref().unwrap().kind,
+            PathKind::Link { to_dir: Some(true) }
+        );
         assert_eq!(stats[3].as_ref().unwrap().mode, "644");
         assert!(parse_stats(&stdout, 3).is_none(), "a line short");
         assert!(parse_stats("d root root 755\n", 1).is_none(), "no mark");
@@ -2342,7 +2383,7 @@ mod tests {
             [
                 Some(PathKind::Dir),
                 Some(PathKind::File),
-                Some(PathKind::Link),
+                Some(PathKind::Link { to_dir: Some(true) }),
                 None
             ],
             "a symlinked destination named `dest/` is its directory"

@@ -896,3 +896,70 @@ async fn an_entry_of_the_other_kind_is_replaced_only_with_prune() {
     let status = FileModule.check(&ctx, &prune).await.unwrap();
     assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
 }
+
+/// Every template is rendered before `prune` removes anything: an error leaves the host as
+/// it was.
+#[tokio::test]
+async fn a_template_error_stops_prune_before_it_removes_anything() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-render/app.conf && touch /srv/glidesh-render/app.conf/old /srv/glidesh-render/stray")
+        .await
+        .unwrap();
+    let src = source_tree(&[("app.conf", "port=${undefined-port}")]);
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-render",
+        vec![
+            ("prune", ParamValue::Bool(true)),
+            ("template", ParamValue::Bool(true)),
+        ],
+    );
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(err.to_string().contains("undefined-port"), "{err}");
+    for kept in ["app.conf/old", "stray"] {
+        assert!(
+            exists(&ssh, &format!("/srv/glidesh-render/{kept}")).await,
+            "{kept}"
+        );
+    }
+}
+
+/// A link to a directory where the source has a file lists as a file, but is in the way:
+/// `prune` removes the link, never what it points to, and uploads the file.
+#[tokio::test]
+async fn prune_replaces_a_link_to_a_directory_where_the_source_has_a_file() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-linkdir /root/glidesh-kept && touch /root/glidesh-kept/f && ln -s /root/glidesh-kept /srv/glidesh-linkdir/app.conf")
+        .await
+        .unwrap();
+    let src = source_tree(&[("app.conf", "a")]);
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-linkdir",
+        vec![("prune", ParamValue::Bool(true))],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+    let kind = ssh
+        .exec("stat -c %F /srv/glidesh-linkdir/app.conf")
+        .await
+        .unwrap();
+    assert_eq!(kind.stdout.trim(), "regular file");
+    assert!(
+        exists(&ssh, "/root/glidesh-kept/f").await,
+        "the link's target stays"
+    );
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
+}

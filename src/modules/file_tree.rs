@@ -73,31 +73,60 @@ impl Exclude {
 }
 
 /// A glob over one name: `*` any run of characters, `?` one.
+///
+/// A table over (glob position, name position), so each pair is decided once: backtracking
+/// over several `*` takes exponential time on a name that does not match.
 fn name_matches(glob: &str, name: &str) -> bool {
-    fn go(glob: &[char], name: &[char]) -> bool {
-        match glob.split_first() {
-            None => name.is_empty(),
-            Some(('*', rest)) => (0..=name.len()).any(|skip| go(rest, &name[skip..])),
-            Some(('?', rest)) => !name.is_empty() && go(rest, &name[1..]),
-            Some((c, rest)) => name.first() == Some(c) && go(rest, &name[1..]),
-        }
-    }
     let glob: Vec<char> = glob.chars().collect();
     let name: Vec<char> = name.chars().collect();
-    go(&glob, &name)
+    // `row[j]`: whether the glob so far matches the first `j` characters of the name.
+    let mut row = vec![false; name.len() + 1];
+    row[0] = true;
+    for g in &glob {
+        let mut next = vec![false; name.len() + 1];
+        match g {
+            '*' => {
+                let mut any = false;
+                for j in 0..=name.len() {
+                    any |= row[j];
+                    next[j] = any;
+                }
+            }
+            '?' => {
+                next[1..].copy_from_slice(&row[..name.len()]);
+            }
+            c => {
+                for j in 1..=name.len() {
+                    next[j] = row[j - 1] && name[j - 1] == *c;
+                }
+            }
+        }
+        row = next;
+    }
+    row[name.len()]
 }
 
-/// Pattern names against path names, `**` standing for any number of them, none included.
+/// Pattern names against path names, `**` standing for any number of them, none included —
+/// the same table, over names.
 fn segments_match(segments: &[String], names: &[&str]) -> bool {
-    match segments.split_first() {
-        None => names.is_empty(),
-        Some((first, rest)) if first == "**" => {
-            (0..=names.len()).any(|skip| segments_match(rest, &names[skip..]))
+    let mut row = vec![false; names.len() + 1];
+    row[0] = true;
+    for segment in segments {
+        let mut next = vec![false; names.len() + 1];
+        if segment == "**" {
+            let mut any = false;
+            for j in 0..=names.len() {
+                any |= row[j];
+                next[j] = any;
+            }
+        } else {
+            for j in 1..=names.len() {
+                next[j] = row[j - 1] && name_matches(segment, names[j - 1]);
+            }
         }
-        Some((first, rest)) => names
-            .split_first()
-            .is_some_and(|(name, names)| name_matches(first, name) && segments_match(rest, names)),
+        row = next;
     }
+    row[names.len()]
 }
 
 /// A source directory's files and directories, relative to it with `/` between names,
@@ -136,12 +165,21 @@ pub fn walk(root: &Path, exclude: &Exclude) -> Result<SourceTree, String> {
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
-            let relative = relative.to_string_lossy();
+            // A name read lossily could not be opened again, nor matched on the host.
+            let Some(relative) = relative.to_str() else {
+                failed.get_or_insert_with(|| {
+                    format!(
+                        "{}: a name that is not UTF-8 cannot be uploaded",
+                        path.display()
+                    )
+                });
+                continue;
+            };
             // Only Windows separates with `\`; elsewhere it is part of a name.
             let relative = if cfg!(windows) {
                 relative.replace('\\', "/")
             } else {
-                relative.into_owned()
+                relative.to_string()
             };
             if exclude.excludes(&relative) {
                 continue;
@@ -250,9 +288,12 @@ pub fn strays(remote: &[(RemoteKind, String)], source: &SourceTree, exclude: &Ex
 pub enum PathKind {
     Dir,
     File,
-    /// A symlink: an upload writes through it, and its attributes are its own — `chown -h`
-    /// changes the link, and no mode is set on it.
-    Link,
+    /// A symlink, to a directory (`Some(true)`), to anything else, or to nothing (`None`).
+    /// An upload writes through it; its attributes are its own — `chown -h` changes the
+    /// link, and no mode is set on it.
+    Link {
+        to_dir: Option<bool>,
+    },
 }
 
 /// A path's kind, owner, group and mode; a link's own owner and group.
@@ -266,20 +307,26 @@ pub struct PathStat {
 
 impl PathStat {
     /// Whether the host has something other than what the source puts at this path: a file
-    /// where it has a directory, or a directory where it has a file. A link may stand for
-    /// either, as an upload through it does.
+    /// where it has a directory, or a directory where it has a file. A link is what it points
+    /// to, as an upload through it takes it; one pointing nowhere can be written through, so
+    /// it stands for a file.
     pub fn mismatches(&self, want_dir: bool) -> bool {
-        match self.kind {
-            PathKind::Dir => !want_dir,
-            PathKind::File => want_dir,
-            PathKind::Link => false,
-        }
+        let is_dir = match self.kind {
+            PathKind::Dir => true,
+            PathKind::File => false,
+            PathKind::Link { to_dir } => to_dir == Some(true),
+        };
+        is_dir != want_dir
+    }
+
+    pub fn is_link(&self) -> bool {
+        matches!(self.kind, PathKind::Link { .. })
     }
 
     /// Whether the attributes `options` asks for hold. A link has no mode of its own.
     pub fn attrs_match(&self, options: &Options, want_dir: bool) -> bool {
         let wanted_mode = match (self.kind, want_dir) {
-            (PathKind::Link, _) => None,
+            (PathKind::Link { .. }, _) => None,
             (_, true) => options.dir_mode.as_deref(),
             (_, false) => options.file_mode.as_deref(),
         };
@@ -479,6 +526,20 @@ mod tests {
         }
     }
 
+    /// Several `*` against a long name that does not match: a backtracking matcher takes
+    /// exponential time here.
+    #[test]
+    fn a_hard_pattern_is_decided_quickly() {
+        let started = std::time::Instant::now();
+        let name = "a".repeat(200);
+        let ex = exclude(&["*a*a*a*a*a*a*a*a*a*a*a*a*b", "**/**/**/**/**/**/x/**/y"]);
+        assert!(!ex.excludes(&name));
+        let deep = vec!["d"; 60].join("/");
+        assert!(!ex.excludes(&deep));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(exclude(&["*a*b"]).excludes("xxaxxb"));
+    }
+
     #[test]
     fn question_mark_and_star_stay_within_a_name() {
         let ex = exclude(&["a?c", "logs/*.txt"]);
@@ -636,9 +697,18 @@ mod tests {
             dir_mode: Some("0750".into()),
             ..Options::default()
         };
-        assert!(stat(PathKind::Link).attrs_match(&options, false));
+        let to_dir = PathKind::Link { to_dir: Some(true) };
+        let to_file = PathKind::Link {
+            to_dir: Some(false),
+        };
+        let dangling = PathKind::Link { to_dir: None };
+        assert!(stat(to_file).attrs_match(&options, false));
         assert!(!stat(PathKind::File).attrs_match(&options, false));
-        assert!(!stat(PathKind::Link).mismatches(true));
+        assert!(!stat(to_dir).mismatches(true));
+        assert!(stat(to_dir).mismatches(false));
+        assert!(stat(to_file).mismatches(true));
+        assert!(!stat(dangling).mismatches(false));
+        assert!(stat(dangling).mismatches(true));
         assert!(stat(PathKind::File).mismatches(true));
         assert!(stat(PathKind::Dir).mismatches(false));
         let mut dir = stat(PathKind::Dir);
