@@ -249,8 +249,9 @@ impl Module for FileModule {
                         file_diff::opted_out(dest),
                     ));
                 }
+                let mode = params.args.get("mode").and_then(|v| v.as_str());
                 let diff =
-                    Self::diff_against_remote(ctx, params, dest, remote_hash.is_some(), &content)
+                    Self::diff_against_remote(ctx, mode, dest, remote_hash.is_some(), &content)
                         .await?;
                 Ok(ModuleStatus::pending_with_diff(plan, diff))
             }
@@ -673,10 +674,16 @@ impl FileModule {
                 remote_hash => {
                     content_changed += 1;
                     if show_diffs {
+                        // The mode this file gets; none for a link, whose mode is left as it
+                        // is, so the host's own decides.
+                        let mode = match stat {
+                            Some(found) if found.is_link() => None,
+                            _ => options.file_mode.as_deref(),
+                        };
                         diffs.push(
                             Self::diff_against_remote(
                                 ctx,
-                                params,
+                                mode,
                                 remote_path,
                                 remote_hash.is_some(),
                                 &content,
@@ -783,15 +790,15 @@ impl FileModule {
     }
 
     /// Only called once the hashes differ, so the download is spent on a real change.
+    /// `mode` is the one the plan sets on `dest`, which may make it private.
     async fn diff_against_remote(
         ctx: &ModuleContext<'_>,
-        params: &ModuleParams,
+        mode: Option<&str>,
         dest: &str,
         exists: bool,
         content: &[u8],
     ) -> Result<String, GlideshError> {
-        let private =
-            file_diff::mode_may_be_private(params.args.get("mode").and_then(|v| v.as_str()));
+        let private = file_diff::mode_may_be_private(mode);
         if let Some(note) = file_diff::local_note(dest, content, private) {
             return Ok(note);
         }

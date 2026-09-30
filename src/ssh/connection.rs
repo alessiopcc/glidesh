@@ -924,32 +924,34 @@ impl SshSession {
         })
     }
 
-    /// `mkdir -p` each of `dirs`; escalated, only once [`trusted_paths`] holds for them,
-    /// since `mkdir -p` follows symlinks on the way.
+    /// `mkdir -p` each of `dirs`, in chunks as [`path_chunks`] splits them; escalated, only
+    /// once [`trusted_paths`] holds for them, since `mkdir -p` follows symlinks on the way.
     pub async fn create_dirs_as(
         &self,
         dirs: &[&str],
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
-        if dirs.is_empty() {
-            return Ok(());
-        }
-        let command = match run_as {
-            Some(_) => guarded_mkdir(dirs, self.login_uid().await?),
-            None => format!(
-                "mkdir -p {}",
-                dirs.iter()
-                    .map(|d| shell_escape(d))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-        };
-        let out = self.exec_as(&command, run_as).await?;
-        if out.exit_code != 0 {
-            return Err(GlideshError::Module {
-                module: "file".to_string(),
-                message: format!("failed to create {}: {}", dirs.join(", "), out.failure()),
-            });
+        let owned: Vec<String> = dirs.iter().map(|d| d.to_string()).collect();
+        for chunk in path_chunks(&owned)? {
+            let chunk: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let command = match run_as {
+                Some(_) => guarded_mkdir(&chunk, self.login_uid().await?),
+                None => format!(
+                    "mkdir -p {}",
+                    chunk
+                        .iter()
+                        .map(|d| shell_escape(d))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            };
+            let out = self.exec_as(&command, run_as).await?;
+            if out.exit_code != 0 {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("failed to create {}: {}", chunk.join(", "), out.failure()),
+                });
+            }
         }
         Ok(())
     }
@@ -1427,6 +1429,10 @@ printf '%s' "$d""#;
     ) -> Result<(), GlideshError> {
         let files: Vec<String> = strays.files.iter().map(|f| tree_join(dest, f)).collect();
         let dirs: Vec<String> = strays.dirs.iter().map(|d| tree_join(dest, d)).collect();
+        // Both lists are split first, so a path too long to send is refused before any
+        // removal rather than after the files went.
+        path_chunks(&files)?;
+        path_chunks(&dirs)?;
         self.each_chunk_as("rm -f --", &files, run_as, true).await?;
         self.each_chunk_as("rmdir --", &dirs, run_as, true).await
     }

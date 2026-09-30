@@ -194,6 +194,41 @@ async fn file_diff_is_hidden_for_a_file_other_users_cannot_read() {
     );
 }
 
+/// In a recursive upload the mode a file gets is `file-mode` (else `mode`): a private one
+/// hides that file's diff, as `mode` does for a single file.
+#[tokio::test]
+async fn a_recursive_diff_is_hidden_under_a_private_file_mode() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("keys");
+    std::fs::create_dir(&tree).unwrap();
+    std::fs::write(tree.join("api.key"), "key=new-in-plain-text\n").unwrap();
+
+    let vars = HashMap::new();
+    let mut ctx = container.module_context(&ssh, &os_info, &vars, true);
+    ctx.plan_base_dir = dir.path();
+    ctx.diff = true;
+    let spec = params(
+        "/root/diff-keys",
+        &[
+            ("src", s("keys")),
+            ("recurse", ParamValue::Bool(true)),
+            ("mode", s("0755")),
+            ("file-mode", s("0600")),
+        ],
+    );
+    let diff = pending_diff(FileModule.check(&ctx, &spec).await.unwrap()).unwrap();
+    assert!(
+        diff.contains("/root/diff-keys/api.key: diff hidden (not readable by other users)"),
+        "{diff}"
+    );
+    assert!(!diff.contains("new-in-plain-text"), "{diff}");
+}
+
 /// The gap the rules above leave: a world-readable file still holding a secret the plan no
 /// longer uses. `diff=#false` is the explicit way out.
 #[tokio::test]
