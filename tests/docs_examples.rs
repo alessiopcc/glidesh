@@ -84,17 +84,23 @@ fn plan_blocks(page: &str) -> Vec<String> {
     blocks
 }
 
-/// The ```kdl blocks of a page that are inventories: those starting with a top-level `jump`,
-/// a `group` or a `host "name" "address"`. One starting with `vars` may be a plan's
-/// `vars-file`, so it is left out.
+/// The ```kdl blocks of a page that are inventories: those with a top-level `jump`, `group` or
+/// `host "name" "address"` node, whatever comes first (often `vars`). A block with only `vars`
+/// may be a plan's `vars-file`, so it is left out.
 fn inventory_blocks(page: &str) -> Vec<&str> {
     kdl_blocks(page)
         .into_iter()
-        .filter(|(first_line, _)| {
-            is_inventory_host(first_line)
-                || matches!(first_line.split([' ', '{']).next(), Some("jump" | "group"))
-        })
         .map(|(_, block)| block)
+        .filter(|block| {
+            // Top-level nodes start at column 0 in every documented block.
+            block
+                .lines()
+                .filter(|line| !line.starts_with(char::is_whitespace))
+                .any(|line| {
+                    is_inventory_host(line)
+                        || matches!(line.split([' ', '{']).next(), Some("jump" | "group"))
+                })
+        })
         .collect()
 }
 

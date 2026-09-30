@@ -311,6 +311,11 @@ fn parse_jump(node: &kdl::KdlNode, scope: &str) -> Result<Jump, GlideshError> {
         let value = entry.value();
         match entry.name().map(|n| n.value()) {
             None => arguments.push(value),
+            Some(name @ ("user" | "port"))
+                if (name == "user" && user.is_some()) || (name == "port" && port.is_some()) =>
+            {
+                return Err(error(format!("`jump` sets {name}= twice; keep one")));
+            }
             Some("user") => {
                 let name = value
                     .as_string()
@@ -751,6 +756,14 @@ host "b" "10.0.0.2"
                 "port=70000 must be an integer from 1 to 65535",
             ),
             (r#"jump "a" user=5"#, "user= must be a string"),
+            (
+                r#"jump "a" user="x" user="y""#,
+                "sets user= twice; keep one",
+            ),
+            (
+                r#"jump "a" port=22 port=2222"#,
+                "sets port= twice; keep one",
+            ),
             (r#"jump "a" { user "x" }"#, "takes no child nodes"),
             (r#"jump #false { x }"#, "takes no child nodes"),
         ] {

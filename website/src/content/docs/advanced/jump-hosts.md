@@ -100,8 +100,8 @@ instead. A scope may have one `jump` only.
 | `user` | target host's user | SSH username on the bastion |
 | `port` | `22` | SSH port on the bastion |
 
-Anything else on a `jump` node — a second argument, another property, a child node — is an
-error, as is a `port` that is not an integer from 1 to 65535.
+Anything else on a `jump` node — a second argument, another property, a property given
+twice, a child node — is an error, as is a `port` that is not an integer from 1 to 65535.
 
 ## Inheritance Rules
 
