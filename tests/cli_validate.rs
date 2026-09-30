@@ -665,8 +665,9 @@ fn a_plugin_task_takes_any_parameter() {
     assert!(!out.contains("unknown parameter"), "{out}");
 }
 
-/// `run` refuses the plan before it asks for a prompted answer, unlocks secrets, loads the
-/// key or connects: the host is a TEST-NET address and the key does not exist.
+/// `run` refuses the plan before it asks for the run-as password or a prompted answer,
+/// unlocks secrets, loads the key or connects: the host is a TEST-NET address and the key
+/// does not exist.
 #[test]
 fn run_refuses_an_unknown_task_parameter_before_anything_else() {
     let dir = tempfile::tempdir().unwrap();
@@ -687,7 +688,8 @@ fn run_refuses_an_unknown_task_parameter_before_anything_else() {
         .unwrap()
         .current_dir(dir.path())
         .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl", "--no-tui"])
-        .args(["--no-host-key-check", "--key", "absent-key"])
+        .args(["--no-host-key-check", "--key", "absent-key", "--ask-pass"])
+        .env_remove("GLIDESH_RUNAS_PASS")
         .timeout(std::time::Duration::from_secs(60))
         .output()
         .unwrap();
@@ -700,5 +702,9 @@ fn run_refuses_an_unknown_task_parameter_before_anything_else() {
     assert!(
         !err.contains("stdinisnotaterminal"),
         "asked for the prompt first: {err}"
+    );
+    assert!(
+        !err.contains("password"),
+        "asked for the password first: {err}"
     );
 }

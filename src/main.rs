@@ -325,9 +325,8 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
     // Establish the global escalation defaults. The CLI `--run-as*` flags are the
     // least-specific layer, so fold them into the inventory's global spec; every
-    // host then resolves with CLI as the base. The password is global for the run.
+    // host then resolves with CLI as the base.
     let cli_run_as = build_cli_run_as(&args)?;
-    glidesh::modules::escalation::set_password(source_run_as_password(&args)?);
     let inventory = inventory.map(|mut inv| {
         inv.run_as = std::mem::take(&mut inv.run_as).merge_over(&cli_run_as);
         inv
@@ -569,6 +568,8 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     for gp in &group_plans {
         registry.validate_plan(&gp.plan)?;
     }
+    // The password is global for the run.
+    glidesh::modules::escalation::set_password(source_run_as_password(&args)?);
     for shadow in config::shadow::merged(shadows) {
         eprintln!("warning: {}", shadow.warning());
     }
