@@ -24,10 +24,17 @@ fn desired_groups(params: &ModuleParams) -> Option<Vec<String>> {
     .filter(|groups| !groups.is_empty())
 }
 
+/// Every parameter the module reads; any other is rejected before connecting.
+const PARAMS: &[&str] = &["groups", "shell", "state", "uid"];
+
 #[async_trait]
 impl Module for UserModule {
     fn name(&self) -> &str {
         "user"
+    }
+
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(PARAMS)
     }
 
     async fn check(

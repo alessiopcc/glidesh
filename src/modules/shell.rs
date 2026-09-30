@@ -203,10 +203,26 @@ impl ShellModule {
     }
 }
 
+/// Every parameter the module reads; any other is rejected before connecting.
+const PARAMS: &[&str] = &[
+    "changed-when",
+    "check",
+    "cmd",
+    "delay",
+    "login",
+    "retries",
+    "success_codes",
+    "timeout",
+];
+
 #[async_trait]
 impl Module for ShellModule {
     fn name(&self) -> &str {
         "shell"
+    }
+
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(PARAMS)
     }
 
     async fn check(

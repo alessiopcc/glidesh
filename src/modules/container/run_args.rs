@@ -11,6 +11,7 @@ use crate::modules::ModuleParams;
 use crate::util::shell_escape;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 pub(super) const PARAM_HASH_LABEL: &str = "sh.glide.param-hash";
 
@@ -97,6 +98,23 @@ const GLIDESH_PARAMS: &[&str] = &[
 
 /// Parameters handled by bespoke code in [`build_run_args`].
 const SPECIAL_PARAMS: &[&str] = &["command", "extra-args", "gpus", "healthcheck", "image"];
+
+/// Every parameter the module reads, sorted; any other is rejected.
+pub(super) static PARAMS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut params: Vec<&str> = GLIDESH_PARAMS
+        .iter()
+        .chain(SPECIAL_PARAMS)
+        .copied()
+        .chain(
+            [EQ_FLAGS, VALUE_FLAGS, BOOL_FLAGS, LIST_FLAGS, MAP_FLAGS]
+                .into_iter()
+                .flatten()
+                .map(|(key, _)| *key),
+        )
+        .collect();
+    params.sort_unstable();
+    params
+});
 
 /// Recognised keys inside a `healthcheck` block.
 const HEALTHCHECK_KEYS: &[&str] = &["cmd", "interval", "retries", "start-period", "timeout"];
@@ -210,15 +228,7 @@ pub(super) const SUPPORTED_RUNTIMES: &[&str] = &["docker", "podman"];
 /// Reject unknown parameters. A silently ignored `privledged` is exactly the kind
 /// of failure that only shows up as strange runtime behaviour hours later.
 pub(super) fn validate_params(params: &ModuleParams) -> Result<(), GlideshError> {
-    let known = |key: &str| {
-        GLIDESH_PARAMS.contains(&key)
-            || SPECIAL_PARAMS.contains(&key)
-            || EQ_FLAGS.iter().any(|(k, _)| *k == key)
-            || VALUE_FLAGS.iter().any(|(k, _)| *k == key)
-            || BOOL_FLAGS.iter().any(|(k, _)| *k == key)
-            || LIST_FLAGS.iter().any(|(k, _)| *k == key)
-            || MAP_FLAGS.iter().any(|(k, _)| *k == key)
-    };
+    let known = |key: &str| PARAMS.contains(&key);
 
     let mut unknown: Vec<&str> = params
         .args

@@ -646,10 +646,28 @@ impl NixModule {
     }
 }
 
+/// Every parameter the module reads; any other is rejected before connecting.
+const PARAMS: &[&str] = &[
+    "action",
+    "input",
+    "install",
+    "older-than",
+    "out-link",
+    "packages",
+    "profile",
+    "state",
+    "update",
+    "url",
+];
+
 #[async_trait]
 impl Module for NixModule {
     fn name(&self) -> &str {
         "nix"
+    }
+
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(PARAMS)
     }
 
     async fn check(

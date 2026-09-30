@@ -826,7 +826,7 @@ pub(crate) fn is_error_var(name: &str) -> bool {
     name == "@error" || name.starts_with("@error.")
 }
 
-const STEP_ATTRS: &[&str] = &[
+pub(crate) const STEP_ATTRS: &[&str] = &[
     "loop",
     "subscribe",
     "when",

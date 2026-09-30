@@ -325,9 +325,8 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
     // Establish the global escalation defaults. The CLI `--run-as*` flags are the
     // least-specific layer, so fold them into the inventory's global spec; every
-    // host then resolves with CLI as the base. The password is global for the run.
+    // host then resolves with CLI as the base.
     let cli_run_as = build_cli_run_as(&args)?;
-    glidesh::modules::escalation::set_password(source_run_as_password(&args)?);
     let inventory = inventory.map(|mut inv| {
         inv.run_as = std::mem::take(&mut inv.run_as).merge_over(&cli_run_as);
         inv
@@ -564,6 +563,13 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     }
     let tags = TagFilter::from_args(args.tags.as_deref(), args.skip_tags.as_deref())?;
     tags.check_known(group_plans.iter().map(|gp| gp.plan.as_ref()))?;
+    // Before anything is asked, unlocked or loaded: a plan `run` would refuse fails first.
+    let registry = Arc::new(ModuleRegistry::with_external(Some(inv_base_dir)));
+    for gp in &group_plans {
+        registry.validate_plan(&gp.plan)?;
+    }
+    // The password is global for the run.
+    glidesh::modules::escalation::set_password(source_run_as_password(&args)?);
     for shadow in config::shadow::merged(shadows) {
         eprintln!("warning: {}", shadow.warning());
     }
@@ -580,11 +586,6 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
     let key = load_ssh_key(&args, &all_targets)?;
-    let registry = Arc::new(ModuleRegistry::with_external(Some(inv_base_dir)));
-
-    for gp in &group_plans {
-        registry.validate_plan(&gp.plan)?;
-    }
 
     let run_name = run_name_parts.join("+");
 
@@ -1108,9 +1109,7 @@ fn validate_plan_file(
     };
     let registry =
         ModuleRegistry::with_external(Some(inv_dir.unwrap_or_else(|| std::path::Path::new("."))));
-    if let Err(e) = registry.validate_plan(&plan) {
-        check.problems.push(e.to_string());
-    }
+    check.problems.extend(registry.plan_problems(&plan));
     check
         .problems
         .extend(config::checks::missing_file_sources(&plan, plan_dir));

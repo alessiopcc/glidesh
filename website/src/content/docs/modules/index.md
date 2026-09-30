@@ -20,6 +20,14 @@ With `--dry-run`, **check** decides the outcome: a task is reported as `would ch
 
 A task in a step [triggered by `subscribe`](/advanced/subscribe/#what-a-triggered-task-does) is no exception: its check is told the step was triggered, and returns `Pending` when the module would redo its work — a restart, a recreate, a rerun — so a preview counts exactly what the real run does.
 
+## Parameters
+
+A built-in module accepts only the parameters its page lists. Any other — a typo such as
+`mdoe=`, or a parameter from another tool — is an error that
+[`glidesh validate`](/cli/#glidesh-validate) reports, and that `run` reports before it
+connects, rather than being ignored. [External modules](/modules/external/) receive every
+parameter as written.
+
 ## Idempotency
 
 Because modules check before acting, plans are safe to run repeatedly. If a package is already installed, the package module reports `Satisfied` and skips it. If a service is already running, systemd reports `Satisfied`. Only the delta is applied. [Idempotency & Drift](/concepts/idempotency/) lists what each module compares, and how to preview a run with `--dry-run` and `--diff`.

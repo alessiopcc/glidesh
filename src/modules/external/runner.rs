@@ -195,6 +195,11 @@ impl crate::modules::Module for ExternalModule {
         &self.info.name
     }
 
+    /// A plugin's parameters are its own: glidesh forwards them all.
+    fn params(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+
     async fn check(
         &self,
         ctx: &ModuleContext<'_>,

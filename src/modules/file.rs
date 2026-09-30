@@ -160,10 +160,19 @@ fn normalize_mode(mode: &str) -> &str {
     if trimmed.is_empty() { "0" } else { trimmed }
 }
 
+/// Every parameter the module reads; any other is rejected before connecting.
+const PARAMS: &[&str] = &[
+    "diff", "fetch", "group", "mode", "owner", "recurse", "src", "template",
+];
+
 #[async_trait]
 impl Module for FileModule {
     fn name(&self) -> &str {
         "file"
+    }
+
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(PARAMS)
     }
 
     async fn check(

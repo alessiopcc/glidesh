@@ -1,9 +1,13 @@
-//! Every plan shown in the documentation must parse.
+//! Every plan shown in the documentation must parse, and name only parameters its modules
+//! read.
 //!
 //! Examples are the first plans a new user copies. Five of them once used a `target` node
 //! the parser has never accepted — the Getting Started plan among them — and nothing
-//! caught it, because nothing ran them.
+//! caught it, because nothing ran them. A `file` task with a `content` parameter no module
+//! reads went unnoticed the same way.
 
+use glidesh::config::types::Plan;
+use glidesh::modules::ModuleRegistry;
 use std::path::{Path, PathBuf};
 
 fn doc_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -20,8 +24,23 @@ fn doc_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The ```kdl blocks of a page that are whole plans. Inventories, `vars` files and
-/// fragments are other blocks; only a block whose first node is `plan` is a plan.
+/// Nodes a plan fragment can start with: a task of one of these modules.
+const TASKS: &[&str] = &[
+    "container",
+    "disk",
+    "external",
+    "file",
+    "host",
+    "nix",
+    "package",
+    "shell",
+    "systemd",
+    "user",
+];
+
+/// The ```kdl blocks of a page that are plans, each as a whole plan: a block whose first node
+/// is `plan` as it is, one that starts with a `step` or a task wrapped in a plan (and a step).
+/// Inventories, `vars` files and other fragments are left out.
 fn plan_blocks(page: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut rest = page;
@@ -29,16 +48,49 @@ fn plan_blocks(page: &str) -> Vec<String> {
         let body = &rest[start + "```kdl".len()..];
         let Some(end) = body.find("```") else { break };
         let block = &body[..end];
-        let first = block
+        let first_line = block
             .lines()
             .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with("//"));
-        if first.is_some_and(|l| l.starts_with("plan \"")) {
-            blocks.push(block.to_string());
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .unwrap_or_default();
+        // An inventory's `host "name" "address"` is not a `host` task.
+        let inventory_host = first_line
+            .strip_prefix("host \"")
+            .and_then(|rest| rest.split_once('"'))
+            .is_some_and(|(_, after)| after.trim_start().starts_with('"'));
+        match first_line.split([' ', '{']).next() {
+            _ if inventory_host => {}
+            Some("plan") => blocks.push(block.to_string()),
+            Some("step") => blocks.push(format!("plan \"doc\" {{\n{block}\n}}")),
+            Some(node) if TASKS.contains(&node) => {
+                blocks.push(format!("plan \"doc\" {{ step \"doc\" {{\n{block}\n}} }}"))
+            }
+            _ => {}
         }
         rest = &body[end + 3..];
     }
     blocks
+}
+
+/// What `run` and `validate` reject in `plan`: a task parameter its module does not read, or
+/// a module that does not exist. A plugin is not installed here, so it is never missing.
+fn module_problems(plan: &Plan) -> Vec<String> {
+    let registry = ModuleRegistry::new();
+    let mut problems = registry.plan_problems(plan);
+    let builtin = |module: &str| {
+        module.starts_with("external.")
+            || module == "host"
+            || registry.builtin_names().any(|name| name == module)
+    };
+    let all_known = plan
+        .steps()
+        .iter()
+        .flat_map(|step| step.all_tasks())
+        .all(|task| builtin(&task.module));
+    if all_known {
+        problems.retain(|p| !p.starts_with("Unknown module(s)"));
+    }
+    problems
 }
 
 #[test]
@@ -53,15 +105,20 @@ fn every_plan_in_the_docs_parses() {
         let page = std::fs::read_to_string(file).unwrap();
         for block in plan_blocks(&page) {
             checked += 1;
-            if let Err(e) = glidesh::config::parse_plan(&block) {
-                let rel = file.strip_prefix(&docs).unwrap_or(file);
-                failures.push(format!("{}: {e}", rel.display()));
+            let rel = file.strip_prefix(&docs).unwrap_or(file);
+            match glidesh::config::parse_plan(&block) {
+                Ok(plan) => failures.extend(
+                    module_problems(&plan)
+                        .into_iter()
+                        .map(|p| format!("{}: {p}", rel.display())),
+                ),
+                Err(e) => failures.push(format!("{}: {e}", rel.display())),
             }
         }
     }
 
     // Guards the extraction itself: a change that found no plans would pass vacuously.
-    assert!(checked >= 20, "only {checked} plan examples found");
+    assert!(checked >= 100, "only {checked} plan examples found");
     assert!(
         failures.is_empty(),
         "{} of {checked} documented plans do not parse:\n{}",
@@ -93,6 +150,7 @@ fn every_example_plan_resolves() {
             Ok(plan) => failures.extend(
                 glidesh::config::checks::missing_file_sources(&plan, dir)
                     .into_iter()
+                    .chain(module_problems(&plan))
                     .map(|m| format!("{}: {m}", plan_path.display())),
             ),
             Err(e) => failures.push(format!("{}: {e}", plan_path.display())),

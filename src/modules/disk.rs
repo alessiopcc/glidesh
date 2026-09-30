@@ -5,10 +5,17 @@ use async_trait::async_trait;
 
 pub struct DiskModule;
 
+/// Every parameter the module reads; any other is rejected before connecting.
+const PARAMS: &[&str] = &["force", "fs", "mount", "opts", "state"];
+
 #[async_trait]
 impl Module for DiskModule {
     fn name(&self) -> &str {
         "disk"
+    }
+
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(PARAMS)
     }
 
     async fn check(

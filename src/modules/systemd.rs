@@ -305,10 +305,30 @@ impl SystemdModule {
     }
 }
 
+/// Every parameter the module reads; any other is rejected before connecting.
+const PARAMS: &[&str] = &[
+    "after",
+    "command",
+    "description",
+    "enabled",
+    "environment",
+    "group",
+    "restart-policy",
+    "state",
+    "type",
+    "user",
+    "wanted-by",
+    "working-dir",
+];
+
 #[async_trait]
 impl Module for SystemdModule {
     fn name(&self) -> &str {
         "systemd"
+    }
+
+    fn params(&self) -> Option<&'static [&'static str]> {
+        Some(PARAMS)
     }
 
     async fn check(
