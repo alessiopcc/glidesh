@@ -52,9 +52,10 @@ plan "deploy" {
 }
 ```
 
-The `secrets.kdl` next to your inventory is discovered automatically. Its variables merge in at the
-inventory-global tier (the lowest precedence — group, host, and plan vars override them). Override
-the location with `--secrets <path>` or `$GLIDESH_SECRETS`.
+The `secrets.kdl` next to your inventory is discovered automatically. Its variables sit between
+plan vars and the inventory's global vars: they override a plan's defaults, and the inventory's
+global, group, and host vars override them (see [Merge Order](/concepts/variables/#merge-order)).
+Override the location with `--secrets <path>` or `$GLIDESH_SECRETS`.
 
 You can also paste a token inline, without going through a variable — in inventory/plan
 values and module arguments:

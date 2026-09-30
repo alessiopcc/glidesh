@@ -70,6 +70,17 @@ pub(crate) fn host_builtin_vars(host: &ResolvedHost) -> [(String, String); 4] {
     ]
 }
 
+/// A host's variables, later sources winning: the plan's `vars`, which are defaults; the
+/// host's own (secrets file, inventory global, group, host); the answers to the plan's
+/// prompts, given for this run.
+fn merged_vars(plan: &Plan, host: &ResolvedHost) -> HashMap<String, String> {
+    let mut vars = plan.vars.clone();
+    for (name, value) in host.vars.iter().chain(&plan.answers) {
+        vars.insert(name.clone(), value.clone());
+    }
+    vars
+}
+
 /// Built-in OS facts, exposed under the reserved `@os.*` namespace. They come from the
 /// detection every run already performs on connect, so they cost no extra round trip.
 fn os_builtin_vars(os: &OsInfo) -> [(String, String); 7] {
@@ -533,9 +544,7 @@ impl NodeRunner {
             os: os_info.clone(),
         });
 
-        // Merge vars: inventory host vars + plan vars (plan wins)
-        let mut vars = self.host.vars.clone();
-        vars.extend(self.plan.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut vars = merged_vars(&self.plan, &self.host);
 
         // Last, so nothing can shadow these — and user var names may not start with `@`
         // anyway, so the reserved namespace cannot be reached from a config file at all.
@@ -1793,6 +1802,39 @@ mod tests {
         for name in names {
             assert!(crate::is_builtin_var(&name, None), "{name}");
         }
+    }
+
+    /// Plan vars are defaults: the inventory's global, group and host vars override them,
+    /// and a prompt's answer overrides everything.
+    #[test]
+    fn plan_vars_are_defaults_the_inventory_and_answers_override() {
+        let inventory = glidesh::config::parse_inventory(
+            r#"
+vars { region "eu"; tier "bronze" }
+group "web" {
+    vars { customer "acme"; tier "silver" }
+    host "web-1" "10.0.0.1" {
+        vars { tier "gold"; release "pinned" }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let host = &inventory.resolve_targets(Some("web-1"))[0];
+        let mut plan = glidesh::config::parse_plan(
+            r#"plan "p" {
+                vars-prompt { release "Release" }
+                vars { region "us"; customer "default"; tier "x"; port "8080" }
+            }"#,
+        )
+        .unwrap();
+        plan.answers.insert("release".into(), "v3".into());
+        let vars = merged_vars(&plan, host);
+        assert_eq!(vars["port"], "8080", "only the plan sets it");
+        assert_eq!(vars["region"], "eu", "inventory global beats plan");
+        assert_eq!(vars["customer"], "acme", "group beats plan");
+        assert_eq!(vars["tier"], "gold", "host beats group, global and plan");
+        assert_eq!(vars["release"], "v3", "the answer beats the host");
     }
 
     #[test]

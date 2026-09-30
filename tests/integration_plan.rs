@@ -468,3 +468,72 @@ plan "plugin" {
         "the host must stop at the refused register"
     );
 }
+
+/// Plan vars are defaults: a group's value reaches the host over the plan's, a name only the
+/// plan sets keeps its value, and a prompt's answer beats the inventory. The run says which
+/// plan values the inventory overrides.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_inventory_overrides_a_plan_var_and_an_answer_overrides_the_inventory() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = container.write_key_file(dir.path());
+    std::fs::write(
+        dir.path().join("plan.kdl"),
+        r#"
+plan "enroll" {
+    vars-prompt { release "Release" }
+    vars {
+        customer "default"
+        port "8080"
+    }
+    step "Record" {
+        shell "echo ${customer} ${port} ${release} > /root/precedence.txt"
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("inventory.kdl"),
+        format!(
+            "group \"web\" {{\n    vars {{\n        customer \"acme\"\n        release \"pinned\"\n    }}\n    host \"target\" \"127.0.0.1\" user=\"root\" port={} {{\n        vars {{\n            ssh-key {:?}\n        }}\n    }}\n}}\n",
+            container.port,
+            key.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let out = assert_cmd::Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("HOME", home.path())
+        .args([
+            "run",
+            "-i",
+            "inventory.kdl",
+            "-p",
+            "plan.kdl",
+            "--var",
+            "release=v3",
+        ])
+        .args(["--no-tui", "--no-host-key-check"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("plan 'enroll' sets 'customer' as a default, which group 'web' overrides"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("plan 'enroll' asks for 'release', which group 'web' also sets: an answer"),
+        "{stderr}"
+    );
+
+    let recorded = ssh.exec("cat /root/precedence.txt").await.unwrap().stdout;
+    assert_eq!(recorded, "acme 8080 v3\n");
+}

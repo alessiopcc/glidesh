@@ -427,8 +427,8 @@ const SHADOW_PLAN: &str = r#"plan "deploy" {
     step "s" { shell "echo ${customer} ${region}" }
 }"#;
 
-/// A plan var beats what the inventory sets for a host: `validate` names the variable and
-/// the scopes, never a value, and still passes.
+/// The inventory overrides a plan var for a host: `validate` names the variable and the
+/// scopes, never a value, and still passes.
 #[test]
 fn a_plan_variable_the_inventory_also_sets_warns_without_failing() {
     let dir = tempfile::tempdir().unwrap();
@@ -444,7 +444,7 @@ fn a_plan_variable_the_inventory_also_sets_warns_without_failing() {
     assert!(out.status.success(), "{text}");
     assert!(
         text.contains(
-            "warning: plan 'deploy' overrides 'customer', which is also set by group 'web'"
+            "warning: plan 'deploy' sets 'customer' as a default, which group 'web' overrides"
         ),
         "{text}"
     );
@@ -473,9 +473,9 @@ fn validate_inventory_warns_only_for_the_plans_own_hosts() {
     );
     let (ok, text) = validate_inventory(dir.path());
     assert!(ok, "{text}");
-    assert!(text.contains("overrides 'customer'"), "{text}");
+    assert!(text.contains("sets 'customer' as a default"), "{text}");
     assert!(
-        !text.contains("overrides 'tier'"),
+        !text.contains("sets 'tier'"),
         "db-1 does not run the plan:\n{text}"
     );
 }
@@ -511,7 +511,7 @@ fn a_structured_plan_variable_the_secrets_file_also_defines_warns() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{text}");
     assert!(
-        text.contains("overrides 'api-keys', which is also set by the secrets file"),
+        text.contains("sets 'api-keys' as a default, which the secrets file overrides"),
         "{text}"
     );
 }

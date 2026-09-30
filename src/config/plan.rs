@@ -181,6 +181,7 @@ pub fn parse_plan(input: &str) -> Result<Plan, GlideshError> {
         structured_vars,
         vars_files,
         prompts,
+        answers: HashMap::new(),
         run_as,
         items,
     };

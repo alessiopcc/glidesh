@@ -104,7 +104,10 @@ Each child is a variable name (not starting with `-`, and without `=` or whitesp
   terminal)
 
 `glidesh run` asks each question once, before connecting to any host, and the answers
-become plan variables (`${release}`). A non-secret prompt shows its default in brackets:
+become variables (`${release}`). An answer — typed, or given with `--var` — overrides every
+other source; a `default=` that is taken instead is a plan default, like a `vars` entry, so
+the inventory overrides it (see [Merge Order](#merge-order)). A non-secret prompt shows its
+default in brackets:
 
 ```
 Release to deploy [main]: v1.4.2
@@ -136,35 +139,52 @@ glidesh run -i inventory.kdl -p deploy.kdl --var release=v1.4.2 --var db-passwor
 
 ## Merge Order
 
-When the same variable is defined at multiple levels, the most specific value wins:
+When the same variable is defined at multiple levels, the most specific value wins, from
+lowest to highest:
 
 ```
-Inventory global vars → Group vars → Host vars → Plan vars
+Plan vars → Secrets file → Inventory global vars → Group vars → Host vars → Prompted answers
 ```
 
-[Prompted variables](#prompted-variables) take the plan-vars slot.
+A plan's `vars` (its own, an included plan's, a `vars-file`'s) are **defaults**: whatever
+the secrets file or the inventory sets for a host replaces them for that host. A
+[prompted variable](#prompted-variables)'s answer was given for this run, so it beats
+everything; when nobody answers and the prompt's `default=` is taken, that default is a
+plan default too. A [structured variable](#structured-variables) in the secrets file likewise
+replaces the plan's of the same name.
 
-The [secrets file](#secret-variables) sits under all of them.
+:::caution[Changed in glidesh 2.0]
+Before 2.0, plan vars came last and beat the inventory. A plan that set a variable the
+inventory also sets for a host now uses the inventory's value for that host. `glidesh run`
+and `glidesh validate -i` warn about each such variable (see below), so an upgrade shows
+exactly which values change.
+:::
 
-### A plan var overrides the host's
-
-Plan vars come last, so a plan's value beats what the inventory says about a specific
-host — even when the plan meant it as a default:
+### The inventory overrides a plan's default
 
 ```kdl
 // inventory.kdl
-host "web-1" "10.0.0.1" {
+group "web" {
     vars {
-        customer "acme"
+        release "pinned"
     }
+    host "web-1" "10.0.0.1" {
+        vars {
+            customer "acme"
+        }
+    }
+    host "web-2" "10.0.0.2"
 }
 ```
 
 ```kdl
 // plan.kdl
 plan "enroll" {
+    vars-prompt {
+        release "Release to enroll"   // an answer replaces "pinned"
+    }
     vars {
-        customer "default"   // web-1 is enrolled as "default", not "acme"
+        customer "default"   // web-1 is enrolled as "acme", web-2 as "default"
     }
     step "Enroll" {
         shell "enroll --customer ${customer}"
@@ -172,21 +192,24 @@ plan "enroll" {
 }
 ```
 
-Because that is easy to miss, glidesh warns whenever a plan variable — its own, an
-included plan's, or a `vars-prompt` name — is also set by the inventory or the secrets file
-for a host the plan runs on, and when a [structured variable](#structured-variables) the
-plan defines is also in the secrets file. `glidesh validate -i` reports it, and `glidesh run` prints it
-before connecting to any host, once per plan and variable:
+glidesh warns whenever a plan variable — its own or an included plan's — is also set by the
+inventory or the secrets file for a host the plan runs on, and when a
+[structured variable](#structured-variables) the plan defines is also in the secrets file.
+It warns too when a `vars-prompt` name is also set there, since the answer then replaces
+the inventory's value. `glidesh validate -i` reports it, and `glidesh run` prints it before
+connecting to any host, once per plan and variable:
 
 ```
-warning: plan 'enroll' overrides 'customer', which is also set by host 'web-1': the plan's value wins, as plan vars merge last
+warning: plan 'enroll' sets 'customer' as a default, which host 'web-1' overrides; before glidesh 2.0 the plan's value won
+warning: plan 'enroll' asks for 'release', which group 'web' also sets: an answer overrides it, the prompt's default does not
 ```
 
 The warning names the variable and where the inventory sets it (the secrets file, the
-inventory's global vars, a group, a host), never a value: either may be a secret. To let
-the inventory decide, leave the variable out of the plan. `validate -p` checks the plan
-against every host of the inventory given with `-i`, since `run -p` may target any of them;
-`validate -i` alone checks each plan the inventory names against the hosts that run it.
+inventory's global vars, a group, a host), never a value: either may be a secret. To make
+the plan's value apply everywhere, write it into the task instead of a variable, or use a
+name the inventory does not set. `validate -p` checks the plan against every host of the
+inventory given with `-i`, since `run -p` may target any of them; `validate -i` alone checks
+each plan the inventory names against the hosts that run it.
 
 Built-in variables live in reserved `@`-prefixed namespaces (`@host`, `@os`, `@fact`, `@item`, `@inventory`, `@group`, `@error`) that user variables cannot collide with — a variable name may not begin with `@`. `${@error.msg}` and `${@error.task}` describe a step's failure to its [`rescue` and `always`](/advanced/rescue/#reading-the-failure) tasks.
 
