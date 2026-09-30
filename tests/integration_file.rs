@@ -580,3 +580,277 @@ async fn test_file_dry_run_sees_drift_and_changes_nothing() {
         "dry-run must leave the remote file untouched"
     );
 }
+
+fn tree_params(src: &std::path::Path, dest: &str, extra: Vec<(&str, ParamValue)>) -> ModuleParams {
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String(src.to_string_lossy().to_string()),
+    );
+    args.insert("recurse".to_string(), ParamValue::Bool(true));
+    for (key, value) in extra {
+        args.insert(key.to_string(), value);
+    }
+    ModuleParams {
+        resource_name: dest.to_string(),
+        args,
+    }
+}
+
+fn source_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, content) in files {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    dir
+}
+
+async fn exists(ssh: &glidesh::ssh::SshSession, path: &str) -> bool {
+    ssh.exec(&format!("test -e {path} && echo yes"))
+        .await
+        .unwrap()
+        .stdout
+        .trim()
+        == "yes"
+}
+
+/// A stray file and directory keep a recursive upload pending with `prune`, named in the
+/// plan, and are removed by the apply; without `prune` they stay and the upload is `ok`.
+#[tokio::test]
+async fn prune_reports_then_removes_what_the_source_lacks() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    let src = source_tree(&[("a.conf", "a"), ("lib/x", "x")]);
+    let dest = "/srv/glidesh-prune";
+    let plain = tree_params(src.path(), dest, vec![]);
+    FileModule.apply(&ctx, &plain).await.unwrap();
+    ssh.exec("mkdir -p /srv/glidesh-prune/old/deep && touch /srv/glidesh-prune/old/deep/f /srv/glidesh-prune/lib/stale")
+        .await
+        .unwrap();
+
+    let status = FileModule.check(&ctx, &plain).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "without prune strays are left alone: {status:?}"
+    );
+
+    let prune = tree_params(src.path(), dest, vec![("prune", ParamValue::Bool(true))]);
+    let ModuleStatus::Pending { plan, .. } = FileModule.check(&ctx, &prune).await.unwrap() else {
+        panic!("strays should be pending");
+    };
+    assert!(plan.contains("remove 4"), "{plan}");
+    assert!(plan.contains("/srv/glidesh-prune/lib/stale"), "{plan}");
+
+    let result = FileModule.apply(&ctx, &prune).await.unwrap();
+    assert!(result.output.contains("4 removed"), "{}", result.output);
+    for gone in ["old", "lib/stale"] {
+        assert!(!exists(&ssh, &format!("{dest}/{gone}")).await, "{gone}");
+    }
+    for kept in ["a.conf", "lib/x"] {
+        assert!(exists(&ssh, &format!("{dest}/{kept}")).await, "{kept}");
+    }
+    let status = FileModule.check(&ctx, &prune).await.unwrap();
+    assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
+}
+
+/// An excluded path is neither uploaded nor pruned, on either side.
+#[tokio::test]
+async fn an_excluded_path_is_neither_uploaded_nor_pruned() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    let src = source_tree(&[("app.conf", "a"), (".git/HEAD", "ref"), ("debug.log", "l")]);
+    let dest = "/srv/glidesh-exclude";
+    ssh.exec("mkdir -p /srv/glidesh-exclude/data && touch /srv/glidesh-exclude/data/keep.log /srv/glidesh-exclude/stray")
+        .await
+        .unwrap();
+    let params = tree_params(
+        src.path(),
+        dest,
+        vec![
+            ("prune", ParamValue::Bool(true)),
+            (
+                "exclude",
+                ParamValue::List(vec![".git".to_string(), "*.log".to_string()]),
+            ),
+        ],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    assert!(exists(&ssh, &format!("{dest}/app.conf")).await);
+    assert!(!exists(&ssh, &format!("{dest}/.git")).await, "not uploaded");
+    assert!(
+        !exists(&ssh, &format!("{dest}/debug.log")).await,
+        "not uploaded"
+    );
+    assert!(
+        exists(&ssh, &format!("{dest}/data/keep.log")).await,
+        "an excluded host file and its directory stay"
+    );
+    assert!(!exists(&ssh, &format!("{dest}/stray")).await, "pruned");
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
+}
+
+/// `dir-mode` and `file-mode` set each kind, `mode` the other; only the source's paths
+/// change, and an empty source directory is created.
+#[tokio::test]
+async fn dir_mode_and_file_mode_apply_to_the_sources_paths_only() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    let src = source_tree(&[("bin/run", "#!/bin/sh"), ("app.conf", "a")]);
+    std::fs::create_dir_all(src.path().join("empty")).unwrap();
+    let dest = "/srv/glidesh-modes";
+    ssh.exec("mkdir -p /srv/glidesh-modes && touch /srv/glidesh-modes/local.conf && chmod 0600 /srv/glidesh-modes/local.conf")
+        .await
+        .unwrap();
+    let params = tree_params(
+        src.path(),
+        dest,
+        vec![
+            ("mode", ParamValue::String("0640".to_string())),
+            ("dir-mode", ParamValue::String("0750".to_string())),
+        ],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let modes = ssh
+        .exec("cd /srv/glidesh-modes && stat -c '%n %a' . bin empty bin/run app.conf local.conf")
+        .await
+        .unwrap()
+        .stdout;
+    assert_eq!(
+        modes,
+        ". 750\nbin 750\nempty 750\nbin/run 640\napp.conf 640\nlocal.conf 600\n"
+    );
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
+
+    ssh.exec("chmod 0755 /srv/glidesh-modes/bin").await.unwrap();
+    let ModuleStatus::Pending { plan, .. } = FileModule.check(&ctx, &params).await.unwrap() else {
+        panic!("a directory's mode drifted");
+    };
+    assert!(plan.contains("1 attrs"), "{plan}");
+}
+
+/// `prune` deletes, so it refuses a destination that is a symlink.
+#[tokio::test]
+async fn prune_refuses_a_symlinked_destination() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-real && touch /srv/glidesh-real/stray && ln -s /srv/glidesh-real /srv/glidesh-link")
+        .await
+        .unwrap();
+    let src = source_tree(&[("a", "a")]);
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-link",
+        vec![("prune", ParamValue::Bool(true))],
+    );
+    let err = FileModule.check(&ctx, &params).await.unwrap_err();
+    assert!(err.to_string().contains("is a symlink"), "{err}");
+    assert!(exists(&ssh, "/srv/glidesh-real/stray").await);
+}
+
+/// A preview names what prune would remove and removes nothing; `--diff` lists each path; a
+/// symlink under the destination goes as a link, what it points to stays.
+#[tokio::test]
+async fn prune_previews_then_removes_a_link_as_a_link() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    ssh.exec("mkdir -p /srv/glidesh-links && echo keep > /root/glidesh-target && ln -s /root/glidesh-target /srv/glidesh-links/link && mkdir /srv/glidesh-links/linked-dir-target && ln -s /root /srv/glidesh-links/rootlink")
+        .await
+        .unwrap();
+    let src = source_tree(&[("a", "a")]);
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-links",
+        vec![("prune", ParamValue::Bool(true))],
+    );
+
+    let mut preview = container.module_context(&ssh, &os_info, &vars, true);
+    preview.diff = true;
+    let ModuleStatus::Pending { diff, .. } = FileModule.check(&preview, &params).await.unwrap()
+    else {
+        panic!("strays should be pending");
+    };
+    let diff = diff.unwrap();
+    for path in ["link", "rootlink", "linked-dir-target"] {
+        assert!(
+            diff.contains(&format!("remove /srv/glidesh-links/{path}")),
+            "{diff}"
+        );
+    }
+    let dry = FileModule.apply(&preview, &params).await.unwrap();
+    assert!(dry.output.contains("and remove 3"), "{}", dry.output);
+    assert!(
+        exists(&ssh, "/srv/glidesh-links/link").await,
+        "a preview removes nothing"
+    );
+
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    FileModule.apply(&ctx, &params).await.unwrap();
+    for gone in ["link", "rootlink", "linked-dir-target"] {
+        let path = format!("/srv/glidesh-links/{gone}");
+        let left = ssh
+            .exec(&format!("test -e {path} || test -L {path} && echo yes"))
+            .await
+            .unwrap();
+        assert_eq!(left.stdout.trim(), "", "{gone}");
+    }
+    let target = ssh.exec("cat /root/glidesh-target").await.unwrap();
+    assert_eq!(target.stdout, "keep\n", "the link's target stays");
+    assert!(exists(&ssh, "/root").await);
+}
+
+/// With nothing to upload, prune would empty the destination: refused.
+#[tokio::test]
+async fn prune_refuses_an_empty_source() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-empty && touch /srv/glidesh-empty/data")
+        .await
+        .unwrap();
+    let src = source_tree(&[("only.log", "x")]);
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-empty",
+        vec![
+            ("prune", ParamValue::Bool(true)),
+            ("exclude", ParamValue::List(vec!["*.log".to_string()])),
+        ],
+    );
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(err.to_string().contains("nothing to upload"), "{err}");
+    assert!(exists(&ssh, "/srv/glidesh-empty/data").await);
+}

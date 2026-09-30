@@ -102,15 +102,48 @@ impl ModuleContext<'_> {
         self.ssh.create_dirs_as(dirs, self.run_as.as_ref()).await
     }
 
-    pub async fn set_file_attrs_recursive(
+    pub async fn list_tree(
         &self,
-        path: &str,
-        owner: Option<&str>,
-        group: Option<&str>,
-        mode: Option<&str>,
+        dest: &str,
+    ) -> Result<Vec<(crate::modules::file_tree::RemoteKind, String)>, GlideshError> {
+        self.ssh.list_tree_as(dest, self.run_as.as_ref()).await
+    }
+
+    pub async fn remove_strays(
+        &self,
+        dest: &str,
+        strays: &crate::modules::file_tree::Strays,
     ) -> Result<(), GlideshError> {
         self.ssh
-            .set_file_attrs_recursive(path, owner, group, mode, self.run_as.as_ref())
+            .remove_strays_as(dest, strays, self.run_as.as_ref())
+            .await
+    }
+
+    pub async fn stat_many(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<Option<(String, String, String)>>, GlideshError> {
+        self.ssh.stat_many_as(paths, self.run_as.as_ref()).await
+    }
+
+    pub async fn set_tree_attrs(
+        &self,
+        root: &str,
+        files: &[String],
+        dirs: &[String],
+        options: &crate::modules::file_tree::Options,
+    ) -> Result<(), GlideshError> {
+        self.ssh
+            .set_tree_attrs_as(
+                root,
+                files,
+                dirs,
+                options.owner.as_deref(),
+                options.group.as_deref(),
+                options.file_mode.as_deref(),
+                options.dir_mode.as_deref(),
+                self.run_as.as_ref(),
+            )
             .await
     }
 }

@@ -6,6 +6,7 @@ pub mod escalation;
 pub mod external;
 pub mod file;
 pub mod file_diff;
+pub mod file_tree;
 pub mod host;
 pub mod nix;
 pub mod package;
@@ -309,7 +310,7 @@ mod tests {
         assert_eq!(
             found,
             [
-                "step 's': file '/etc/a': unknown parameter 'mdoe' (did you mean 'mode'? file accepts: diff, fetch, group, mode, owner, recurse, src, template)"
+                "step 's': file '/etc/a': unknown parameter 'mdoe' (did you mean 'mode'? file accepts: diff, dir-mode, exclude, fetch, file-mode, group, mode, owner, prune, recurse, src, template)"
             ]
         );
     }

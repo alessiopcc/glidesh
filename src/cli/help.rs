@@ -248,6 +248,14 @@ MODULES (each checks the host first and changes only what differs)
                               (sticky /tmp only above an existing dir:
                               /tmp/app/x, not /tmp/x), or a symlink owned by neither
                               root, the run-as or login user, nor its directory's owner.
+                              With recurse=#true: dir-mode= file-mode= (mode= sets
+                              the kind without its own), exclude { - \".git\"; - \"*.log\" }
+                              (no `/`: a name at any depth; with `/`: from src; * ? **),
+                              prune=#true removes host paths under <dest> the source
+                              lacks, less excluded ones; the check lists them first;
+                              refused for an empty source, a symlink or a <dest> less
+                              than two directories deep.
+                              Attributes apply to the source's paths only.
   package \"<name>\"            state=present|absent (apt, dnf, yum, pacman, apk, zypper, nix)
   user \"<name>\"               uid= shell= groups=\"a,b\" state=present|absent
   systemd \"<unit>\"            state=started|stopped|restarted  enabled=#true|#false

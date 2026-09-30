@@ -738,3 +738,44 @@ host "app-1" "10.0.0.1"
         "{out}"
     );
 }
+
+/// A recursive-only `file` parameter without `recurse`, or a `prune` too close to `/`, fails
+/// validate as it would fail the run.
+#[test]
+fn a_misused_recursive_file_parameter_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "site/index.html", "x");
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" {
+            file "/srv/app/index.html" src="site/index.html" prune=#true
+            file "/srv" src="site" recurse=#true prune=#true
+        } }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("prune= only apply with recurse=#true"),
+        "{out}"
+    );
+    assert!(
+        out.contains("prune=#true needs an absolute destination at least two directories deep"),
+        "{out}"
+    );
+
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" {
+            file "/srv/app" src="site" recurse=#true prune=#true dir-mode="0755" file-mode="0644" {
+                exclude {
+                    - ".git"
+                    - "*.log"
+                }
+            }
+        } }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(ok, "{out}");
+}

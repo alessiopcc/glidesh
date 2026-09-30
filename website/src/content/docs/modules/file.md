@@ -90,23 +90,81 @@ run, for directory uploads too.
 Upload an entire directory tree to the remote host:
 
 ```kdl
-file "/etc/myapp/" src="configs/" recurse=#true owner="deploy" mode="0644"
+file "/etc/myapp/" src="configs/" recurse=#true owner="deploy" file-mode="0644"
 ```
 
-All files under the local `configs/` directory are uploaded to `/etc/myapp/`, preserving the directory structure. Remote directories are created automatically.
-
-A recursive copy only adds and updates: a file on the host that is not in the local
-directory stays, even one you deleted or renamed locally. Remove it with another task, such
-as `shell "rm -f /etc/myapp/old.conf"`.
+All files under the local `configs/` directory are uploaded to `/etc/myapp/`, preserving the directory structure. Remote directories are created automatically, empty ones included.
 
 Recursive copy supports:
 - **Idempotency** — each file is compared by SHA256 checksum; only changed files are uploaded
 - **Template mode** — combine with `template=#true` to interpolate all files in the directory
-- **Attributes** — `owner`, `group`, and `mode` are applied recursively to all files and directories,
-  behind the destination when it is a symlink to a directory too. A symlink inside the tree gets
-  `owner`/`group` itself, never what it points to; `mode` skips it. A copy to `/` — however
-  it is named, `/tmp/..` or a symlink to it too — is refused with any of them, before anything
-  is uploaded: it would change the whole filesystem. Without them, a copy to `/` works.
+- **Attributes** — `owner`, `group`, and `mode` apply to the paths the source has: the
+  destination directory, the directories under it, and the files. A host file or directory
+  the source does not have, or that `exclude` leaves out, keeps its own. The check compares
+  each of them, directories included, so a second run is `ok`. A path that is a symlink on
+  the host is never followed: `owner`/`group` change the link itself, and the mode skips it.
+  A copy to `/` — however it is named,
+  `/tmp/..` or a symlink to it too — is refused with any of them, before anything is
+  uploaded. Without them, a copy to `/` works.
+- **Per-kind modes** — `dir-mode` and `file-mode` set directories and files apart;
+  `mode` sets whichever kind has no mode of its own:
+
+  ```kdl
+  file "/opt/app/" src="app/" recurse=#true owner="app" dir-mode="0755" file-mode="0644"
+  file "/opt/tools/" src="tools/" recurse=#true mode="0755" file-mode="0644"
+  ```
+
+### Excluding paths
+
+`exclude` leaves paths of the source out: they are neither uploaded nor, with `prune`,
+removed from the host.
+
+```kdl
+file "/srv/site/" src="site/" recurse=#true {
+    exclude {
+        - ".git"        // any .git, file or directory, at any depth
+        - "*.log"       // every .log file
+        - "build/**"    // everything under the top-level build/
+    }
+}
+```
+
+Patterns work like `.gitignore`'s: one without `/` matches a name at any depth, one with `/`
+(or a leading `/`) is matched against the path from the source directory. `*` and `?` match
+within a name, `**` any number of directories. Excluding a directory excludes everything
+under it. Unlike `.gitignore`, there is no `!` (a pattern starting with it is refused), no
+`[…]` class and no `\` escape, and a trailing `/` matches a file of that name too.
+
+Put each pattern on its own line, or separate them with `;` (`- ".git"; - "*.log"`): a `-`
+line holding several values is an error, rather than keeping the first alone.
+
+### Removing what the source lacks (`prune`)
+
+Without `prune`, a recursive copy only adds and updates: a file on the host that is not in
+the local directory stays, even one you deleted or renamed locally. `prune=#true` removes
+host files and directories under the destination that the source does not have (less what
+`exclude` leaves out), so the tree on the host is the one in the plan:
+
+```kdl
+file "/srv/site/" src="site/" recurse=#true prune=#true {
+    exclude {
+        - "uploads"     // written by the application: never removed
+    }
+}
+```
+
+The check reports what would go — the task stays pending, naming the paths, and
+[`--diff`](#--diff) lists every one — so `--dry-run` shows a removal before it happens. A
+directory holding an excluded entry stays, with that entry.
+
+`prune` deletes, so it is refused, before anything changes, for a destination that is not
+an absolute path at least two directories deep (`/srv/site`, not `/srv`), that goes through
+`.` or `..`, that resolves to `/`, or that is a symlink — and for a source with nothing to
+upload (empty, or all of it excluded), which would empty the destination. It lists the tree
+without following symlinks: a link under the destination is removed as a link, never what
+it points to. A host name it cannot read exactly — not UTF-8, or holding a line break under
+`run-as-method="su"` — stops it, since it could not be compared. With `run-as`, it removes
+only from directories no one else can write to, as uploads write only there.
 
 :::note
 `fetch=#true` and `recurse=#true` cannot be combined.
@@ -150,7 +208,11 @@ beside the plan file.
 | `recurse` | boolean | Recursively copy a directory tree |
 | `owner` | string | Remote file owner |
 | `group` | string | Remote file group |
-| `mode` | string | Remote file permissions (e.g., `"0644"`) |
+| `mode` | string | Remote file permissions (e.g., `"0644"`); with `recurse`, of the directories and files that have no mode of their own |
+| `dir-mode` | string | With `recurse`: the mode of the directories |
+| `file-mode` | string | With `recurse`: the mode of the files |
+| `exclude` | list | With `recurse`: [paths of the source to leave out](#excluding-paths) |
+| `prune` | boolean | With `recurse`: [remove what the source lacks](#removing-what-the-source-lacks-prune) from the destination (default `#false`) |
 | `diff` | boolean | `#false` keeps this task's content out of [`--diff`](#--diff) (default `#true`) |
 
 ## Owner and Mode
