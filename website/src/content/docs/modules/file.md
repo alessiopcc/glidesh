@@ -165,8 +165,10 @@ happens. Every template is rendered before anything is removed, so a template er
 the task with the host unchanged. A symlinked directory on the way to the destination is
 allowed, but its real path must be two directories deep too. A
 directory holding an excluded entry stays, with that entry. An entry of another kind than
-the source's at the same path — a file or a link where the source has a directory, a
-directory where it has a file — is removed too, and the source's takes its place.
+the source's at the same path — a file (or a link to one) where the source has a directory,
+a directory (or a link to one) where it has a file — is removed too, and the source's takes
+its place. A link to a directory where the source has a directory stays: uploads go through
+it, and `prune` does not look inside it.
 
 `prune` deletes, so it is refused, before anything changes, for a destination that is not
 an absolute path at least two directories deep (`/srv/site`, not `/srv`), that goes through

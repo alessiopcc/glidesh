@@ -992,3 +992,41 @@ async fn a_destination_that_is_a_file_is_refused() {
     let kept = ssh.exec("cat /srv/glidesh-notadir").await.unwrap();
     assert_eq!(kept.stdout, "keep\n");
 }
+
+/// A link to a directory where the source has a directory is what uploads go through: prune
+/// keeps it, and does not look inside it.
+#[tokio::test]
+async fn prune_keeps_a_link_to_a_directory_where_the_source_has_one() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-keeplink /srv/glidesh-cache && touch /srv/glidesh-cache/other && ln -s /srv/glidesh-cache /srv/glidesh-keeplink/cache")
+        .await
+        .unwrap();
+    let src = source_tree(&[("cache/x", "x"), ("a", "a")]);
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-keeplink",
+        vec![("prune", ParamValue::Bool(true))],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+    let link = ssh
+        .exec("test -L /srv/glidesh-keeplink/cache && echo link")
+        .await
+        .unwrap();
+    assert_eq!(link.stdout.trim(), "link", "the link stays");
+    assert!(
+        exists(&ssh, "/srv/glidesh-cache/x").await,
+        "uploaded through it"
+    );
+    assert!(
+        exists(&ssh, "/srv/glidesh-cache/other").await,
+        "not pruned inside it"
+    );
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
+}
