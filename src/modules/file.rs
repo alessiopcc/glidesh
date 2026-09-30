@@ -284,7 +284,7 @@ struct Managed {
     /// Paths of the other kind than the source's, with whether the host's is a directory.
     mismatched: Vec<(String, bool)>,
     /// Source directories the host has as a link to a directory.
-    dir_links: Vec<String>,
+    dir_links: std::collections::HashSet<String>,
 }
 
 impl FileModule {
@@ -559,6 +559,18 @@ impl FileModule {
         })
     }
 
+    /// Whether a directory above `path` is one of the `mismatched` paths.
+    fn below_mismatch(path: &str, mismatched: &[(String, bool)]) -> bool {
+        let mut at = path;
+        while let Some((parent, _)) = at.rsplit_once('/') {
+            if mismatched.iter().any(|(p, _)| p == parent) {
+                return true;
+            }
+            at = parent;
+        }
+        false
+    }
+
     /// A host path as output shows it: a name may hold a line break or a terminal escape,
     /// which would forge output lines or drive the terminal.
     fn shown_path(path: &str) -> String {
@@ -647,8 +659,12 @@ impl FileModule {
             // Rendered even when a directory is in the way, so a template error fails the
             // check, before an apply removes that directory.
             let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
-            // A directory in the way has no content to compare; it is counted as a mismatch.
-            if stat.as_ref().is_some_and(|s| s.mismatches(false)) {
+            // A directory in the way, or a file where one of its directories should be, leaves
+            // no content to compare — nor to checksum, which fails through a file — and is
+            // counted as a mismatch.
+            if stat.as_ref().is_some_and(|s| s.mismatches(false))
+                || Self::below_mismatch(remote_path, mismatched)
+            {
                 continue;
             }
             let local_hash = Self::sha256_hex(&content);

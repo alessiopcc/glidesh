@@ -869,8 +869,8 @@ async fn an_entry_of_the_other_kind_is_replaced_only_with_prune() {
     ssh.exec("mkdir -p /srv/glidesh-kinds/conf.d && touch /srv/glidesh-kinds/conf.d/old /srv/glidesh-kinds/cache")
         .await
         .unwrap();
-    let src = source_tree(&[("conf.d", "a file now")]);
-    std::fs::create_dir_all(src.path().join("cache")).unwrap();
+    // `cache/x` sits below the file in the way: the check must not checksum through it.
+    let src = source_tree(&[("conf.d", "a file now"), ("cache/x", "x")]);
     let dest = "/srv/glidesh-kinds";
 
     let plain = tree_params(src.path(), dest, vec![]);

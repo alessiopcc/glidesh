@@ -76,8 +76,26 @@ pub fn file_option_problems(plan: &Plan) -> Vec<String> {
     for step in plan.steps() {
         for task in step.all_tasks().filter(|t| t.module == "file") {
             let recurse = matches!(task.args.get("recurse"), Some(ParamValue::Bool(true)));
-            let dest = Some(task.resource.as_str()).filter(|d| !d.contains("${"));
-            if let Err(problem) = file_tree::options(&task.args, dest, recurse) {
+            // A run interpolates first: what the plan's vars resolve is checked as the run will
+            // see it; what needs a host or a prompted answer is left to the run.
+            let dest = interpolate(&task.resource, &plan.vars).ok();
+            let mut args = task.args.clone();
+            let patterns = match args.get("exclude") {
+                Some(ParamValue::List(items)) => Some(items.clone()),
+                Some(ParamValue::String(one)) => Some(vec![one.clone()]),
+                _ => None,
+            };
+            if let Some(patterns) = patterns {
+                let resolved: Result<Vec<String>, _> = patterns
+                    .iter()
+                    .map(|p| interpolate(p, &plan.vars))
+                    .collect();
+                match resolved {
+                    Ok(resolved) => args.insert("exclude".to_string(), ParamValue::List(resolved)),
+                    Err(_) => args.remove("exclude"),
+                };
+            }
+            if let Err(problem) = file_tree::options(&args, dest.as_deref(), recurse) {
                 problems.push(format!(
                     "step '{}': file '{}': {}",
                     step.name, task.resource, problem
@@ -1089,6 +1107,27 @@ mod tests {
         assert!(problems[0].contains("file '/etc/a': dir-mode= only apply with recurse=#true"));
         assert!(problems[1].contains("file '/srv': prune=#true needs an absolute destination"));
         assert!(problems[2].contains("may not contain empty, `.` or `..` parts"));
+    }
+
+    /// The plan's vars are known before any host: a value they give is checked as the run
+    /// will see it.
+    #[test]
+    fn recursive_options_are_checked_with_the_plans_vars_filled_in() {
+        let p = plan(
+            r#"vars {
+                root "/srv"
+                bad "../x"
+            }
+            step "s" {
+                file "${root}" src="site" recurse=#true prune=#true
+                file "/srv/app" src="site" recurse=#true exclude="${bad}"
+                file "${@host.name}" src="site" recurse=#true prune=#true exclude="${@host.name}"
+            }"#,
+        );
+        let problems = file_option_problems(&p);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("prune=#true needs an absolute destination"));
+        assert!(problems[1].contains("may not contain empty, `.` or `..` parts"));
     }
 
     /// An excluded file is never uploaded, so a template check skips it: a binary `.git`
