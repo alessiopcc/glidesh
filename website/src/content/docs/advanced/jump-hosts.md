@@ -17,9 +17,25 @@ All modules (shell, file, package, etc.) work transparently over the tunneled co
 
 ## Configuration
 
+### Every host
+
+A `jump` node at the top level of the inventory applies to every host, grouped or not.
+
+```kdl
+jump "bastion.example.com" user="jumpuser"
+
+group "internal" {
+    host "app-1" "10.0.1.10" user="deploy"
+    host "app-2" "10.0.1.11" user="deploy"
+}
+
+host "db-backup" "10.0.2.50" user="root"
+```
+
 ### Group-level
 
-Add a `jump` node inside a group. All hosts in the group inherit it.
+Add a `jump` node inside a group. All hosts in the group inherit it, instead of the top-level
+one.
 
 ```kdl
 group "internal" {
@@ -54,6 +70,28 @@ host "db-backup" "10.0.2.50" user="root" {
 }
 ```
 
+### Reaching a host directly
+
+`jump #false` on a group or host connects to it directly, although a wider scope names a
+bastion — a host in a DMZ while the rest sit behind one, or the bastion itself when it is in
+the inventory.
+
+```kdl
+jump "bastion.example.com" user="jumpuser"
+
+group "dmz" {
+    jump #false
+    host "edge-1" "203.0.113.10"
+}
+
+host "bastion" "bastion.example.com" user="jumpuser" {
+    jump #false
+}
+```
+
+`jump #false` takes nothing else, and at the top level it is an error: leave `jump` out
+instead. A scope may have one `jump` only.
+
 ### Properties
 
 | Property | Default | Description |
@@ -62,10 +100,15 @@ host "db-backup" "10.0.2.50" user="root" {
 | `user` | target host's user | SSH username on the bastion |
 | `port` | `22` | SSH port on the bastion |
 
+Anything else on a `jump` node — a second argument, another property, a child node — is an
+error, as is a `port` that is not an integer from 1 to 65535.
+
 ## Inheritance Rules
 
-- **Group → host**: all hosts in a group inherit the group's `jump` node
-- **Host override**: a `jump` inside a host replaces the group's jump entirely
+- **Most specific wins**: a host's `jump` beats its group's, which beats the top-level one;
+  each replaces the wider one entirely, its `user` and `port` included
+- **Opt out**: `jump #false` on a group or host means no bastion for it; a host in such a group
+  can still name its own
 - **User fallback**: if `user` is omitted on the jump node, it defaults to the resolved user of the target host
 - **Same SSH key**: the same key is used for both the bastion and the target
 

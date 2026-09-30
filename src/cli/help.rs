@@ -281,8 +281,10 @@ PREVIEW AND OUTPUT
 
 SSH
   The key is --key, else the inventory's ssh-key variable, else ~/.ssh/id_ed25519. Host
-  keys are checked against ~/.ssh/known_hosts. Hosts behind a bastion use a `jump \"<addr>\"`
-  child node on their group or host in the inventory.
+  keys are checked against ~/.ssh/known_hosts. Hosts behind a bastion use an inventory node
+  `jump \"<addr>\" user= port=` (user defaults to the host's, port to 22): at the top level
+  for every host, in a group, or in a host; the most specific wins, and `jump #false` in a
+  group or host connects to it directly.
 
 Docs: https://glidesh.netlify.app/cli/#glidesh-run"
 );

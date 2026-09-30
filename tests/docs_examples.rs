@@ -38,10 +38,8 @@ const TASKS: &[&str] = &[
     "user",
 ];
 
-/// The ```kdl blocks of a page that are plans, each as a whole plan: a block whose first node
-/// is `plan` as it is, one that starts with a `step` or a task wrapped in a plan (and a step).
-/// Inventories, `vars` files and other fragments are left out.
-fn plan_blocks(page: &str) -> Vec<String> {
+/// A page's ```kdl blocks, each with its first line that is not blank or a comment.
+fn kdl_blocks(page: &str) -> Vec<(&str, &str)> {
     let mut blocks = Vec::new();
     let mut rest = page;
     while let Some(start) = rest.find("```kdl") {
@@ -53,13 +51,28 @@ fn plan_blocks(page: &str) -> Vec<String> {
             .map(str::trim)
             .find(|l| !l.is_empty() && !l.starts_with("//"))
             .unwrap_or_default();
-        // An inventory's `host "name" "address"` is not a `host` task.
-        let inventory_host = first_line
-            .strip_prefix("host \"")
-            .and_then(|rest| rest.split_once('"'))
-            .is_some_and(|(_, after)| after.trim_start().starts_with('"'));
+        blocks.push((first_line, block));
+        rest = &body[end + 3..];
+    }
+    blocks
+}
+
+/// An inventory's `host "name" "address"`, which is not a `host` task.
+fn is_inventory_host(first_line: &str) -> bool {
+    first_line
+        .strip_prefix("host \"")
+        .and_then(|rest| rest.split_once('"'))
+        .is_some_and(|(_, after)| after.trim_start().starts_with('"'))
+}
+
+/// The ```kdl blocks of a page that are plans, each as a whole plan: a block whose first node
+/// is `plan` as it is, one that starts with a `step` or a task wrapped in a plan (and a step).
+/// Inventories, `vars` files and other fragments are left out.
+fn plan_blocks(page: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    for (first_line, block) in kdl_blocks(page) {
         match first_line.split([' ', '{']).next() {
-            _ if inventory_host => {}
+            _ if is_inventory_host(first_line) => {}
             Some("plan") => blocks.push(block.to_string()),
             Some("step") => blocks.push(format!("plan \"doc\" {{\n{block}\n}}")),
             Some(node) if TASKS.contains(&node) => {
@@ -67,9 +80,22 @@ fn plan_blocks(page: &str) -> Vec<String> {
             }
             _ => {}
         }
-        rest = &body[end + 3..];
     }
     blocks
+}
+
+/// The ```kdl blocks of a page that are inventories: those starting with a top-level `jump`,
+/// a `group` or a `host "name" "address"`. One starting with `vars` may be a plan's
+/// `vars-file`, so it is left out.
+fn inventory_blocks(page: &str) -> Vec<&str> {
+    kdl_blocks(page)
+        .into_iter()
+        .filter(|(first_line, _)| {
+            is_inventory_host(first_line)
+                || matches!(first_line.split([' ', '{']).next(), Some("jump" | "group"))
+        })
+        .map(|(_, block)| block)
+        .collect()
 }
 
 /// What `run` and `validate` reject in `plan`: a task parameter its module does not read, or
@@ -125,6 +151,61 @@ fn every_plan_in_the_docs_parses() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Every inventory the docs show and every `examples/*/inventory*.kdl` parses.
+#[test]
+fn every_inventory_in_the_docs_and_examples_parses() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let docs = root.join("website/src/content/docs");
+    let mut files = Vec::new();
+    doc_files(&docs, &mut files);
+    let mut inventories: Vec<(String, String)> = Vec::new();
+    for file in &files {
+        let page = std::fs::read_to_string(file).unwrap();
+        let rel = file
+            .strip_prefix(&docs)
+            .unwrap_or(file)
+            .display()
+            .to_string();
+        for block in inventory_blocks(&page) {
+            inventories.push((rel.clone(), block.to_string()));
+        }
+    }
+    let docs_count = inventories.len();
+    for entry in std::fs::read_dir(root.join("examples")).unwrap() {
+        for file in std::fs::read_dir(entry.unwrap().path())
+            .into_iter()
+            .flatten()
+        {
+            let path = file.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.starts_with("inventory") && name.ends_with(".kdl") {
+                let content = std::fs::read_to_string(&path).unwrap();
+                inventories.push((path.display().to_string(), content));
+            }
+        }
+    }
+
+    // Guards the extraction itself: a change that found none would pass vacuously.
+    assert!(
+        docs_count >= 10,
+        "only {docs_count} inventories found in the docs"
+    );
+    assert!(
+        inventories.len() >= docs_count + 10,
+        "only {} example inventories found",
+        inventories.len() - docs_count
+    );
+    let failures: Vec<String> = inventories
+        .iter()
+        .filter_map(|(source, content)| {
+            glidesh::config::parse_inventory(content)
+                .err()
+                .map(|e| format!("{source}: {e}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Every plan under `examples/` loads as `run` loads it — includes and `vars-file`s resolved

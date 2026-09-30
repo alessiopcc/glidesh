@@ -87,7 +87,7 @@ Run a command **once** on the controller (or a single named target) and broadcas
 
 ## jump-host
 
-Connect to internal hosts through an SSH bastion (jump host). Demonstrates group-level and per-host jump host configuration with user/port inheritance.
+Connect to internal hosts through an SSH bastion (jump host). Demonstrates one jump host for every host, a per-host override, a host reached directly with `jump #false`, and user/port inheritance.
 
 **Features used:** jump hosts, SSH tunneling
 

@@ -2,9 +2,10 @@ vars {
     deploy-user "deploy"
 }
 
-group "internal" {
-    jump "bastion.example.com" user="jumpuser" port=22
+// Every host goes through this bastion unless its group or the host itself names another.
+jump "bastion.example.com" user="jumpuser"
 
+group "internal" {
     host "app-1" "10.0.1.10" user="deploy"
     host "app-2" "10.0.1.11" user="deploy"
 
@@ -13,6 +14,9 @@ group "internal" {
     }
 }
 
-host "db-backup" "10.0.2.50" user="root" {
-    jump "bastion.example.com"
+host "db-backup" "10.0.2.50" user="root"
+
+// Reachable directly: no bastion.
+host "edge" "203.0.113.10" user="deploy" {
+    jump #false
 }
