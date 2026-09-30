@@ -1,11 +1,13 @@
 //! Checks `glidesh validate` runs on a resolved plan without contacting any host.
 
 use crate::config::plan::{is_error_var, is_item_var};
+use crate::config::template::interpolate;
 use crate::config::template::{
     Token, bound_field, defined_references, literal_hint, structure_error, tokens,
 };
 use crate::config::types::{LoopSource, ParamValue, Plan, TaskDef};
 use crate::modules::file_tree;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// A task's local `file` source, resolved as a run resolves it, or `None` for a task with
@@ -32,11 +34,34 @@ fn local_source(task: &TaskDef, plan_dir: &Path) -> Option<(String, PathBuf)> {
 /// under it that the task's `exclude` keeps, and the first directory that could not be read,
 /// which a recursive upload fails on. An `exclude` that cannot be read is
 /// [`file_option_problems`]' to report; the walk then leaves nothing out.
-fn uploaded_files(task: &TaskDef, resolved: &Path) -> (Vec<PathBuf>, Option<String>) {
+///
+/// A run interpolates `exclude` first: a pattern the plan's `vars` resolve is read as they
+/// do, and a tree with one only a host can resolve is not walked — which files it uploads is
+/// not known yet.
+fn uploaded_files(
+    task: &TaskDef,
+    resolved: &Path,
+    vars: &HashMap<String, String>,
+) -> (Vec<PathBuf>, Option<String>) {
     if !resolved.is_dir() {
         return (vec![resolved.to_path_buf()], None);
     }
-    let exclude = file_tree::exclude_of(&task.args);
+    let patterns: Vec<String> = match task.args.get("exclude") {
+        Some(ParamValue::List(items)) => items.clone(),
+        Some(ParamValue::String(one)) => vec![one.clone()],
+        _ => Vec::new(),
+    };
+    let mut interpolated = Vec::with_capacity(patterns.len());
+    for pattern in &patterns {
+        match interpolate(pattern, vars) {
+            Ok(pattern) => interpolated.push(pattern),
+            Err(_) => return (Vec::new(), None),
+        }
+    }
+    let exclude = file_tree::exclude_of(&HashMap::from([(
+        "exclude".to_string(),
+        ParamValue::List(interpolated),
+    )]));
     match file_tree::walk(resolved, &exclude) {
         Ok(tree) => (tree.files.iter().map(|f| resolved.join(f)).collect(), None),
         Err(unreadable) => (Vec::new(), Some(unreadable)),
@@ -79,7 +104,7 @@ pub fn literal_reference_warnings(
             else {
                 continue;
             };
-            let (files, _) = uploaded_files(task, &resolved);
+            let (files, _) = uploaded_files(task, &resolved, &plan.vars);
             for file in files {
                 let Ok(content) = std::fs::read(&file) else {
                     continue;
@@ -138,7 +163,7 @@ pub fn template_scope_problems(plan: &Plan, plan_dir: &Path) -> Vec<String> {
                 let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) else {
                     continue;
                 };
-                let (files, _) = uploaded_files(task, &resolved);
+                let (files, _) = uploaded_files(task, &resolved, &plan.vars);
                 let names: std::collections::BTreeSet<String> = files
                     .iter()
                     .filter_map(|file| std::fs::read(file).ok())
@@ -238,7 +263,7 @@ pub fn template_reference_findings(
                         )
                     };
                     let defined = |name: &str| is_defined(name) || registered.contains(name);
-                    let (files, unreadable) = uploaded_files(task, &resolved);
+                    let (files, unreadable) = uploaded_files(task, &resolved, &plan.vars);
                     if let Some(unreadable) = unreadable {
                         findings.problems.push(format!(
                             "step '{}': file '{}': template {}: cannot be read: {}",
@@ -1092,5 +1117,43 @@ mod tests {
         );
         assert!(found.problems.is_empty(), "{:?}", found.problems);
         assert!(found.undefined.is_empty(), "{:?}", found.undefined);
+    }
+
+    /// A run interpolates `exclude` first: a pattern the plan's vars resolve leaves out what
+    /// the run does; one only a host resolves leaves the tree unchecked, not misread.
+    #[test]
+    fn an_interpolated_exclude_is_read_as_a_run_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("conf/.git")).unwrap();
+        std::fs::write(dir.path().join("conf/app.conf"), "port=${port}").unwrap();
+        std::fs::write(dir.path().join("conf/.git/index"), b"\xff${nope}").unwrap();
+        for (vars, pattern) in [
+            (r#"vars { ignored ".git" }"#, "${ignored}"),
+            ("", "${@host.name}"),
+        ] {
+            let p = plan(&format!(
+                r#"{vars}
+                step "s" {{
+                    file "/etc/app/" src="conf" recurse=#true template=#true {{
+                        exclude {{
+                            - "{pattern}"
+                        }}
+                    }}
+                }}"#
+            ));
+            let found = template_reference_findings(
+                &p,
+                dir.path(),
+                |n| n == "port",
+                |_| Coverage::All,
+                |_| true,
+            );
+            assert!(found.problems.is_empty(), "{pattern}: {:?}", found.problems);
+            assert!(
+                found.undefined.is_empty(),
+                "{pattern}: {:?}",
+                found.undefined
+            );
+        }
     }
 }

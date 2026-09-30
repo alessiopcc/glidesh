@@ -1439,7 +1439,7 @@ printf '%s' "$d""#;
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<Vec<Option<PathStat>>, GlideshError> {
         let mut found = Vec::with_capacity(paths.len());
-        for chunk in path_chunks(paths) {
+        for chunk in path_chunks(paths)? {
             let out = self.exec_as(&stat_listing(chunk), run_as).await?;
             let stats = (out.exit_code == 0)
                 .then(|| parse_stats(&out.stdout, chunk.len()))
@@ -1532,7 +1532,7 @@ printf '%s' "$d""#;
         paths: &[String],
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
-        for chunk in path_chunks(paths) {
+        for chunk in path_chunks(paths)? {
             let list: Vec<String> = chunk.iter().map(|p| shell_escape(p)).collect();
             let out = self
                 .exec_as(&format!("{before} {} {after}", list.join(" ")), run_as)
@@ -1557,7 +1557,7 @@ printf '%s' "$d""#;
         run_as: Option<&ResolvedRunAs>,
         guard_parents: bool,
     ) -> Result<(), GlideshError> {
-        for chunk in path_chunks(paths) {
+        for chunk in path_chunks(paths)? {
             let list: Vec<String> = chunk.iter().map(|p| shell_escape(p)).collect();
             let run = format!("{command} {}", list.join(" "));
             let line = match run_as.filter(|_| guard_parents) {
@@ -2026,13 +2026,25 @@ fn parse_stats(stdout: &str, count: usize) -> Option<Vec<Option<PathStat>>> {
 /// command is one argument, and a path in it is quoted up to three times — in its list, in
 /// the `sh -c` script, and by the escalation's wrapper — each `'` growing fourfold. The limit
 /// leaves room for the script and a guard's copy of the parent directories.
-fn path_chunks(paths: &[String]) -> Vec<&[String]> {
+///
+/// A path too long for the limit on its own is refused, naming it, rather than sent to fail
+/// on the host with "argument list too long".
+fn path_chunks(paths: &[String]) -> Result<Vec<&[String]>, GlideshError> {
     const LIMIT: usize = 32 * 1024;
     let mut chunks = Vec::new();
     let mut start = 0;
     let mut length = 0;
     for (i, path) in paths.iter().enumerate() {
         let quoted = sent_length(path);
+        if quoted > LIMIT {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "{}: the path is too long to pass to the host ({quoted} bytes once quoted)",
+                    path.escape_debug()
+                ),
+            });
+        }
         if i > start && length + quoted > LIMIT {
             chunks.push(&paths[start..i]);
             start = i;
@@ -2043,7 +2055,7 @@ fn path_chunks(paths: &[String]) -> Vec<&[String]> {
     if start < paths.len() {
         chunks.push(&paths[start..]);
     }
-    chunks
+    Ok(chunks)
 }
 
 /// How long `path` is once quoted three times over, as [`path_chunks`] counts it.
@@ -2335,20 +2347,20 @@ mod tests {
     #[test]
     fn long_path_lists_are_split_under_the_argument_limit() {
         let paths: Vec<String> = (0..2000).map(|i| format!("/srv/app/{i:0>40}")).collect();
-        let chunks = path_chunks(&paths);
+        let chunks = path_chunks(&paths).unwrap();
         assert!(chunks.len() > 1);
         assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), paths.len());
         for chunk in chunks {
             let quoted: usize = chunk.iter().map(|p| sent_length(p)).sum();
             assert!(quoted <= 32 * 1024);
         }
-        assert!(path_chunks(&[]).is_empty());
+        assert!(path_chunks(&[]).unwrap().is_empty());
 
         // A `'` grows fourfold at each of three quotings: the limit counts what is sent.
         let quotes: Vec<String> = (0..40)
             .map(|_| format!("/srv/{}", "'".repeat(100)))
             .collect();
-        let chunks = path_chunks(&quotes);
+        let chunks = path_chunks(&quotes).unwrap();
         assert!(chunks.len() > 1, "6 KiB each once quoted three times");
         for chunk in chunks {
             let sent: usize = chunk
@@ -2357,6 +2369,11 @@ mod tests {
                 .sum();
             assert!(sent <= 32 * 1024, "{sent}");
         }
+
+        // One path too long on its own is refused by name, not sent to fail with E2BIG.
+        let huge = vec![format!("/srv/{}", "'/".repeat(1000))];
+        let err = path_chunks(&huge).unwrap_err().to_string();
+        assert!(err.contains("too long to pass to the host"), "{err}");
     }
 
     #[test]
