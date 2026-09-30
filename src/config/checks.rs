@@ -27,17 +27,26 @@ fn local_source(task: &TaskDef, plan_dir: &Path) -> Option<(String, PathBuf)> {
     Some((src.to_string(), resolved))
 }
 
-fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for path in entries.flatten().map(|e| e.path()) {
+/// Every file under `dir`, and the first directory that could not be read, which a
+/// recursive upload fails on.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut failed = Ok(());
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                failed = failed.and(Err(format!("{}: {e}", dir.display())));
+                continue;
+            }
+        };
         if path.is_dir() {
-            files_under(&path, out);
+            failed = failed.and(files_under(&path, out));
         } else {
             out.push(path);
         }
     }
+    failed
 }
 
 /// Warnings for `file` uploads without `template #true` whose content contains `${name}`
@@ -58,7 +67,7 @@ pub fn literal_reference_warnings(
             };
             let mut files = Vec::new();
             if resolved.is_dir() {
-                files_under(&resolved, &mut files);
+                let _ = files_under(&resolved, &mut files);
             } else {
                 files.push(resolved.clone());
             }
@@ -122,7 +131,7 @@ pub fn template_scope_problems(plan: &Plan, plan_dir: &Path) -> Vec<String> {
                 };
                 let mut files = Vec::new();
                 if resolved.is_dir() {
-                    files_under(&resolved, &mut files);
+                    let _ = files_under(&resolved, &mut files);
                 } else {
                     files.push(resolved);
                 }
@@ -227,7 +236,12 @@ pub fn template_reference_findings(
                     let defined = |name: &str| is_defined(name) || registered.contains(name);
                     let mut files = Vec::new();
                     if resolved.is_dir() {
-                        files_under(&resolved, &mut files);
+                        if let Err(unreadable) = files_under(&resolved, &mut files) {
+                            findings.problems.push(format!(
+                                "step '{}': file '{}': template {}: cannot be read: {}",
+                                step.name, task.resource, src, unreadable
+                            ));
+                        }
                     } else {
                         files.push(resolved.clone());
                     }
@@ -366,6 +380,12 @@ fn check_template(
                         if missing.len() == 1 { "" } else { "s" },
                         missing.join(", ")
                     )),
+                    // No inventory sets an `@` name: only glidesh's are defined.
+                    Coverage::None if name.starts_with('@') => findings.problems.push(format!(
+                        "{}: ${{{}}} is not defined",
+                        at(line),
+                        name
+                    )),
                     Coverage::None => findings.undefined.push(format!(
                         "{}: ${{{}}} is not defined{}",
                         at(line),
@@ -375,7 +395,12 @@ fn check_template(
                 }
             }
             Token::Escaped(name) => {
-                if (defined(name) || hosts(name) != Coverage::None) && seen_escapes.insert(name) {
+                let bound = bindings
+                    .iter()
+                    .any(|binding| bound_field(name, binding).is_some());
+                if (bound || defined(name) || hosts(name) != Coverage::None)
+                    && seen_escapes.insert(name)
+                {
                     findings.warnings.push(old_escape_warning(&at(line), name));
                 }
             }
@@ -979,6 +1004,45 @@ mod tests {
         assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
         assert!(
             found.problems[0].contains("is not valid UTF-8"),
+            "{}",
+            found.problems[0]
+        );
+    }
+
+    #[test]
+    fn an_unknown_reserved_name_is_a_problem_even_without_an_inventory() {
+        let found = template_findings("${@os.idd} ${@fact.unknown}\n", TEMPLATED);
+        assert_eq!(found.problems.len(), 2, "{:?}", found.problems);
+        assert!(found.problems[0].contains("${@os.idd} is not defined"));
+        assert!(found.undefined.is_empty(), "{:?}", found.undefined);
+    }
+
+    #[test]
+    fn an_escaped_loop_field_warns_it_changed_meaning() {
+        let found = template_findings("${for h in hosts}$${h.name}${endfor}", TEMPLATED);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+        assert!(found.warnings[0].contains("$${h.name} writes a literal ${h.name}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_of_a_recursive_template_is_a_problem() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::process::Command::new("id").arg("-u").output().unwrap();
+        if String::from_utf8_lossy(&root.stdout).trim() == "0" {
+            return; // root reads any directory
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("conf").join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let p = plan(r#"step "s" { file "/etc/app/" src="conf" recurse=#true template=#true }"#);
+        let found =
+            template_reference_findings(&p, dir.path(), |_| true, |_| Coverage::All, |_| true);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0].contains("cannot be read"),
             "{}",
             found.problems[0]
         );
