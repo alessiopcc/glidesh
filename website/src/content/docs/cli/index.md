@@ -317,7 +317,8 @@ without contacting a host:
   would fail when it runs.
 - **Templates read only what is defined.** Each local `file` template is read as a run
   renders it: every `${name}` must be a plan, secrets-file or prompted variable, a name an
-  earlier task registers, a built-in (`${@host.nmae}` is not one), an `@inventory.*` value the
+  earlier task registers, a built-in (`${@host.nmae}` is not one; `${@item}` or
+  `${@item.<field>}` only as the step's [`loop=`](/advanced/loops-register/) gives it), an `@inventory.*` value the
   inventory has, the binding of a `${for}` around it — or an inventory variable of every host
   the plan runs on. Every `${for}` must be well formed and loop over a list the plan or the
   secrets file defines, or a group the inventory has. A problem names the template, the line

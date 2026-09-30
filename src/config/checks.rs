@@ -4,7 +4,7 @@ use crate::config::plan::{is_error_var, is_item_var};
 use crate::config::template::{
     Token, bound_field, defined_references, literal_hint, structure_error, tokens,
 };
-use crate::config::types::{ParamValue, Plan, TaskDef};
+use crate::config::types::{LoopSource, ParamValue, Plan, TaskDef};
 use std::path::{Path, PathBuf};
 
 /// A task's local `file` source, resolved as a run resolves it, or `None` for a task with
@@ -201,7 +201,21 @@ pub fn template_reference_findings(
     let mut registered: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut findings = TemplateFindings::default();
     for step in plan.steps() {
-        for task in step.all_tasks() {
+        let item = match &step.loop_source {
+            None => Item::NoLoop,
+            Some(LoopSource::Variable(list)) if is_list(list) => Item::Fields,
+            Some(_) => Item::Value,
+        };
+        // `rescue` and `always` run after the loop; `template_scope_problems` reports it.
+        let blocks = [
+            (&step.tasks, item),
+            (&step.rescue, Item::Elsewhere),
+            (&step.always, Item::Elsewhere),
+        ];
+        for (task, item) in blocks
+            .into_iter()
+            .flat_map(|(tasks, item)| tasks.iter().map(move |task| (task, item)))
+        {
             if matches!(task.args.get("template"), Some(ParamValue::Bool(true))) {
                 if let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) {
                     let at = |shown: &str, line: usize| {
@@ -218,16 +232,34 @@ pub fn template_reference_findings(
                         files.push(resolved.clone());
                     }
                     for file in files {
-                        let Ok(text) = std::fs::read_to_string(&file) else {
+                        let shown = shown_source(&src, &resolved, &file);
+                        // Missing files are `missing_file_sources`'.
+                        let text = match std::fs::read(&file) {
+                            Ok(bytes) => bytes,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(e) => {
+                                findings.problems.push(format!(
+                                    "step '{}': file '{}': template {}: cannot be read: {}",
+                                    step.name, task.resource, shown, e
+                                ));
+                                continue;
+                            }
+                        };
+                        let Ok(text) = String::from_utf8(text) else {
+                            findings.problems.push(format!(
+                                "step '{}': file '{}': template {} is not valid UTF-8, so it \
+                                 cannot be rendered; upload it without `template #true`",
+                                step.name, task.resource, shown
+                            ));
                             continue;
                         };
-                        let shown = shown_source(&src, &resolved, &file);
                         check_template(
                             &text,
                             &|line| at(&shown, line),
                             &defined,
                             &hosts,
                             &is_list,
+                            item,
                             &mut findings,
                         );
                     }
@@ -241,12 +273,40 @@ pub fn template_reference_findings(
     findings
 }
 
+/// What `${@item…}` a task's template can read: a step's own tasks get the loop's item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Item {
+    /// The step has no `loop=`.
+    NoLoop,
+    /// A loop over lines or literal items: `${@item}`.
+    Value,
+    /// A loop over a list variable: `${@item.<field>}`.
+    Fields,
+    /// A `rescue` or `always` task, checked by [`template_scope_problems`].
+    Elsewhere,
+}
+
+/// Why `name`, an `@item` reference, is not what `item` provides, or `None` when it is.
+fn item_problem(name: &str, item: Item) -> Option<&'static str> {
+    let fields = name.starts_with("@item.");
+    match item {
+        Item::Elsewhere => None,
+        Item::NoLoop => Some("the step has no `loop=`"),
+        Item::Value if fields => Some("the step loops over lines or items, read as ${@item}"),
+        Item::Fields if !fields => {
+            Some("the step loops over a list, whose fields are read as ${@item.<field>}")
+        }
+        Item::Value | Item::Fields => None,
+    }
+}
+
 fn check_template(
     text: &str,
     at: &dyn Fn(usize) -> String,
     defined: &dyn Fn(&str) -> bool,
     hosts: &dyn Fn(&str) -> Coverage,
     is_list: &dyn Fn(&str) -> bool,
+    item: Item,
     findings: &mut TemplateFindings,
 ) {
     if let Some((line, message)) = structure_error(text) {
@@ -280,7 +340,21 @@ fn check_template(
                 let bound = bindings
                     .iter()
                     .any(|binding| bound_field(name, binding).is_some());
-                if bound || defined(name) || !seen_names.insert(name) {
+                if bound || !seen_names.insert(name) {
+                    continue;
+                }
+                if name == "@item" || name.starts_with("@item.") {
+                    if let Some(why) = item_problem(name, item) {
+                        findings.problems.push(format!(
+                            "{}: ${{{}}} is not defined here: {}",
+                            at(line),
+                            name,
+                            why
+                        ));
+                    }
+                    continue;
+                }
+                if defined(name) {
                     continue;
                 }
                 match hosts(name) {
@@ -836,6 +910,77 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("$${out}")),
             "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn an_item_reference_follows_the_steps_loop() {
+        let file = r#"file "/etc/app.conf" src="app.conf" template=#true"#;
+        let cases = [
+            (
+                format!(r#"step "s" {{ {file} }}"#),
+                "${@item}",
+                Some("has no `loop=`"),
+            ),
+            (
+                format!(r#"step "s" loop="${{port}}" {{ {file} }}"#),
+                "${@item}",
+                None,
+            ),
+            (
+                format!(r#"step "s" loop="${{port}}" {{ {file} }}"#),
+                "${@item.name}",
+                Some("loops over lines or items"),
+            ),
+            (
+                format!(r#"step "s" loop="${{api-keys}}" {{ {file} }}"#),
+                "${@item.name}",
+                None,
+            ),
+            (
+                format!(r#"step "s" loop="${{api-keys}}" {{ {file} }}"#),
+                "${@item}",
+                Some("loops over a list"),
+            ),
+            (
+                format!(r#"step "s" {{ shell "true"; rescue {{ {file} }} }}"#),
+                "${@item}",
+                None,
+            ),
+        ];
+        for (body, template, expected) in cases {
+            let found = template_findings(template, &body);
+            match expected {
+                None => assert!(
+                    found.problems.is_empty(),
+                    "{body} {template}: {:?}",
+                    found.problems
+                ),
+                Some(why) => {
+                    assert_eq!(
+                        found.problems.len(),
+                        1,
+                        "{body} {template}: {:?}",
+                        found.problems
+                    );
+                    assert!(found.problems[0].contains(why), "{}", found.problems[0]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_template_that_is_not_utf8_is_a_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.conf"), b"\xff\xfe").unwrap();
+        let p = plan(TEMPLATED);
+        let found =
+            template_reference_findings(&p, dir.path(), |_| true, |_| Coverage::All, |_| true);
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0].contains("is not valid UTF-8"),
+            "{}",
+            found.problems[0]
         );
     }
 }
