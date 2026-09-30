@@ -1058,18 +1058,29 @@ struct PlanCheck {
     warnings: Vec<String>,
 }
 
+/// What a run could define outside the plan, for `validate`.
+struct RunScope<'a> {
+    /// The secrets file's scalar and list names.
+    secrets: &'a config::shadow::SecretNames,
+    /// The hosts the plan may run on, with their variables' names; `None` without an
+    /// inventory, when any name might be one of theirs.
+    hosts: Option<Vec<(String, std::collections::HashSet<String>)>>,
+    /// Whether each of `hosts` runs the plan (an inventory `plan=`), not merely may (`-p`).
+    every_host_runs: bool,
+    /// `@inventory.*` and `@group.*` as a run builds them; `None` without an inventory.
+    inventory_data: Option<&'a TemplateData>,
+}
+
 /// Load a plan the way `run` does and check everything that can be known without contacting
 /// a host.
 ///
 /// Includes and `vars-file` are resolved from the plan's directory, which is also where step
 /// names and `subscribe` references are checked. External modules are discovered next to the
 /// inventory when one is given, else in the current directory — again as `run` does.
-/// `known_vars` are the names a run could define outside the plan itself, for the
-/// literal-reference warning.
 fn validate_plan_file(
     plan_path: &std::path::Path,
     inv_dir: Option<&std::path::Path>,
-    known_vars: &std::collections::HashSet<String>,
+    scope: &RunScope,
     shadows: impl Fn(&config::types::Plan) -> Vec<String>,
 ) -> PlanCheck {
     let fatal = |e: String| PlanCheck {
@@ -1106,12 +1117,77 @@ fn validate_plan_file(
     check
         .problems
         .extend(config::checks::template_scope_problems(&plan, plan_dir));
-    check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, |name| {
+
+    let for_every_host = |name: &str| {
         plan.vars.contains_key(name)
             || plan.prompts.iter().any(|p| p.name == name)
-            || known_vars.contains(name)
-            || is_builtin_var(name)
-    });
+            || scope.secrets.vars.contains(name)
+            || is_builtin_var(name, scope.inventory_data)
+    };
+    let hosts = |name: &str| {
+        let Some(hosts) = &scope.hosts else {
+            return config::checks::Coverage::None;
+        };
+        let missing: Vec<String> = hosts
+            .iter()
+            .filter(|(_, vars)| !vars.contains(name))
+            .map(|(host, _)| host.clone())
+            .collect();
+        if missing.is_empty() {
+            config::checks::Coverage::All
+        } else if missing.len() == hosts.len() {
+            config::checks::Coverage::None
+        } else {
+            config::checks::Coverage::Partial(missing)
+        }
+    };
+    let for_some_host =
+        |name: &str| for_every_host(name) || hosts(name) != config::checks::Coverage::None;
+    let is_list = |list: &str| {
+        plan.structured_vars.contains_key(list)
+            || scope.secrets.structured.contains(list)
+            || (list.starts_with("@group.")
+                && scope
+                    .inventory_data
+                    .is_none_or(|data| data.collections.contains_key(list)))
+    };
+
+    check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, for_some_host);
+    let templates = config::checks::template_reference_findings(
+        &plan,
+        plan_dir,
+        for_every_host,
+        hosts,
+        is_list,
+    );
+    check.problems.extend(templates.problems);
+    if scope.hosts.is_some() {
+        check.problems.extend(templates.undefined);
+    } else {
+        check.warnings.extend(
+            templates
+                .undefined
+                .into_iter()
+                .map(|undefined| format!("{undefined}, unless the inventory sets it (pass -i)")),
+        );
+    }
+    if scope.every_host_runs {
+        check.problems.extend(templates.partial);
+    } else {
+        check.warnings.extend(
+            templates
+                .partial
+                .into_iter()
+                .map(|partial| format!("{partial}: a run targeting them fails")),
+        );
+    }
+    check.warnings.extend(templates.warnings);
+    check
+        .warnings
+        .extend(config::checks::escaped_parameter_warnings(
+            &plan,
+            for_some_host,
+        ));
     check.warnings.extend(shadows(&plan));
     check
 }
@@ -1137,19 +1213,38 @@ fn shadow_warnings(
     .collect()
 }
 
-/// A name in a namespace glidesh injects at run time, whatever the host.
-fn is_builtin_var(name: &str) -> bool {
-    [
-        "@host.",
-        "@os.",
-        "@fact.",
-        "@inventory.",
-        "@item.",
-        "@error.",
-    ]
-    .iter()
-    .any(|prefix| name.starts_with(prefix))
+/// The variables glidesh injects on every host, whatever it runs.
+const BUILTIN_VARS: &[&str] = &[
+    "@host.name",
+    "@host.address",
+    "@host.user",
+    "@host.port",
+    "@os.id",
+    "@os.version",
+    "@os.family",
+    "@os.pkg-manager",
+    "@os.init",
+    "@os.container-runtime",
+    "@os.nix-installed",
+    "@fact.hostname",
+    "@fact.kernel",
+    "@fact.arch",
+    "@fact.cpu.count",
+    "@fact.mem.total-mb",
+    "@fact.ip.default",
+];
+
+/// A name glidesh injects at run time: a host, OS or fact built-in, a loop item (whose
+/// fields are the list's), a step's failure — their scopes are checked apart — or an
+/// `@inventory.*` reference, checked against `inventory_data` when there is one.
+fn is_builtin_var(name: &str, inventory_data: Option<&TemplateData>) -> bool {
+    BUILTIN_VARS.contains(&name)
         || name == "@item"
+        || name.starts_with("@item.")
+        || name == "@error.msg"
+        || name == "@error.task"
+        || (name.starts_with("@inventory.")
+            && inventory_data.is_none_or(|data| data.extra_vars.contains_key(name)))
 }
 
 /// Print a plan's result on the line `validate` opened for it; true when it passed.
@@ -1181,9 +1276,13 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
         .and_then(|c| config::parse_inventory(&c).ok());
     let inv_dir = args.inventory.as_ref().and_then(|p| p.parent());
 
-    // Names a run could define outside the plan: the secrets file's, plus inventory
-    // variables — any host's for `-p`, the plan's own hosts' for an inventory `plan=`.
-    let mut secret_vars = std::collections::HashSet::new();
+    let inventory_data = inventory.as_ref().map(build_inventory_template_data);
+    let host_vars = |hosts: Vec<config::types::ResolvedHost>| {
+        hosts
+            .into_iter()
+            .map(|h| (h.name, h.vars.into_keys().collect()))
+            .collect::<Vec<_>>()
+    };
     let mut secret_names = config::shadow::SecretNames::default();
     if let Some(secrets) = secrets_config::discover_secrets_path(None, inv_dir)
         .and_then(|p| secret_store::read(&p).ok())
@@ -1192,26 +1291,30 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
         secret_names
             .structured
             .extend(secrets.structured.into_keys());
-        secret_names.vars.extend(secrets.vars.keys().cloned());
-        secret_vars.extend(secrets.vars.into_keys());
+        secret_names.vars.extend(secrets.vars.into_keys());
     }
 
     if let Some(ref fp_path) = args.plan {
-        let mut known_vars = secret_vars.clone();
-        for host in inventory.iter().flat_map(|inv| inv.resolve_targets(None)) {
-            known_vars.extend(host.vars.into_keys());
-        }
         // `run -p` may target any of the inventory's hosts.
-        let hosts: Vec<String> = inventory
+        let scope = RunScope {
+            secrets: &secret_names,
+            hosts: inventory
+                .as_ref()
+                .map(|inv| host_vars(inv.resolve_targets(None))),
+            every_host_runs: false,
+            inventory_data: inventory_data.as_ref(),
+        };
+        let hosts: Vec<String> = scope
+            .hosts
             .iter()
-            .flat_map(|inv| inv.resolve_targets(None))
-            .map(|h| h.name)
+            .flatten()
+            .map(|(name, _)| name.clone())
             .collect();
         let shadows = |plan: &config::types::Plan| {
             shadow_warnings(plan, fp_path, inventory.as_ref(), &secret_names, &hosts)
         };
         print!("Validating plan '{}'... ", fp_path.display());
-        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &known_vars, shadows));
+        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &scope, shadows));
     }
 
     if let Some(ref inv_path) = args.inventory {
@@ -1247,21 +1350,28 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
             }
         }
         for (path, hosts) in plans {
-            let mut known_vars = secret_vars.clone();
-            for host in &hosts {
-                known_vars.extend(host.vars.keys().cloned());
-            }
             print!(
                 "Validating plan '{}' ({} host{})... ",
                 path.display(),
                 hosts.len(),
                 if hosts.len() == 1 { "" } else { "s" }
             );
-            let hosts: Vec<String> = hosts.into_iter().map(|h| h.name).collect();
+            let scope = RunScope {
+                secrets: &secret_names,
+                hosts: Some(host_vars(hosts)),
+                every_host_runs: true,
+                inventory_data: inventory_data.as_ref(),
+            };
+            let hosts: Vec<String> = scope
+                .hosts
+                .iter()
+                .flatten()
+                .map(|(name, _)| name.clone())
+                .collect();
             let shadows = |plan: &config::types::Plan| {
                 shadow_warnings(plan, &path, Some(inventory), &secret_names, &hosts)
             };
-            valid &= report_plan(&validate_plan_file(&path, inv_dir, &known_vars, shadows));
+            valid &= report_plan(&validate_plan_file(&path, inv_dir, &scope, shadows));
         }
     }
 

@@ -490,6 +490,7 @@ mod tests {
             "sudo and doas work for any user",
             "resolve from the plan file's directory",
             "beats the host's value",
+            "$${NAME} writes a literal ${NAME}",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

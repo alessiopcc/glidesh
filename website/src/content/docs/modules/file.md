@@ -38,8 +38,33 @@ Template mode supports:
 - `${@os.family}` and the other [OS facts](/concepts/variables/#built-in-os-facts) — detected per host
 - `${@fact.cpu.count}`, `${@fact.mem.total-mb}` and the other [host facts](/concepts/variables/#host-facts)
 - `${for h in @group.name}...${endfor}` — loop over hosts in an inventory group
+- `$${…}` — a literal `${…}`, for the shell or any other program that reads it
 
 See [Template Loops](/advanced/loops-register/#template-loops) for detailed examples.
+
+### Literal `${…}` in a template
+
+Every `${…}` in a templated file is a glidesh reference, comments included. A script, unit
+file or Dockerfile that needs its own `${VAR}` writes it `$${VAR}`:
+
+```sh
+#!/bin/sh
+# deploys ${app} into $${HOME}
+cd "$${HOME}/${app}" && exec ./${app} "$${1:-serve}"
+```
+
+With `app` set to `api`, the host gets `cd "${HOME}/api" && exec ./api "${1:-serve}"`. See
+[Interpolation](/concepts/variables/#interpolation) for the rule, and how it changed.
+
+A name nothing defines fails the upload, naming the template, the line and the name:
+`template files/run.sh, line 3: undefined variable HOME (if it is meant for the shell,
+write $${HOME} to keep ${HOME} as is)`. [`glidesh validate`](/cli/#glidesh-validate) finds
+it before any run: it reads each local templated source and reports every `${name}` that
+is not a plan, secret or prompted variable, an inventory variable of every host that runs
+the plan, a name an earlier task registers, a built-in, or the binding of a `${for}` around
+it — and every `${for}` over a list nothing defines. Without `-i`, a name the inventory might
+set only warns ([details](/cli/#glidesh-validate)). A `src` that itself
+contains `${…}` is only known at run time, so it is not read.
 
 ### Forgetting `template`
 

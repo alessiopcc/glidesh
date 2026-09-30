@@ -515,3 +515,81 @@ fn a_structured_plan_variable_the_secrets_file_also_defines_warns() {
         "{text}"
     );
 }
+
+fn validate_with_inventory(dir: &Path) -> (bool, String) {
+    let out = Command::cargo_bin("glidesh")
+        .unwrap()
+        .current_dir(dir)
+        .args(["validate", "-p", "plan.kdl", "-i", "inventory.kdl"])
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+    )
+}
+
+/// With the inventory given, a templated file reading a name nothing defines fails
+/// validation, naming the file, the line and the name; the same name escaped passes.
+#[test]
+fn an_undefined_name_in_a_template_fails_and_an_escaped_one_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "run.sh",
+        "#!/bin/sh\ncd ${app-dir}\necho ${port} ${HOME}\n",
+    );
+    write(
+        dir.path(),
+        "inventory.kdl",
+        "host \"web-1\" \"10.0.0.1\" {\n    vars {\n        port \"80\"\n    }\n}\n",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" {
+    vars {
+        app-dir "/srv/app"
+    }
+    step "s" { file "/usr/local/bin/run.sh" src="run.sh" template=#true }
+}"#,
+    );
+    let (ok, out) = validate_with_inventory(dir.path());
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("template run.sh, line 3: ${HOME} is not defined"),
+        "{out}"
+    );
+    assert!(out.contains("write $${HOME}"), "{out}");
+    assert!(!out.contains("${port} is not defined"), "{out}");
+
+    write(
+        dir.path(),
+        "run.sh",
+        "#!/bin/sh\ncd ${app-dir}\necho ${port} $${HOME}\n",
+    );
+    let (ok, out) = validate_with_inventory(dir.path());
+    assert!(ok, "{out}");
+}
+
+/// Without the inventory, a name it might set only warns: `validate -p` alone must not
+/// fail a plan that runs.
+#[test]
+fn without_an_inventory_an_unknown_template_name_only_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "app.conf", "port=${port}\n");
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" { file "/etc/app.conf" src="app.conf" template=#true } }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(ok, "{out}");
+    assert!(
+        out.contains(
+            "warning: step 's': file '/etc/app.conf': template app.conf, line 1: ${port} is \
+             not defined, unless the inventory sets it (pass -i)"
+        ),
+        "{out}"
+    );
+}

@@ -788,11 +788,12 @@ fn find_reference(
     loop_source: &Option<LoopSource>,
 ) -> Option<String> {
     let in_text = |text: &str| {
-        text.split("${")
-            .skip(1)
-            .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
-            .find(|name| is_var(name))
-            .map(str::to_string)
+        crate::config::template::tokens(text)
+            .into_iter()
+            .find_map(|(_, token)| match token {
+                crate::config::template::Token::Var(name) if is_var(name) => Some(name.to_string()),
+                _ => None,
+            })
     };
     let in_condition = |cond: Option<&Condition>| {
         cond.and_then(|c| c.variables().find(|v| is_var(v)).map(str::to_string))
@@ -2580,6 +2581,7 @@ plan "test" {
             );
         }
         one_step(r#"step "s" { shell "a"; always { shell "echo" when="defined ${@error.msg}" } }"#);
+        one_step(r#"step "s" { shell "echo $${@error.msg} is text" }"#);
     }
 
     fn rollout(body: &str) -> Result<Plan, String> {

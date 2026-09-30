@@ -298,6 +298,82 @@ async fn test_file_template() {
     assert_eq!(output.stdout, "hello world!");
 }
 
+/// A shell script templated for one value keeps its own `${…}`, written `$${…}`; the
+/// second run sees the same content, so it changes nothing.
+#[tokio::test]
+async fn test_file_template_keeps_an_escaped_reference_literal() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::from([("app".to_string(), "api".to_string())]);
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        b"#!/bin/sh\n# runs ${app} from $${HOME}\ncd \"$${HOME}/${app}\" && exec ./${app} \"$${1:-serve}\"\n",
+    )
+    .unwrap();
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String(tmp.path().to_string_lossy().to_string()),
+    );
+    args.insert("template".to_string(), ParamValue::Bool(true));
+    let params = ModuleParams {
+        resource_name: "/root/glidesh-escaped.sh".to_string(),
+        args,
+    };
+
+    FileModule.apply(&ctx, &params).await.unwrap();
+    let output = ssh.exec("cat /root/glidesh-escaped.sh").await.unwrap();
+    assert_eq!(
+        output.stdout,
+        "#!/bin/sh\n# runs api from ${HOME}\ncd \"${HOME}/api\" && exec ./api \"${1:-serve}\"\n"
+    );
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run is ok, got {status:?}"
+    );
+}
+
+/// A template reading a name nothing defines fails naming the file and the line.
+#[tokio::test]
+async fn test_file_template_names_the_line_of_an_undefined_variable() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("run.sh");
+    std::fs::write(&src, "#!/bin/sh\necho ${HOME}\n").unwrap();
+    let mut args = HashMap::new();
+    args.insert(
+        "src".to_string(),
+        ParamValue::String(src.to_string_lossy().to_string()),
+    );
+    args.insert("template".to_string(), ParamValue::Bool(true));
+    let params = ModuleParams {
+        resource_name: "/root/glidesh-undefined.sh".to_string(),
+        args,
+    };
+
+    let err = FileModule
+        .apply(&ctx, &params)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("line 2: undefined variable HOME"), "{err}");
+    assert!(err.contains("write $${HOME}"), "{err}");
+}
+
 /// The field case: an upload without `template #true` shipped `${cuda-devices}` literally
 /// and nothing said so. It still ships as-is, but the result now carries a warning — on a
 /// preview too, which is where it is cheapest to catch.
