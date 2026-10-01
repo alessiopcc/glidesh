@@ -888,8 +888,9 @@ impl FileModule {
             return Err(GlideshError::Module {
                 module: "file".to_string(),
                 message: format!(
-                    "{blocked} is a file on the host where the source has a directory, or a \
-                     directory where it has a file; {fix}"
+                    "{blocked} on the host is not the kind of entry the source has there (a \
+                     file where it has a directory, a directory where it has a file, or a \
+                     FIFO, socket or device); {fix}"
                 ),
             });
         }

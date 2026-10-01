@@ -106,8 +106,9 @@ Recursive copy supports:
   the link's), and it gets no mode. A copy to `/` — however it is named, `/tmp/..` or a
   symlink to it too — is refused with any of them, before anything is uploaded. Without
   them, a copy to `/` works.
-- **The other kind in the way** — a file on the host where the source has a directory, or a
-  directory where it has a file, keeps the task pending, and without `prune` fails it,
+- **The other kind in the way** — a file on the host where the source has a directory, a
+  directory where it has a file, or a FIFO, socket or device (never read, so a FIFO cannot
+  block the check), keeps the task pending, and without `prune` fails it,
   naming the path, before anything changes. With `prune` it is removed and replaced. A
   destination that is itself a file, or a link to nothing, is refused either way. A host
   name shown in the output has its control characters escaped (`\n`, `\u{1b}`).

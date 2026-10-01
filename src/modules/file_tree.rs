@@ -295,6 +295,9 @@ pub enum PathKind {
     Link {
         to_dir: Option<bool>,
     },
+    /// A FIFO, socket or device, or a link to one: never what the source has, and not to be
+    /// read — a FIFO would block a checksum.
+    Special,
 }
 
 /// A path's kind, owner, group and mode; a link's own owner and group.
@@ -316,6 +319,7 @@ impl PathStat {
             PathKind::Dir => true,
             PathKind::File => false,
             PathKind::Link { to_dir } => to_dir == Some(true),
+            PathKind::Special => return true,
         };
         is_dir != want_dir
     }
@@ -771,6 +775,8 @@ mod tests {
         assert!(stat(to_file).mismatches(true));
         assert!(!stat(dangling).mismatches(false));
         assert!(stat(dangling).mismatches(true));
+        assert!(stat(PathKind::Special).mismatches(false));
+        assert!(stat(PathKind::Special).mismatches(true));
         assert!(stat(PathKind::File).mismatches(true));
         assert!(stat(PathKind::Dir).mismatches(false));
         let mut dir = stat(PathKind::Dir);

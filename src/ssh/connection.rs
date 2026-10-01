@@ -1983,7 +1983,8 @@ fn parse_tree_listing(dest: &str, stdout: &str) -> Result<Vec<(RemoteKind, Strin
 }
 
 /// The command printing, after [`TREE_MARK`], one line per path: `-` when it does not exist,
-/// else its kind (`d`, `f`, or a link — tested first — as `ld`, `lf` or `l-` by what it
+/// else its kind (`d`, `f` for a regular file, `s` for anything else — a FIFO, a socket, a
+/// device, or a link to one — or a link, tested first, as `ld`, `lf` or `l-` by what it
 /// points to) then owner, group and mode, a link's own. `dest/` names the directory a
 /// symlinked destination points to.
 fn stat_listing(paths: &[String]) -> String {
@@ -1993,8 +1994,10 @@ fn stat_listing(paths: &[String]) -> String {
         "printf '%s\\n' {TREE_MARK}\n\
          for p in {}; do\n\
          if [ -L \"$p\" ]; then \
-         if [ -d \"$p\" ]; then k=ld; elif [ -e \"$p\" ]; then k=lf; else k=l-; fi; \
-         elif [ -d \"$p\" ]; then k=d; elif [ -e \"$p\" ]; then k=f; else echo -; continue; fi\n\
+         if [ -d \"$p\" ]; then k=ld; elif [ -f \"$p\" ]; then k=lf; \
+         elif [ -e \"$p\" ]; then k=s; else k=l-; fi; \
+         elif [ -d \"$p\" ]; then k=d; elif [ -f \"$p\" ]; then k=f; \
+         elif [ -e \"$p\" ]; then k=s; else echo -; continue; fi\n\
          a=$(stat -c '%U %G %a' -- \"$p\" 2>/dev/null || \
          stat -f '%Su %Sg %Lp' -- \"$p\" 2>/dev/null) || a='? ? ?'\n\
          printf '%s %s\\n' \"$k\" \"$a\"\n\
@@ -2028,6 +2031,7 @@ fn parse_stats(stdout: &str, count: usize) -> Option<Vec<Option<PathStat>>> {
                     to_dir: Some(false),
                 },
                 "l-" => PathKind::Link { to_dir: None },
+                "s" => PathKind::Special,
                 _ => return None,
             };
             Some(Some(PathStat {
@@ -2438,11 +2442,20 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("f"), "x").unwrap();
         std::os::unix::fs::symlink(&dir, tmp.path().join("l")).unwrap();
+        let fifo = tmp.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         let paths: Vec<String> = [
             format!("{}/", tmp.path().join("l").display()),
             dir.join("f").display().to_string(),
             tmp.path().join("l").display().to_string(),
             tmp.path().join("missing").display().to_string(),
+            fifo.display().to_string(),
         ]
         .to_vec();
         let out = std::process::Command::new("sh")
@@ -2459,9 +2472,10 @@ mod tests {
                 Some(PathKind::Dir),
                 Some(PathKind::File),
                 Some(PathKind::Link { to_dir: Some(true) }),
-                None
+                None,
+                Some(PathKind::Special),
             ],
-            "a symlinked destination named `dest/` is its directory"
+            "a symlinked destination named `dest/` is its directory; a FIFO is no file"
         );
     }
 

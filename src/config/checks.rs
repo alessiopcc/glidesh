@@ -80,6 +80,13 @@ pub fn file_option_problems(plan: &Plan) -> Vec<String> {
             // see it; what needs a host or a prompted answer is left to the run.
             let dest = interpolate(&task.resource, &plan.vars).ok();
             let mut args = task.args.clone();
+            for key in ["mode", "file-mode", "dir-mode", "owner", "group"] {
+                if let Some(ParamValue::String(value)) = args.get(key) {
+                    if let Ok(value) = interpolate(value, &plan.vars) {
+                        args.insert(key.to_string(), ParamValue::String(value));
+                    }
+                }
+            }
             let patterns = match args.get("exclude") {
                 Some(ParamValue::List(items)) => Some(items.clone()),
                 Some(ParamValue::String(one)) => Some(vec![one.clone()]),
@@ -1117,17 +1124,20 @@ mod tests {
             r#"vars {
                 root "/srv"
                 bad "../x"
+                m "u=rw"
             }
             step "s" {
                 file "${root}" src="site" recurse=#true prune=#true
                 file "/srv/app" src="site" recurse=#true exclude="${bad}"
-                file "${@host.name}" src="site" recurse=#true prune=#true exclude="${@host.name}"
+                file "/etc/a" src="a" mode="${m}"
+                file "${@host.name}" src="site" recurse=#true prune=#true exclude="${@host.name}" mode="${@host.name}"
             }"#,
         );
         let problems = file_option_problems(&p);
-        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems[0].contains("prune=#true needs an absolute destination"));
         assert!(problems[1].contains("may not contain empty, `.` or `..` parts"));
+        assert!(problems[2].contains("mode=\"u=rw\" must be an octal mode"));
     }
 
     /// An excluded file is never uploaded, so a template check skips it: a binary `.git`
