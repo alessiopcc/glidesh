@@ -1902,12 +1902,19 @@ fn after_tree_mark(stdout: &str) -> Option<&str> {
 /// The command listing every entry under `dest` for [`SshSession::list_tree_as`]: after
 /// [`TREE_MARK`], NUL-separated entries — `dest`'s real path after `r`, then each name after
 /// `d` (a directory) or `f` — then `@@` and find's status; a name may hold any other byte.
-/// `@@link` and `@@none` stand for a `dest` that is a symlink or missing.
+/// `@@link` stands for a `dest` that is a symlink; a missing one prints the real path it
+/// would have — its nearest existing directory's, with the missing names added — then
+/// `@@none`.
 fn tree_listing(dest: &str) -> String {
     let script = format!(
         "printf '%s\\n' {TREE_MARK}\nd={}\n\
          if [ -L \"$d\" ]; then printf '@@link'; exit 0; fi\n\
-         [ -d \"$d\" ] || {{ printf '@@none'; exit 0; }}\n\
+         if [ ! -d \"$d\" ]; then\n\
+         p=$d; rest=\n\
+         while [ ! -e \"$p\" ] && [ ! -L \"$p\" ]; do \
+         rest=/${{p##*/}}$rest; p=${{p%/*}}; [ -n \"$p\" ] || p=/; done\n\
+         printf 'r%s%s\\0@@none' \"$(cd \"$p\" 2>/dev/null && pwd -P)\" \"$rest\"; exit 0\n\
+         fi\n\
          cd \"$d\" || exit 1\n\
          printf 'r%s\\0' \"$(pwd -P)\"\n\
          find . -mindepth 1 \\( -type d -exec printf 'd%s\\0' {{}} + \\) -o \
@@ -1925,20 +1932,22 @@ fn parse_tree_listing(dest: &str, stdout: &str) -> Result<Vec<(RemoteKind, Strin
     let listing = after_tree_mark(stdout)
         .ok_or_else(|| format!("could not list {dest}: {}", stdout.trim()))?;
     let (entries, status) = listing.rsplit_once('\0').unwrap_or(("", listing));
-    match status.trim() {
-        "@@none" => return Ok(Vec::new()),
+    let missing = match status.trim() {
+        "@@none" => true,
         "@@link" => return Err(format!("{dest} is a symlink")),
-        "@@0" => {}
+        "@@0" => false,
         other => {
             return Err(format!(
                 "could not list every entry under {dest} ({})",
                 other.trim_start_matches('@')
             ));
         }
-    }
+    };
     let mut entries = entries.split('\0').filter(|_| !entries.is_empty());
     // A symlinked directory on the way may put the destination anywhere: prune holds its
-    // real path to the same depth as the one written.
+    // real path to the same depth as the one written. For one not made yet, that is its
+    // nearest existing directory's real path with the missing names added, which is where
+    // the upload would create it.
     let real = entries
         .next()
         .and_then(|first| first.strip_prefix('r'))
@@ -1947,6 +1956,9 @@ fn parse_tree_listing(dest: &str, stdout: &str) -> Result<Vec<(RemoteKind, Strin
         return Err(format!(
             "{dest} is {real} on the host, less than two directories deep; refusing to prune it"
         ));
+    }
+    if missing {
+        return Ok(Vec::new());
     }
     let mut listed = Vec::new();
     for entry in entries {
@@ -2277,6 +2289,14 @@ mod tests {
                 .contains("is a symlink")
         );
         assert!(list(&tmp.path().join("missing")).unwrap().is_empty());
+        // Not made yet, behind a link to `/`: it would be made at `/glidesh-…`.
+        std::os::unix::fs::symlink("/", tmp.path().join("rootlink")).unwrap();
+        let shallow = tmp.path().join("rootlink").join("glidesh-missing-test");
+        assert!(
+            list(&shallow)
+                .unwrap_err()
+                .contains("less than two directories deep")
+        );
     }
 
     #[test]
@@ -2330,6 +2350,16 @@ mod tests {
             parse_tree_listing("/srv/a", &format!("{TREE_MARK}\nf./x\0@@0"))
                 .unwrap_err()
                 .contains("no real path")
+        );
+        // A destination not made yet is held to the depth of where it would be made.
+        let missing = |real: &str| {
+            parse_tree_listing("/srv/link/new", &format!("{TREE_MARK}\nr{real}\0@@none"))
+        };
+        assert!(missing("/srv/app/new").unwrap().is_empty());
+        assert!(
+            missing("//new")
+                .unwrap_err()
+                .contains("less than two directories deep")
         );
     }
 
