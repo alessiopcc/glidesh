@@ -470,15 +470,30 @@ pub fn options(
     if let Some(dest) = dest.filter(|_| prune) {
         check_prune_destination(dest)?;
     }
-    let mode = text("mode")?;
+    let octal = |key: &str| -> Result<Option<String>, String> {
+        let value = text(key)?;
+        match &value {
+            Some(mode) if !is_octal_mode(mode) && !mode.contains("${") => Err(format!(
+                "{key}=\"{mode}\" must be an octal mode such as \"0644\": the check compares \
+                 it with the host's, so a symbolic one would never match"
+            )),
+            _ => Ok(value),
+        }
+    };
+    let mode = octal("mode")?;
     Ok(Options {
         prune,
         exclude: Exclude::new(&patterns)?,
         owner: text("owner")?,
         group: text("group")?,
-        file_mode: text("file-mode")?.or_else(|| mode.clone()),
-        dir_mode: text("dir-mode")?.or(mode),
+        file_mode: octal("file-mode")?.or_else(|| mode.clone()),
+        dir_mode: octal("dir-mode")?.or(mode),
     })
+}
+
+/// Three or four octal digits, as `stat` reports a mode and the check compares it.
+fn is_octal_mode(mode: &str) -> bool {
+    (3..=4).contains(&mode.len()) && mode.bytes().all(|b| (b'0'..=b'7').contains(&b))
 }
 
 /// `prune` deletes: only below an absolute path of at least two names, never through `.`
@@ -625,6 +640,29 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "mode= must be a quoted string: mode=\"644\"");
+    }
+
+    /// The check compares the mode with the octal one `stat` reports: a symbolic mode would
+    /// apply and never match, so it is refused up front.
+    #[test]
+    fn a_mode_must_be_octal() {
+        let s = |v: &str| ParamValue::String(v.to_string());
+        for key in ["mode", "file-mode", "dir-mode"] {
+            let err = options(&args(&[(key, s("u=rw,go="))]), Some("/srv/app"), true).unwrap_err();
+            assert!(err.contains("must be an octal mode"), "{key}: {err}");
+        }
+        for ok in ["644", "0644", "4755", "${m}"] {
+            assert!(
+                options(&args(&[("mode", s(ok))]), Some("/srv/app"), false).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in ["64", "08", "06444", "rwx"] {
+            assert!(
+                options(&args(&[("mode", s(bad))]), Some("/srv/app"), false).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     /// `validate` reads the exclude of a task whose other options are wrong, so its template

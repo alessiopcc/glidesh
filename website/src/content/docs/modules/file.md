@@ -223,7 +223,7 @@ beside the plan file.
 | `recurse` | boolean | Recursively copy a directory tree |
 | `owner` | string | Remote file owner |
 | `group` | string | Remote file group |
-| `mode` | string | Remote file permissions (e.g., `"0644"`); with `recurse`, of the directories and files that have no mode of their own |
+| `mode` | string | Remote file permissions, octal (e.g., `"0644"`; a symbolic mode such as `"u=rw"` is refused, as the check could never match it); with `recurse`, of the directories and files that have no mode of their own |
 | `dir-mode` | string | With `recurse`: the mode of the directories |
 | `file-mode` | string | With `recurse`: the mode of the files |
 | `exclude` | list | With `recurse`: [paths of the source to leave out](#excluding-paths) |
