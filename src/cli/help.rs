@@ -287,10 +287,11 @@ PREVIEW AND OUTPUT
   with the reason. --diff adds the detail: a unified diff of file content, the container
   parameters that changed. Probes still run in a preview: shell check= commands, container
   readiness gates. Without the TUI (--no-tui, or no terminal) a line about one host starts
-  with `[<host>]`, the inventory host name, however the plan was chosen. Before the run each
-  plan is announced once; a plan= on a group, or on a host in a group, names that group:
-  `Plan 'deploy' on group 'web' (2 hosts)`. With -p it is `Plan 'deploy' (2 hosts)`. Each host's log is kept under ~/.glidesh/runs/
-  (see `glidesh logs`).
+  with `[<host>]`, the inventory host name, however the plan was chosen (with --host, the
+  address given). Before the run each plan is announced once; a plan= on a group, or on a
+  host in a group, names that group: `Plan 'deploy' on group 'web' (2 hosts)`. With -p it
+  is `Plan 'deploy' (2 hosts)`. Each host's log is kept under ~/.glidesh/runs/ (see
+  `glidesh logs`).
   Exit status is non-zero when any host failed or a rolling run stopped early.
 
 SSH

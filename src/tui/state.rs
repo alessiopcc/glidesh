@@ -571,9 +571,7 @@ mod tests {
         s.handle_event(&ExecutorEvent::StepFailed {
             host: "web-1".to_string(),
             step: "Wait".to_string(),
-            error: "timed out; last output:
-not ready"
-                .to_string(),
+            error: "timed out; last output:\nnot ready".to_string(),
         });
         let tail = &s.combined_log[s.combined_log.len() - 2..];
         assert!(tail[0].starts_with("[web-1] "), "{:?}", s.combined_log);

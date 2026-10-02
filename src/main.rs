@@ -911,11 +911,18 @@ fn plan_announcement(group: &str, plan: &str, hosts: usize) -> String {
     } else {
         format!("{} hosts", hosts)
     };
+    let (plan, group) = (one_line(plan), one_line(group));
     if group.is_empty() {
         format!("Plan '{}' ({})", plan, hosts)
     } else {
         format!("Plan '{}' on group '{}' ({})", plan, group, hosts)
     }
+}
+
+/// A plan or group name is any KDL string; a line break in it would split the announcement
+/// and could pass for a `[host]` line.
+fn one_line(name: &str) -> String {
+    name.replace('\r', "\\r").replace('\n', "\\n")
 }
 
 fn print_event(event: &ExecutorEvent) {
@@ -1998,9 +2005,7 @@ mod tests {
         let (stream, lines) = event_lines(&ExecutorEvent::StepFailed {
             host: "web-1".to_string(),
             step: "Wait".to_string(),
-            error: "until= timed out after 5s; last output:
-not ready
-still not ready"
+            error: "until= timed out after 5s; last output:\nnot ready\nstill not ready"
                 .to_string(),
         });
         assert_eq!(stream, OutStream::Err);
@@ -2019,9 +2024,7 @@ still not ready"
         let (_, lines) = event_lines(&ExecutorEvent::ModuleCheck {
             host: "web-1".to_string(),
             module: "file".to_string(),
-            resource: "/etc/a
-b"
-            .to_string(),
+            resource: "/etc/a\nb".to_string(),
         });
         assert_eq!(lines, ["[web-1]   Checking file '/etc/a", "[web-1] b'"]);
     }
@@ -2035,6 +2038,14 @@ b"
         assert_eq!(
             plan_announcement("db", "postgres", 1),
             "Plan 'postgres' on group 'db' (1 host)"
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_plan_name_stays_on_the_announcement_line() {
+        assert_eq!(
+            plan_announcement("web", "deploy\n[db-1] OK", 1),
+            "Plan 'deploy\\n[db-1] OK' on group 'web' (1 host)"
         );
     }
 
