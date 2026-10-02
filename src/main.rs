@@ -698,8 +698,10 @@ enum OutStream {
     Err,
 }
 
-/// `text` as lines that each start with `[host]`: an error can carry captured output (an
-/// `until=` timeout's last output), and every line of it must stay greppable by host.
+/// `text` as lines that each start with `[host]`. Every host line with outside text in it
+/// goes here: an error can carry captured output (an `until=` timeout's last output), and a
+/// step name, resource or reason can hold an interpolated value with line breaks, yet every
+/// line must stay greppable by host.
 fn host_lines(host: &str, text: &str) -> Vec<String> {
     text.lines()
         .map(|line| format!("[{}] {}", host, line))
@@ -715,7 +717,7 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
         }
         ExecutorEvent::NodeConnected { host, os } => (
             OutStream::Out,
-            vec![format!("[{}] Connected ({})", host, os.id)],
+            host_lines(host, &format!("Connected ({})", os.id)),
         ),
         ExecutorEvent::NodeAuthFailed { host, error } => (
             OutStream::Err,
@@ -728,13 +730,10 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
             total_steps,
         } => (
             OutStream::Out,
-            vec![format!(
-                "[{}] Step {}/{}: {}",
+            host_lines(
                 host,
-                step_index + 1,
-                total_steps,
-                step
-            )],
+                &format!("Step {}/{}: {}", step_index + 1, total_steps, step),
+            ),
         ),
         ExecutorEvent::ModuleCheck {
             host,
@@ -742,7 +741,7 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
             resource,
         } => (
             OutStream::Out,
-            vec![format!("[{}]   Checking {} '{}'", host, module, resource)],
+            host_lines(host, &format!("  Checking {} '{}'", module, resource)),
         ),
         ExecutorEvent::ModuleResult {
             host,
@@ -754,13 +753,15 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
             stderr,
             ..
         } => {
-            let mut lines = vec![format!(
-                "[{}]   {} '{}': {}",
+            let mut lines = host_lines(
                 host,
-                module,
-                resource,
-                executor::changed_label(*changed, *dry_run)
-            )];
+                &format!(
+                    "  {} '{}': {}",
+                    module,
+                    resource,
+                    executor::changed_label(*changed, *dry_run)
+                ),
+            );
             // A preview's whole payload is the description of the pending work, so show
             // it here. A real run's stdout stays in the run log, as before.
             if *dry_run {
@@ -795,7 +796,7 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
         ),
         ExecutorEvent::StepSkipped { host, reason, .. } => (
             OutStream::Out,
-            vec![format!("[{}]   skipped ({})", host, reason)],
+            host_lines(host, &format!("  skipped ({})", reason)),
         ),
         ExecutorEvent::StepWaiting {
             host,
@@ -807,11 +808,13 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
             ..
         } => (
             OutStream::Out,
-            vec![format!(
-                "[{}]   {}",
+            host_lines(
                 host,
-                executor::waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
-            )],
+                &format!(
+                    "  {}",
+                    executor::waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
+                ),
+            ),
         ),
         ExecutorEvent::SectionStarted {
             host,
@@ -819,7 +822,7 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
             section,
         } => (
             OutStream::Out,
-            vec![format!("[{}]   {} step '{}'", host, section.label(), step)],
+            host_lines(host, &format!("  {} step '{}'", section.label(), step)),
         ),
         ExecutorEvent::TaskSkipped {
             host,
@@ -828,10 +831,10 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
             reason,
         } => (
             OutStream::Out,
-            vec![format!(
-                "[{}]   {} '{}': skipped ({})",
-                host, module, resource, reason
-            )],
+            host_lines(
+                host,
+                &format!("  {} '{}': skipped ({})", module, resource, reason),
+            ),
         ),
         ExecutorEvent::BatchStarted {
             index,
@@ -2009,6 +2012,18 @@ still not ready"
                 "[web-1] still not ready",
             ]
         );
+    }
+
+    #[test]
+    fn a_resource_with_a_line_break_keeps_the_host_on_every_line() {
+        let (_, lines) = event_lines(&ExecutorEvent::ModuleCheck {
+            host: "web-1".to_string(),
+            module: "file".to_string(),
+            resource: "/etc/a
+b"
+            .to_string(),
+        });
+        assert_eq!(lines, ["[web-1]   Checking file '/etc/a", "[web-1] b'"]);
     }
 
     #[test]
