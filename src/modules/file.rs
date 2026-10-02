@@ -2,6 +2,7 @@ use crate::config::template::{TemplateData, defined_references, render_file};
 use crate::error::GlideshError;
 use crate::modules::context::ModuleContext;
 use crate::modules::file_diff;
+use crate::modules::file_tree::{self, PathStat, SourceTree, Strays};
 use crate::modules::{Module, ModuleParams, ModuleResult, ModuleStatus};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -110,47 +111,6 @@ impl FileModule {
             rel_path.to_string_lossy().replace('\\', "/")
         )
     }
-
-    /// Recursively walk a local directory, returning relative paths of all files (sorted).
-    fn walk_dir(base: &Path) -> Result<Vec<PathBuf>, GlideshError> {
-        let mut files = Vec::new();
-        Self::walk_dir_inner(base, base, &mut files)?;
-        files.sort();
-        Ok(files)
-    }
-
-    fn walk_dir_inner(
-        root: &Path,
-        current: &Path,
-        files: &mut Vec<PathBuf>,
-    ) -> Result<(), GlideshError> {
-        let entries = std::fs::read_dir(current).map_err(|e| GlideshError::Module {
-            module: "file".to_string(),
-            message: format!("Failed to read directory '{}': {}", current.display(), e),
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| GlideshError::Module {
-                module: "file".to_string(),
-                message: format!(
-                    "Failed to read directory entry in '{}': {}",
-                    current.display(),
-                    e
-                ),
-            })?;
-            let path = entry.path();
-            if path.is_dir() {
-                Self::walk_dir_inner(root, &path, files)?;
-            } else {
-                let relative = path.strip_prefix(root).map_err(|e| GlideshError::Module {
-                    module: "file".to_string(),
-                    message: format!("Failed to compute relative path: {}", e),
-                })?;
-                files.push(relative.to_path_buf());
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Strips leading zeros so "0644" and "644" compare equal.
@@ -162,7 +122,18 @@ fn normalize_mode(mode: &str) -> &str {
 
 /// Every parameter the module reads; any other is rejected before connecting.
 const PARAMS: &[&str] = &[
-    "diff", "fetch", "group", "mode", "owner", "recurse", "src", "template",
+    "diff",
+    "dir-mode",
+    "exclude",
+    "fetch",
+    "file-mode",
+    "group",
+    "mode",
+    "owner",
+    "prune",
+    "recurse",
+    "src",
+    "template",
 ];
 
 #[async_trait]
@@ -182,6 +153,8 @@ impl Module for FileModule {
     ) -> Result<ModuleStatus, GlideshError> {
         let src = Self::get_src(params)?;
         let dest = Self::get_dest(params)?;
+        // Rejects a recursive-only parameter on any other upload, before anything is read.
+        Self::tree_options(params, dest)?;
 
         if Self::is_fetch(params) {
             if Self::is_recurse(params) {
@@ -276,8 +249,9 @@ impl Module for FileModule {
                         file_diff::opted_out(dest),
                     ));
                 }
+                let mode = params.args.get("mode").and_then(|v| v.as_str());
                 let diff =
-                    Self::diff_against_remote(ctx, params, dest, remote_hash.is_some(), &content)
+                    Self::diff_against_remote(ctx, mode, dest, remote_hash.is_some(), &content)
                         .await?;
                 Ok(ModuleStatus::pending_with_diff(plan, diff))
             }
@@ -302,6 +276,16 @@ impl Module for FileModule {
 
         self.apply_upload(ctx, params, src, dest).await
     }
+}
+
+/// The host state of a recursive upload's managed paths, from `FileModule::managed_stats`.
+struct Managed {
+    /// Directories first, then files, as `FileModule::managed_paths` lists them.
+    stats: Vec<Option<PathStat>>,
+    /// Paths of the other kind than the source's, with whether the host's is a directory.
+    mismatched: Vec<(String, bool)>,
+    /// Source directories the host has as a link to a directory.
+    dir_links: std::collections::HashSet<String>,
 }
 
 impl FileModule {
@@ -445,13 +429,23 @@ impl FileModule {
         })
     }
 
-    async fn check_recurse(
-        &self,
+    /// A recursive upload's options, or why they cannot be used.
+    fn tree_options(params: &ModuleParams, dest: &str) -> Result<file_tree::Options, GlideshError> {
+        file_tree::options(&params.args, Some(dest), Self::is_recurse(params)).map_err(|message| {
+            GlideshError::Module {
+                module: "file".to_string(),
+                message,
+            }
+        })
+    }
+
+    /// The source directory of a recursive upload, and its tree less what `exclude` leaves
+    /// out.
+    fn source_tree(
         ctx: &ModuleContext<'_>,
-        params: &ModuleParams,
         src: &str,
-        dest: &str,
-    ) -> Result<ModuleStatus, GlideshError> {
+        options: &file_tree::Options,
+    ) -> Result<(PathBuf, SourceTree), GlideshError> {
         let resolved_src = Self::resolve_local(src, ctx.plan_base_dir);
         if !resolved_src.is_dir() {
             return Err(GlideshError::Module {
@@ -462,79 +456,247 @@ impl FileModule {
                 ),
             });
         }
+        let tree =
+            file_tree::walk(&resolved_src, &options.exclude).map_err(|e| GlideshError::Module {
+                module: "file".to_string(),
+                message: format!("Failed to read directory {e}"),
+            })?;
+        Ok((resolved_src, tree))
+    }
 
-        let local_files = Self::walk_dir(&resolved_src)?;
-        if local_files.is_empty() {
-            return Ok(ModuleStatus::Satisfied);
+    /// One file of a recursive upload as it is written to the host: rendered when it is a
+    /// template.
+    fn tree_file_content(
+        ctx: &ModuleContext<'_>,
+        params: &ModuleParams,
+        src: &str,
+        resolved_src: &Path,
+        rel_path: &str,
+    ) -> Result<Vec<u8>, GlideshError> {
+        let local_path = resolved_src.join(rel_path);
+        let failed = |e: std::io::Error| GlideshError::Module {
+            module: "file".to_string(),
+            message: format!("Failed to read '{}': {}", local_path.display(), e),
+        };
+        if !Self::is_template(params) {
+            return std::fs::read(&local_path).map_err(failed);
         }
+        let text = std::fs::read_to_string(&local_path).map_err(failed)?;
+        let rendered = render_file(
+            &text,
+            ctx.vars,
+            ctx.template_data,
+            &Self::shown_template(src, Path::new(rel_path)),
+        )?;
+        Ok(rendered.into_bytes())
+    }
 
-        let template = Self::is_template(params);
-        let desired_owner = params.args.get("owner").and_then(|v| v.as_str());
-        let desired_group = params.args.get("group").and_then(|v| v.as_str());
-        let desired_mode = params.args.get("mode").and_then(|v| v.as_str());
-        let check_attrs =
-            desired_owner.is_some() || desired_group.is_some() || desired_mode.is_some();
+    /// The paths a recursive upload manages on the host: the destination and the source's
+    /// directories under it, and its files. The destination is named `dest/`, so a symlink
+    /// to a directory stands for that directory, as uploads through it do: its attributes
+    /// are changed without following links.
+    fn managed_paths(dest: &str, tree: &SourceTree) -> (Vec<String>, Vec<String>) {
+        let root = format!("{}/", dest.trim_end_matches('/'));
+        let dirs = std::iter::once(root)
+            .chain(tree.dirs.iter().map(|d| file_tree::join(dest, d)))
+            .collect();
+        let files = tree
+            .files
+            .iter()
+            .map(|f| file_tree::join(dest, f))
+            .collect();
+        (files, dirs)
+    }
+
+    /// What each managed path is on the host — directories first, then files, as
+    /// [`Self::managed_paths`] lists them — and every one of the other kind than the source's,
+    /// with whether the host's is a directory: in the way of the upload unless `prune`
+    /// removes it.
+    async fn managed_stats(
+        ctx: &ModuleContext<'_>,
+        files: &[String],
+        dirs: &[String],
+    ) -> Result<Managed, GlideshError> {
+        let paths: Vec<String> = dirs.iter().chain(files).cloned().collect();
+        let stats = ctx.stat_many(&paths).await?;
+        // `dest/` does not resolve when `dest` is a file or a link to nowhere, which would
+        // read as a directory still to create: asked again without the slash, it is refused,
+        // as nothing it holds could be kept and prune removes only what is under `dest`.
+        if stats[0].is_none() {
+            let bare = dirs[0].trim_end_matches('/').to_string();
+            if !bare.is_empty() && ctx.stat_many(std::slice::from_ref(&bare)).await?[0].is_some() {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!(
+                        "{bare} is not a directory on the host; a recursive upload needs one \
+                         there, so remove it first"
+                    ),
+                });
+            }
+        }
+        let mismatched = paths
+            .iter()
+            .zip(&stats)
+            .enumerate()
+            .filter_map(|(i, (path, stat))| {
+                let stat = stat.as_ref().filter(|s| s.mismatches(i < dirs.len()))?;
+                let host_dir = matches!(stat.kind, file_tree::PathKind::Dir);
+                Some((path.trim_end_matches('/').to_string(), host_dir))
+            })
+            .collect();
+        let dir_links = dirs
+            .iter()
+            .zip(&stats)
+            .filter(|(_, stat)| {
+                stat.as_ref()
+                    .is_some_and(|s| s.kind == file_tree::PathKind::Link { to_dir: Some(true) })
+            })
+            .map(|(dir, _)| dir.trim_end_matches('/').to_string())
+            .collect();
+        Ok(Managed {
+            stats,
+            mismatched,
+            dir_links,
+        })
+    }
+
+    /// Whether a directory above `path` is one of the `mismatched` paths.
+    fn below_mismatch(path: &str, mismatched: &[(String, bool)]) -> bool {
+        let mut at = path;
+        while let Some((parent, _)) = at.rsplit_once('/') {
+            if mismatched.iter().any(|(p, _)| p == parent) {
+                return true;
+            }
+            at = parent;
+        }
+        false
+    }
+
+    /// A host path as output shows it: a name may hold a line break or a terminal escape,
+    /// which would forge output lines or drive the terminal.
+    fn shown_path(path: &str) -> String {
+        path.chars()
+            .map(|c| {
+                if c.is_control() {
+                    c.escape_default().to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect()
+    }
+
+    /// `paths`, the first few named and the rest counted.
+    fn some_paths(paths: &[String]) -> String {
+        const SHOWN: usize = 5;
+        let mut shown = paths
+            .iter()
+            .take(SHOWN)
+            .map(|p| Self::shown_path(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if paths.len() > SHOWN {
+            shown.push_str(&format!(" and {} more", paths.len() - SHOWN));
+        }
+        shown
+    }
+
+    /// What `prune` would remove from `dest`; nothing without it.
+    async fn strays(
+        ctx: &ModuleContext<'_>,
+        options: &file_tree::Options,
+        tree: &SourceTree,
+        src: &str,
+        dest: &str,
+        managed: &Managed,
+    ) -> Result<Strays, GlideshError> {
+        if !options.prune {
+            return Ok(Strays::default());
+        }
+        file_tree::check_prune_source(tree, src, dest).map_err(|message| GlideshError::Module {
+            module: "file".to_string(),
+            message,
+        })?;
+        let listed = ctx.list_tree(dest).await?;
+        let mut strays = file_tree::strays(&listed, tree, &options.exclude);
+        // A link to a directory where the source has a file lists as a non-directory — the
+        // kind the source has there — so only its stat tells it is in the way.
+        // Never one below a kept link to a directory: removing it would reach through the
+        // link, outside the destination; the apply refuses it, naming the link.
+        let prefix = format!("{}/", dest.trim_end_matches('/'));
+        let through_link = |path: &str| {
+            managed
+                .dir_links
+                .iter()
+                .any(|link| path.starts_with(&format!("{link}/")))
+        };
+        for (path, _) in managed
+            .mismatched
+            .iter()
+            .filter(|(path, host_dir)| !host_dir && !through_link(path))
+        {
+            if let Some(rel) = path.strip_prefix(&prefix).filter(|rel| !rel.is_empty()) {
+                if !strays.files.iter().any(|file| file == rel) {
+                    strays.files.push(rel.to_string());
+                }
+            }
+        }
+        // A link to a directory where the source has one lists as a non-directory too, yet is
+        // what uploads go through: it stays, and prune does not look inside it.
+        strays
+            .files
+            .retain(|rel| !managed.dir_links.contains(&file_tree::join(dest, rel)));
+        strays.files.sort();
+        Ok(strays)
+    }
+
+    async fn check_recurse(
+        &self,
+        ctx: &ModuleContext<'_>,
+        params: &ModuleParams,
+        src: &str,
+        dest: &str,
+    ) -> Result<ModuleStatus, GlideshError> {
+        let options = Self::tree_options(params, dest)?;
+        let (resolved_src, tree) = Self::source_tree(ctx, src, &options)?;
+        let (files, dirs) = Self::managed_paths(dest, &tree);
+        let managed = Self::managed_stats(ctx, &files, &dirs).await?;
+        let (stats, mismatched) = (&managed.stats, &managed.mismatched);
+        let (dir_stats, file_stats) = stats.split_at(dirs.len());
+
         let mut content_changed = 0usize;
-        let mut attrs_changed = 0usize;
         let mut diffs = Vec::new();
         let opted_out = Self::diff_opted_out(params)?;
         let show_diffs = ctx.diff && !opted_out;
-
-        for rel_path in &local_files {
-            let local_path = resolved_src.join(rel_path);
-            let content = if template {
-                let text =
-                    std::fs::read_to_string(&local_path).map_err(|e| GlideshError::Module {
-                        module: "file".to_string(),
-                        message: format!("Failed to read '{}': {}", local_path.display(), e),
-                    })?;
-                let rendered = render_file(
-                    &text,
-                    ctx.vars,
-                    ctx.template_data,
-                    &Self::shown_template(src, rel_path),
-                )?;
-                rendered.into_bytes()
-            } else {
-                std::fs::read(&local_path).map_err(|e| GlideshError::Module {
-                    module: "file".to_string(),
-                    message: format!("Failed to read '{}': {}", local_path.display(), e),
-                })?
-            };
-
+        for ((rel_path, remote_path), stat) in tree.files.iter().zip(&files).zip(file_stats) {
+            // Rendered even when a directory is in the way, so a template error fails the
+            // check, before an apply removes that directory.
+            let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
+            // A directory in the way, or a file where one of its directories should be, leaves
+            // no content to compare — nor to checksum, which fails through a file — and is
+            // counted as a mismatch.
+            if stat.as_ref().is_some_and(|s| s.mismatches(false))
+                || Self::below_mismatch(remote_path, mismatched)
+            {
+                continue;
+            }
             let local_hash = Self::sha256_hex(&content);
-            let remote_path = format!(
-                "{}/{}",
-                dest.trim_end_matches('/'),
-                rel_path.to_string_lossy().replace('\\', "/")
-            );
-
-            match ctx.checksum_remote(&remote_path).await? {
-                Some(remote_hash) if remote_hash == local_hash => {
-                    if check_attrs {
-                        if let Some((remote_owner, remote_group, remote_mode)) =
-                            ctx.get_file_attrs(&remote_path).await?
-                        {
-                            let owner_ok = desired_owner.is_none_or(|o| o == remote_owner);
-                            let group_ok = desired_group.is_none_or(|g| g == remote_group);
-                            let mode_ok = desired_mode
-                                .is_none_or(|m| normalize_mode(m) == normalize_mode(&remote_mode));
-                            if !owner_ok || !group_ok || !mode_ok {
-                                attrs_changed += 1;
-                            }
-                        } else {
-                            attrs_changed += 1;
-                        }
-                    }
-                }
+            match ctx.checksum_remote(remote_path).await? {
+                Some(remote_hash) if remote_hash == local_hash => {}
                 remote_hash => {
                     content_changed += 1;
                     if show_diffs {
+                        // The mode this file gets; none for a link, whose mode is left as it
+                        // is, so the host's own decides.
+                        let mode = match stat {
+                            Some(found) if found.is_link() => None,
+                            _ => options.file_mode.as_deref(),
+                        };
                         diffs.push(
                             Self::diff_against_remote(
                                 ctx,
-                                params,
-                                &remote_path,
+                                mode,
+                                remote_path,
                                 remote_hash.is_some(),
                                 &content,
                             )
@@ -545,34 +707,82 @@ impl FileModule {
             }
         }
 
-        if content_changed == 0 && attrs_changed == 0 {
-            Ok(ModuleStatus::Satisfied)
+        // Directories always, since an empty one has no file to upload into it; files only
+        // for their attributes (a missing one is new content, counted above).
+        let missing_dirs = dir_stats.iter().filter(|stat| stat.is_none()).count();
+        let attrs_changed = if options.changes_attrs() {
+            dir_stats
+                .iter()
+                .map(|stat| (stat, true))
+                .chain(file_stats.iter().map(|stat| (stat, false)))
+                .filter(|(stat, want_dir)| {
+                    stat.as_ref().is_some_and(|s| {
+                        !s.mismatches(*want_dir) && !s.attrs_match(&options, *want_dir)
+                    })
+                })
+                .count()
         } else {
-            let mut parts = Vec::new();
-            if content_changed > 0 {
-                parts.push(format!("{} content", content_changed));
-            }
-            if attrs_changed > 0 {
-                parts.push(format!("{} attrs", attrs_changed));
-            }
-            let plan = format!(
-                "Upload dir {} -> {} (changed: {} of {} files)",
-                src,
-                dest,
+            0
+        };
+
+        let strays = Self::strays(ctx, &options, &tree, src, dest, &managed).await?;
+
+        if content_changed == 0
+            && attrs_changed == 0
+            && missing_dirs == 0
+            && mismatched.is_empty()
+            && strays.is_empty()
+        {
+            return Ok(ModuleStatus::Satisfied);
+        }
+        let mut parts = Vec::new();
+        if content_changed > 0 {
+            parts.push(format!("{} content", content_changed));
+        }
+        if attrs_changed > 0 {
+            parts.push(format!("{} attrs", attrs_changed));
+        }
+        if missing_dirs > 0 {
+            parts.push(format!("{} new dirs", missing_dirs));
+        }
+        if !mismatched.is_empty() {
+            parts.push(format!("{} of the other kind", mismatched.len()));
+        }
+        let mut plan = format!("Upload dir {} -> {}", src, dest);
+        if !parts.is_empty() {
+            plan.push_str(&format!(
+                " (changed: {} of {} files)",
                 parts.join(", "),
-                local_files.len()
-            );
-            if ctx.diff && opted_out && content_changed > 0 {
-                Ok(ModuleStatus::pending_with_diff(
-                    plan,
-                    file_diff::opted_out(dest),
-                ))
-            } else if diffs.is_empty() {
-                Ok(ModuleStatus::pending(plan))
-            } else {
-                let diff = file_diff::truncate_lines(&diffs.join("\n"), file_diff::MAX_DIFF_LINES);
-                Ok(ModuleStatus::pending_with_diff(plan, diff))
-            }
+                tree.files.len()
+            ));
+        }
+        let removed = strays.paths(dest);
+        if !removed.is_empty() {
+            plan.push_str(&format!(
+                "; remove {}: {}",
+                removed.len(),
+                Self::some_paths(&removed)
+            ));
+        }
+        let removals: Vec<String> = removed
+            .iter()
+            .map(|p| format!("remove {}", Self::shown_path(p)))
+            .collect();
+
+        if !ctx.diff {
+            return Ok(ModuleStatus::pending(plan));
+        }
+        // Removals first: the diff is cut at a line limit, and they are what cannot be undone.
+        let mut shown = removals;
+        if opted_out && content_changed > 0 {
+            shown.push(file_diff::opted_out(dest));
+        }
+        shown.extend(diffs);
+        if shown.is_empty() {
+            Ok(ModuleStatus::pending(plan))
+        } else {
+            let diff = file_diff::truncate_lines(&shown.join("\n"), file_diff::MAX_DIFF_LINES);
+            Ok(ModuleStatus::pending_with_diff(plan, diff))
         }
     }
 
@@ -592,15 +802,15 @@ impl FileModule {
     }
 
     /// Only called once the hashes differ, so the download is spent on a real change.
+    /// `mode` is the one the plan sets on `dest`, which may make it private.
     async fn diff_against_remote(
         ctx: &ModuleContext<'_>,
-        params: &ModuleParams,
+        mode: Option<&str>,
         dest: &str,
         exists: bool,
         content: &[u8],
     ) -> Result<String, GlideshError> {
-        let private =
-            file_diff::mode_may_be_private(params.args.get("mode").and_then(|v| v.as_str()));
+        let private = file_diff::mode_may_be_private(mode);
         if let Some(note) = file_diff::local_note(dest, content, private) {
             return Ok(note);
         }
@@ -625,143 +835,139 @@ impl FileModule {
         src: &str,
         dest: &str,
     ) -> Result<ModuleResult, GlideshError> {
-        let resolved_src = Self::resolve_local(src, ctx.plan_base_dir);
-        if !resolved_src.is_dir() {
-            return Err(GlideshError::Module {
-                module: "file".to_string(),
-                message: format!(
-                    "recurse=true but '{}' is not a directory",
-                    resolved_src.display()
-                ),
-            });
-        }
-
-        let local_files = Self::walk_dir(&resolved_src)?;
+        let options = Self::tree_options(params, dest)?;
+        let (resolved_src, tree) = Self::source_tree(ctx, src, &options)?;
         let template = Self::is_template(params);
 
+        // Every file read — every template rendered — before anything changes. With `prune`
+        // the contents are kept, so none is read again after something was removed; without
+        // it nothing is removed, and each file is read again as it is uploaded, one at a time.
         let mut warnings = Vec::new();
-        if !template {
-            for rel_path in &local_files {
-                let local_path = resolved_src.join(rel_path);
-                let content = std::fs::read(&local_path).map_err(|e| GlideshError::Module {
-                    module: "file".to_string(),
-                    message: format!("Failed to read '{}': {}", local_path.display(), e),
-                })?;
-                let label = format!(
-                    "{}/{}",
-                    src.trim_end_matches('/'),
-                    rel_path.to_string_lossy().replace('\\', "/")
-                );
+        let mut kept = Vec::new();
+        for rel_path in &tree.files {
+            let content = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
+            if !template {
+                let label = Self::shown_template(src, Path::new(rel_path));
                 warnings.extend(Self::literal_reference_warning(ctx, &label, &content));
+            }
+            if options.prune {
+                kept.push(content);
             }
         }
         let warnings = warnings.join("\n");
 
         if ctx.dry_run {
+            let mut output = format!(
+                "[dry-run] Would copy dir {} -> {} ({} files)",
+                src,
+                dest,
+                tree.files.len()
+            );
+            let (files, dirs) = Self::managed_paths(dest, &tree);
+            let managed = Self::managed_stats(ctx, &files, &dirs).await?;
+            let strays = Self::strays(ctx, &options, &tree, src, dest, &managed).await?;
+            if !strays.is_empty() {
+                output.push_str(&format!(" and remove {}", strays.len()));
+            }
             return Ok(ModuleResult {
                 changed: false,
-                output: format!(
-                    "[dry-run] Would copy dir {} -> {} ({} files)",
-                    src,
-                    dest,
-                    local_files.len()
-                ),
+                output,
                 stderr: warnings,
                 exit_code: 0,
                 output_cut: false,
             });
         }
 
-        let dest_trimmed = dest.trim_end_matches('/');
-        let owner = params.args.get("owner").and_then(|v| v.as_str());
-        let group = params.args.get("group").and_then(|v| v.as_str());
-        let mode = params.args.get("mode").and_then(|v| v.as_str());
-        let attrs_changed = owner.is_some() || group.is_some() || mode.is_some();
         // Refused before anything is uploaded, rather than by the attribute change after;
         // asked of the host, since `/tmp/..` or a symlink can name `/` too.
-        if attrs_changed && ctx.is_root_dir(dest_trimmed).await? {
+        if options.changes_attrs() && ctx.is_root_dir(dest).await? {
             return Err(crate::ssh::connection::root_refusal(dest));
         }
-        let mut uploaded = 0usize;
+        // Listed before uploading, so a destination prune refuses is refused before any
+        // change; what the upload adds is the source's, never a stray.
+        let (files, dirs) = Self::managed_paths(dest, &tree);
+        let managed = Self::managed_stats(ctx, &files, &dirs).await?;
+        let (stats, mismatched) = (&managed.stats, &managed.mismatched);
+        let strays = Self::strays(ctx, &options, &tree, src, dest, &managed).await?;
+        let removing: std::collections::HashSet<String> = strays.paths(dest).into_iter().collect();
+        if let Some((blocked, _)) = mismatched.iter().find(|(p, _)| !removing.contains(p)) {
+            let in_link = managed
+                .dir_links
+                .iter()
+                .find(|link| blocked.starts_with(&format!("{link}/")));
+            let fix = match in_link {
+                Some(link) => format!(
+                    "it is inside {link}, a link to a directory, which prune does not look \
+                     into; remove it yourself"
+                ),
+                None if options.prune => "prune keeps it, as it holds a path `exclude` leaves \
+                                          out; remove it yourself, or stop excluding what it \
+                                          holds"
+                    .to_string(),
+                None => "remove it, or set prune=#true".to_string(),
+            };
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "{blocked} on the host is not the kind of entry the source has there (a \
+                     file where it has a directory, a directory where it has a file, or a \
+                     FIFO, socket or device); {fix}"
+                ),
+            });
+        }
+        let missing_dirs = stats[..dirs.len()].iter().filter(|s| s.is_none()).count();
 
-        let mut remote_dirs: Vec<String> = local_files
-            .iter()
-            .filter_map(|rel| {
-                rel.parent().map(|p| {
-                    let p_str = p.to_string_lossy().replace('\\', "/");
-                    if p_str.is_empty() {
-                        dest_trimmed.to_string()
-                    } else {
-                        format!("{}/{}", dest_trimmed, p_str)
-                    }
-                })
-            })
-            .collect();
-        remote_dirs.sort();
-        remote_dirs.dedup();
+        // Strays first: one of the other kind would be in the way of the source's.
+        ctx.remove_strays(dest, &strays).await?;
+        let removed = strays.len();
 
-        // A copy to `/` names its top level as "", which `mkdir -p` rejects; `/` exists.
-        let dirs: Vec<&str> = remote_dirs
+        // `/` exists, and `mkdir -p` rejects the "" a copy to it would name.
+        let to_create: Vec<&str> = dirs
             .iter()
-            .map(String::as_str)
+            .map(|d| d.trim_end_matches('/'))
             .filter(|d| !d.is_empty())
             .collect();
-        ctx.create_dirs(&dirs).await?;
+        ctx.create_dirs(&to_create).await?;
 
-        for rel_path in &local_files {
-            let local_path = resolved_src.join(rel_path);
-            let content = if template {
-                let text =
-                    std::fs::read_to_string(&local_path).map_err(|e| GlideshError::Module {
-                        module: "file".to_string(),
-                        message: format!("Failed to read '{}': {}", local_path.display(), e),
-                    })?;
-                let rendered = render_file(
-                    &text,
-                    ctx.vars,
-                    ctx.template_data,
-                    &Self::shown_template(src, rel_path),
-                )?;
-                rendered.into_bytes()
-            } else {
-                std::fs::read(&local_path).map_err(|e| GlideshError::Module {
-                    module: "file".to_string(),
-                    message: format!("Failed to read '{}': {}", local_path.display(), e),
-                })?
+        let mut uploaded = 0usize;
+        for (i, (rel_path, remote_path)) in tree.files.iter().zip(&files).enumerate() {
+            let read;
+            let content = match kept.get(i) {
+                Some(content) => content,
+                None => {
+                    read = Self::tree_file_content(ctx, params, src, &resolved_src, rel_path)?;
+                    &read
+                }
             };
-
-            let local_hash = Self::sha256_hex(&content);
-            let remote_path = format!(
-                "{}/{}",
-                dest_trimmed,
-                rel_path.to_string_lossy().replace('\\', "/")
-            );
-
-            let needs_upload = match ctx.checksum_remote(&remote_path).await? {
-                Some(remote_hash) => remote_hash != local_hash,
+            let needs_upload = match ctx.checksum_remote(remote_path).await? {
+                Some(remote_hash) => remote_hash != Self::sha256_hex(content),
                 None => true,
             };
-
             if needs_upload {
-                ctx.upload_file(&content, &remote_path).await?;
+                ctx.upload_file(content, remote_path).await?;
                 uploaded += 1;
             }
         }
 
-        if attrs_changed {
-            ctx.set_file_attrs_recursive(dest_trimmed, owner, group, mode)
-                .await?;
-        }
+        ctx.set_tree_attrs(dest, &files, &dirs, &options).await?;
 
+        let mut output = format!(
+            "copy dir {} -> {} ({} uploaded, {} total",
+            src,
+            dest,
+            uploaded,
+            tree.files.len()
+        );
+        if missing_dirs > 0 {
+            output.push_str(&format!(", {} dirs created", missing_dirs));
+        }
+        if options.prune {
+            output.push_str(&format!(", {} removed", removed));
+        }
+        output.push(')');
         Ok(ModuleResult {
-            changed: uploaded > 0 || attrs_changed,
-            output: format!(
-                "copy dir {} -> {} ({} uploaded, {} total)",
-                src,
-                dest,
-                uploaded,
-                local_files.len()
-            ),
+            changed: uploaded > 0 || missing_dirs > 0 || removed > 0 || options.changes_attrs(),
+            output,
             stderr: warnings,
             exit_code: 0,
             output_cut: false,
@@ -867,45 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn test_walk_dir_basic() {
-        let dir = std::env::temp_dir().join(format!("glidesh_walk_{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("a.txt"), "hello").unwrap();
-        std::fs::write(dir.join("sub/b.txt"), "world").unwrap();
-
-        let files = FileModule::walk_dir(&dir).unwrap();
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0], PathBuf::from("a.txt"));
-        assert_eq!(
-            files[1],
-            PathBuf::from(if cfg!(windows) {
-                "sub\\b.txt"
-            } else {
-                "sub/b.txt"
-            })
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_walk_dir_empty() {
-        let dir = std::env::temp_dir().join(format!("glidesh_walk_empty_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let files = FileModule::walk_dir(&dir).unwrap();
-        assert!(files.is_empty());
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_walk_dir_nonexistent() {
-        let dir = std::env::temp_dir().join("glidesh_walk_nonexistent_dir");
-        assert!(FileModule::walk_dir(&dir).is_err());
-    }
-
-    #[test]
     fn test_is_recurse_default_false() {
         let params = ModuleParams {
             resource_name: "/tmp/test".to_string(),
@@ -940,5 +1107,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("'diff' must be #true or #false"), "{err}");
+    }
+
+    /// A host name can hold a line break or a terminal escape: shown escaped, it can neither
+    /// forge an output line nor drive the terminal.
+    #[test]
+    fn a_host_path_is_shown_with_its_control_characters_escaped() {
+        assert_eq!(
+            FileModule::shown_path("/srv/a\nremove /etc\u{1b}[2J"),
+            "/srv/a\\nremove /etc\\u{1b}[2J"
+        );
+        assert_eq!(
+            FileModule::shown_path("/srv/caf\u{e9} x"),
+            "/srv/caf\u{e9} x"
+        );
     }
 }

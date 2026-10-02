@@ -1120,6 +1120,9 @@ fn validate_plan_file(
     check.problems.extend(registry.plan_problems(&plan));
     check
         .problems
+        .extend(config::checks::file_option_problems(&plan));
+    check
+        .problems
         .extend(config::checks::missing_file_sources(&plan, plan_dir));
     check
         .problems

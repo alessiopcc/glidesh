@@ -312,6 +312,9 @@ without contacting a host:
   attribute such as `loop=` written on a task says to move it to the step. External modules
   take any parameter. `run` makes the same check before it asks for the run-as password or a
   prompted variable, or connects.
+- **Recursive `file` options are usable.** `dir-mode`, `file-mode`, `exclude` and `prune`
+  need `recurse=#true`; an `exclude` pattern must mean something; `prune` needs an absolute
+  destination at least two directories deep. Template checks skip what `exclude` leaves out.
 - **Every `file` task has a `src`, and local sources exist.** A `src` is resolved from the
   directory of the plan the task is written in — an [included plan](/advanced/plan-includes/#path-resolution)'s
   own — as a run resolves it. Not checked: a `fetch` source, which is a path on the host, and

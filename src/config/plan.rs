@@ -1000,19 +1000,26 @@ fn parse_task(node: &kdl::KdlNode) -> Result<TaskDef, GlideshError> {
                     .iter()
                     .all(|n| n.name().to_string() == "-")
             {
-                let list: Vec<String> = child
-                    .children()
-                    .unwrap()
-                    .nodes()
-                    .iter()
-                    .filter_map(|n| {
-                        n.entries()
-                            .iter()
-                            .find(|e| e.name().is_none())
-                            .and_then(|e| e.value().as_string())
-                            .map(|s| s.to_string())
-                    })
-                    .collect();
+                // `- "a" - "b"` on one line is one `-` node holding the rest as values:
+                // taking the first would drop the others unseen — an `exclude` pattern, and
+                // with `prune` the files it was meant to keep.
+                let mut list = Vec::new();
+                for item in child.children().unwrap().nodes() {
+                    match item.entries() {
+                        [one] if one.name().is_none() => {
+                            list.push(super::kdl_value_to_string(one.value()))
+                        }
+                        _ => {
+                            return Err(GlideshError::ConfigParse {
+                                message: format!(
+                                    "{module} '{resource}': {key}: each `-` item takes one \
+                                     value; put items on their own lines, or separate them \
+                                     with `;` (`- \"a\"; - \"b\"`)"
+                                ),
+                            });
+                        }
+                    }
+                }
                 args.insert(key, ParamValue::List(list));
             } else if child.children().is_some() {
                 let mut map = HashMap::new();
@@ -1245,6 +1252,28 @@ plan "containers" {
         );
         let ports = task.args.get("ports").unwrap().as_list().unwrap();
         assert_eq!(ports, &["8000:8000"]);
+    }
+
+    /// `- "a" - "b"` on one line is one item holding three values; keeping the first used
+    /// to drop the rest unseen.
+    #[test]
+    fn a_list_item_with_several_values_is_rejected() {
+        let err = plan_err(
+            r#"step "s" { file "/srv/app" src="site" recurse=#true { exclude { - ".git" - "*.log" } } }"#,
+        );
+        assert!(
+            err.contains("exclude: each `-` item takes one value"),
+            "{err}"
+        );
+        let ok = parse_plan(
+            r#"plan "p" { step "s" { container "c" image="x" { ports { - "80:80"; - 8443 } } } }"#,
+        )
+        .unwrap();
+        let ports = ok.steps()[0].tasks[0].args["ports"]
+            .as_list()
+            .unwrap()
+            .to_vec();
+        assert_eq!(ports, ["80:80", "8443"], "a number is kept, as text");
     }
 
     #[test]

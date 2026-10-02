@@ -493,6 +493,8 @@ mod tests {
             "$${NAME} writes a literal ${NAME}",
             "Any other parameter on a built-in module is an error",
             "`jump #false`",
+            "prune=#true removes host paths",
+            "dir-mode= file-mode=",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

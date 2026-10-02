@@ -1,6 +1,7 @@
 use crate::config::types::{ResolvedJumpHost, ResolvedRunAs, RunAsMethod};
 use crate::error::GlideshError;
 use crate::modules::escalation;
+use crate::modules::file_tree::{PathKind, PathStat, RemoteKind, Strays, join as tree_join};
 use crate::ssh::HostKeyPolicy;
 use crate::ssh::handler::{ForwardRegistry, SshHandler, new_forward_registry};
 use crate::util::shell_escape;
@@ -923,32 +924,34 @@ impl SshSession {
         })
     }
 
-    /// `mkdir -p` each of `dirs`; escalated, only once [`trusted_paths`] holds for them,
-    /// since `mkdir -p` follows symlinks on the way.
+    /// `mkdir -p` each of `dirs`, in chunks as [`path_chunks`] splits them; escalated, only
+    /// once [`trusted_paths`] holds for them, since `mkdir -p` follows symlinks on the way.
     pub async fn create_dirs_as(
         &self,
         dirs: &[&str],
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
-        if dirs.is_empty() {
-            return Ok(());
-        }
-        let command = match run_as {
-            Some(_) => guarded_mkdir(dirs, self.login_uid().await?),
-            None => format!(
-                "mkdir -p {}",
-                dirs.iter()
-                    .map(|d| shell_escape(d))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-        };
-        let out = self.exec_as(&command, run_as).await?;
-        if out.exit_code != 0 {
-            return Err(GlideshError::Module {
-                module: "file".to_string(),
-                message: format!("failed to create {}: {}", dirs.join(", "), out.failure()),
-            });
+        let owned: Vec<String> = dirs.iter().map(|d| d.to_string()).collect();
+        for chunk in path_chunks(&owned)? {
+            let chunk: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let command = match run_as {
+                Some(_) => guarded_mkdir(&chunk, self.login_uid().await?),
+                None => format!(
+                    "mkdir -p {}",
+                    chunk
+                        .iter()
+                        .map(|d| shell_escape(d))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            };
+            let out = self.exec_as(&command, run_as).await?;
+            if out.exit_code != 0 {
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("failed to create {}: {}", chunk.join(", "), out.failure()),
+                });
+            }
         }
         Ok(())
     }
@@ -1387,95 +1390,206 @@ printf '%s' "$d""#;
         Ok(())
     }
 
-    pub async fn set_file_attrs_recursive(
+    /// Every entry under `dest`, relative to it, for `prune`; none when `dest` does not
+    /// exist. `prune` deletes, so it refuses a `dest` that is `/` or a symlink, or whose real
+    /// path is less than two directories deep, and a listing it could not finish or read
+    /// exactly (see [`parse_tree_listing`]).
+    pub async fn list_tree_as(
         &self,
-        path: &str,
-        owner: Option<&str>,
-        group: Option<&str>,
-        mode: Option<&str>,
+        dest: &str,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<Vec<(RemoteKind, String)>, GlideshError> {
+        let refuse = |why: String| GlideshError::Module {
+            module: "file".to_string(),
+            message: format!("prune: {why}"),
+        };
+        if self.is_root_dir_as(dest, run_as).await? {
+            return Err(refuse(format!(
+                "refusing to prune / (destination {dest:?})"
+            )));
+        }
+        let out = self.exec_as(&tree_listing(dest), run_as).await?;
+        if out.exit_code != 0 {
+            return Err(refuse(format!("cannot list {dest}: {}", out.failure())));
+        }
+        if out.stdout_cut {
+            return Err(refuse(format!("{dest} holds too many entries to list")));
+        }
+        parse_tree_listing(dest, &out.stdout).map_err(refuse)
+    }
+
+    /// Remove `strays` from under `dest`: files and links, then directories deepest first,
+    /// each empty by then. Escalated, each batch only once [`trusted_paths`] holds for the
+    /// directories it removes from: someone able to write there could swap in a symlink.
+    pub async fn remove_strays_as(
+        &self,
+        dest: &str,
+        strays: &Strays,
         run_as: Option<&ResolvedRunAs>,
     ) -> Result<(), GlideshError> {
-        let changes = owner.is_some() || group.is_some() || mode.is_some();
-        let root = path.trim_end_matches('/');
-        if changes && self.is_root_dir_as(path, run_as).await? {
-            return Err(root_refusal(path));
-        }
-        // The trailing slash resolves a root that is a symlink to the directory it points
-        // to, as uploads through it do; `-h` would otherwise change only that link.
-        let escaped = shell_escape(&format!("{root}/"));
-        if let Some(r) = run_as.filter(|_| changes) {
-            self.ensure_trusted_destination(path, r).await?;
-        }
+        let files: Vec<String> = strays.files.iter().map(|f| tree_join(dest, f)).collect();
+        let dirs: Vec<String> = strays.dirs.iter().map(|d| tree_join(dest, d)).collect();
+        // Both lists are split first, so a path too long to send is refused before any
+        // removal rather than after the files went.
+        path_chunks(&files)?;
+        path_chunks(&dirs)?;
+        self.each_chunk_as("rm -f --", &files, run_as, true).await?;
+        self.each_chunk_as("rmdir --", &dirs, run_as, true).await
+    }
 
-        // `-h`: the guard covered the root only, and busybox `chown -R` follows a symlink
-        // inside the tree without it.
+    /// What each of `paths` is on the host — kind, owner, group, mode; a link's own — or
+    /// `None` for one that does not exist.
+    pub async fn stat_many_as(
+        &self,
+        paths: &[String],
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<Vec<Option<PathStat>>, GlideshError> {
+        let mut found = Vec::with_capacity(paths.len());
+        for chunk in path_chunks(paths)? {
+            let out = self.exec_as(&stat_listing(chunk), run_as).await?;
+            let stats = (out.exit_code == 0)
+                .then(|| parse_stats(&out.stdout, chunk.len()))
+                .flatten()
+                .ok_or_else(|| GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("stat of {} paths failed: {}", chunk.len(), out.failure()),
+                })?;
+            found.extend(stats);
+        }
+        Ok(found)
+    }
+
+    /// Set the owner and group of `files` and `dirs`, then the mode of each kind: exactly
+    /// the paths a recursive upload manages, under `root`. A symlink among them is never
+    /// followed — `chown -h` changes the link, `chmod` skips it — so the escalated change
+    /// needs [`trusted_paths`] to hold for `root` only; the directories below were held to it
+    /// when `create_dirs_as` made sure they exist.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_tree_attrs_as(
+        &self,
+        root: &str,
+        files: &[String],
+        dirs: &[String],
+        owner: Option<&str>,
+        group: Option<&str>,
+        file_mode: Option<&str>,
+        dir_mode: Option<&str>,
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<(), GlideshError> {
+        let changes =
+            owner.is_some() || group.is_some() || file_mode.is_some() || dir_mode.is_some();
+        if !changes {
+            return Ok(());
+        }
+        if self.is_root_dir_as(root, run_as).await? {
+            return Err(root_refusal(root));
+        }
+        if let Some(r) = run_as {
+            self.ensure_trusted_destination(root, r).await?;
+        }
+        let all: Vec<String> = dirs.iter().chain(files).cloned().collect();
         match (owner, group) {
             (Some(o), Some(g)) => {
-                let output = self
-                    .exec_as(
-                        &format!(
-                            "chown -hR {}:{} {}",
-                            shell_escape(o),
-                            shell_escape(g),
-                            escaped
-                        ),
-                        run_as,
-                    )
-                    .await?;
-                if output.exit_code != 0 {
-                    return Err(GlideshError::Module {
-                        module: "file".to_string(),
-                        message: format!("chown -hR failed: {}", output.stderr),
-                    });
-                }
+                let command = format!("chown -h {}:{} --", shell_escape(o), shell_escape(g));
+                self.each_chunk_as(&command, &all, run_as, false).await?;
             }
             (Some(o), None) => {
-                let output = self
-                    .exec_as(
-                        &format!("chown -hR {} {}", shell_escape(o), escaped),
-                        run_as,
-                    )
-                    .await?;
-                if output.exit_code != 0 {
-                    return Err(GlideshError::Module {
-                        module: "file".to_string(),
-                        message: format!("chown -hR failed: {}", output.stderr),
-                    });
-                }
+                let command = format!("chown -h {} --", shell_escape(o));
+                self.each_chunk_as(&command, &all, run_as, false).await?;
             }
             (None, Some(g)) => {
-                let output = self
-                    .exec_as(
-                        &format!("chgrp -hR {} {}", shell_escape(g), escaped),
-                        run_as,
-                    )
-                    .await?;
-                if output.exit_code != 0 {
-                    return Err(GlideshError::Module {
-                        module: "file".to_string(),
-                        message: format!("chgrp -hR failed: {}", output.stderr),
-                    });
-                }
+                let command = format!("chgrp -h {} --", shell_escape(g));
+                self.each_chunk_as(&command, &all, run_as, false).await?;
             }
             (None, None) => {}
         }
+        // Last, because chown and chgrp clear setuid/setgid bits. `find -type` leaves out a
+        // path that is a symlink, which `chmod` would follow. A symlinked directory on the way
+        // to a path is followed, as uploads follow it: escalated, `create_dirs_as` has
+        // already held every directory of the tree to [`trusted_paths`].
+        // Files, then directories deepest first, the destination last: a mode may let others
+        // write to a directory, and then no later path goes through it.
+        let mut deepest_first = dirs.to_vec();
+        deepest_first
+            .sort_by_key(|d| std::cmp::Reverse(d.trim_end_matches('/').matches('/').count()));
+        for (mode, paths, kind) in [
+            (file_mode, files, "f"),
+            (dir_mode, deepest_first.as_slice(), "d"),
+        ] {
+            if let Some(mode) = mode {
+                // No `-P`: busybox `find` does not take it, and not following is the default.
+                let tail = format!(
+                    "-prune -type {kind} -exec chmod {} {{}} +",
+                    shell_escape(mode)
+                );
+                self.each_chunk_around_as("find", &tail, paths, run_as)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
 
-        // Last, because chown and chgrp clear setuid/setgid bits.
-        if let Some(mode) = mode {
-            let output = self
-                .exec_as(
-                    &format!("chmod -R {} {}", shell_escape(mode), escaped),
-                    run_as,
-                )
+    /// Run `before`, then `paths`, then `after`, in chunks short enough for one argument
+    /// list — for `find`, whose expression follows the paths.
+    async fn each_chunk_around_as(
+        &self,
+        before: &str,
+        after: &str,
+        paths: &[String],
+        run_as: Option<&ResolvedRunAs>,
+    ) -> Result<(), GlideshError> {
+        for chunk in path_chunks(paths)? {
+            let list: Vec<String> = chunk.iter().map(|p| shell_escape(p)).collect();
+            let out = self
+                .exec_as(&format!("{before} {} {after}", list.join(" ")), run_as)
                 .await?;
-            if output.exit_code != 0 {
+            if out.exit_code != 0 {
                 return Err(GlideshError::Module {
                     module: "file".to_string(),
-                    message: format!("chmod -R failed: {}", output.stderr),
+                    message: format!("{before} {after} failed: {}", out.failure()),
                 });
             }
         }
+        Ok(())
+    }
 
+    /// Run `command` with `paths` appended, in chunks short enough for one argument list;
+    /// escalated with `guard_parents`, each chunk only once [`trusted_paths`] holds for the
+    /// directories its paths are in.
+    async fn each_chunk_as(
+        &self,
+        command: &str,
+        paths: &[String],
+        run_as: Option<&ResolvedRunAs>,
+        guard_parents: bool,
+    ) -> Result<(), GlideshError> {
+        for chunk in path_chunks(paths)? {
+            let list: Vec<String> = chunk.iter().map(|p| shell_escape(p)).collect();
+            let run = format!("{command} {}", list.join(" "));
+            let line = match run_as.filter(|_| guard_parents) {
+                Some(_) => {
+                    let mut parents: Vec<&str> = chunk
+                        .iter()
+                        .map(|p| match p.rsplit_once('/') {
+                            Some(("", _)) | None => "/",
+                            Some((parent, _)) => parent,
+                        })
+                        .collect();
+                    parents.sort_unstable();
+                    parents.dedup();
+                    guarded(&parents, self.login_uid().await?, &run)
+                }
+                None => run,
+            };
+            let out = self.exec_as(&line, run_as).await?;
+            if out.exit_code != 0 {
+                let verb = command.split_whitespace().next().unwrap_or(command);
+                return Err(GlideshError::Module {
+                    module: "file".to_string(),
+                    message: format!("{verb} failed: {}", out.failure()),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1771,6 +1885,206 @@ fn root_dir_answer(stdout: &str) -> Option<bool> {
     }
 }
 
+/// Printed before the output of a tree listing or a batch `stat`: under `su` the PTY puts
+/// the password prompt, and anything else on stderr, in front of stdout.
+const TREE_MARK: &str = "@@glidesh-tree-5f0c2e@@";
+
+/// What follows the first [`TREE_MARK`] line in `stdout`.
+fn after_tree_mark(stdout: &str) -> Option<&str> {
+    let (_, rest) = stdout.split_once(TREE_MARK)?;
+    Some(
+        rest.strip_prefix("\r\n")
+            .or_else(|| rest.strip_prefix('\n'))
+            .unwrap_or(rest),
+    )
+}
+
+/// The command listing every entry under `dest` for [`SshSession::list_tree_as`]: after
+/// [`TREE_MARK`], NUL-separated entries — `dest`'s real path after `r`, then each name after
+/// `d` (a directory) or `f` — then `@@` and find's status; a name may hold any other byte.
+/// `@@link` stands for a `dest` that is a symlink; a missing one prints the real path it
+/// would have — its nearest existing directory's, with the missing names added — then
+/// `@@none`.
+fn tree_listing(dest: &str) -> String {
+    let script = format!(
+        "printf '%s\\n' {TREE_MARK}\nd={}\n\
+         if [ -L \"$d\" ]; then printf '@@link'; exit 0; fi\n\
+         if [ ! -d \"$d\" ]; then\n\
+         p=$d; rest=\n\
+         while [ ! -e \"$p\" ] && [ ! -L \"$p\" ]; do \
+         rest=/${{p##*/}}$rest; p=${{p%/*}}; [ -n \"$p\" ] || p=/; done\n\
+         printf 'r%s%s\\0@@none' \"$(cd \"$p\" 2>/dev/null && pwd -P)\" \"$rest\"; exit 0\n\
+         fi\n\
+         cd \"$d\" || exit 1\n\
+         printf 'r%s\\0' \"$(pwd -P)\"\n\
+         find . -mindepth 1 \\( -type d -exec printf 'd%s\\0' {{}} + \\) -o \
+         -exec printf 'f%s\\0' {{}} + 2>/dev/null\n\
+         printf '@@%s' \"$?\"",
+        shell_escape(dest.trim_end_matches('/'))
+    );
+    format!("sh -c {}", shell_escape(&script))
+}
+
+/// The entries [`tree_listing`] printed, relative to `dest`, or why prune must stop: any
+/// entry not in the form it prints — a name the PTY of `su` rewrote (a line break) or one
+/// that is not UTF-8 — since a name that cannot be matched could be removed by mistake.
+fn parse_tree_listing(dest: &str, stdout: &str) -> Result<Vec<(RemoteKind, String)>, String> {
+    let listing = after_tree_mark(stdout)
+        .ok_or_else(|| format!("could not list {dest}: {}", stdout.trim()))?;
+    let (entries, status) = listing.rsplit_once('\0').unwrap_or(("", listing));
+    let missing = match status.trim() {
+        "@@none" => true,
+        "@@link" => return Err(format!("{dest} is a symlink")),
+        "@@0" => false,
+        other => {
+            return Err(format!(
+                "could not list every entry under {dest} ({})",
+                other.trim_start_matches('@')
+            ));
+        }
+    };
+    let mut entries = entries.split('\0').filter(|_| !entries.is_empty());
+    // A symlinked directory on the way may put the destination anywhere: prune holds its
+    // real path to the same depth as the one written. For one not made yet, that is its
+    // nearest existing directory's real path with the missing names added, which is where
+    // the upload would create it.
+    let real = entries
+        .next()
+        .and_then(|first| first.strip_prefix('r'))
+        .ok_or_else(|| format!("could not list {dest}: no real path"))?;
+    if real.split('/').filter(|n| !n.is_empty()).count() < 2 {
+        return Err(format!(
+            "{dest} is {real} on the host, less than two directories deep; refusing to prune it"
+        ));
+    }
+    if missing {
+        return Ok(Vec::new());
+    }
+    let mut listed = Vec::new();
+    for entry in entries {
+        let unreadable = || format!("{dest} holds a name that cannot be read exactly: {entry:?}");
+        if entry.contains(['\u{FFFD}', '\r']) {
+            return Err(unreadable());
+        }
+        let (kind, path) = match (entry.strip_prefix("d./"), entry.strip_prefix("f./")) {
+            (Some(path), _) => (RemoteKind::Dir, path),
+            (None, Some(path)) => (RemoteKind::Other, path),
+            (None, None) => return Err(unreadable()),
+        };
+        if path
+            .split('/')
+            .any(|name| name.is_empty() || name == "." || name == "..")
+        {
+            return Err(unreadable());
+        }
+        listed.push((kind, path.to_string()));
+    }
+    Ok(listed)
+}
+
+/// The command printing, after [`TREE_MARK`], one line per path: `-` when it does not exist,
+/// else its kind (`d`, `f` for a regular file, `s` for anything else — a FIFO, a socket, a
+/// device, or a link to one — or a link, tested first, as `ld`, `lf` or `l-` by what it
+/// points to) then owner, group and mode, a link's own. `dest/` names the directory a
+/// symlinked destination points to.
+fn stat_listing(paths: &[String]) -> String {
+    let list: Vec<String> = paths.iter().map(|p| shell_escape(p)).collect();
+    // BSD stat for macOS targets, as in `get_file_attrs`.
+    let script = format!(
+        "printf '%s\\n' {TREE_MARK}\n\
+         for p in {}; do\n\
+         if [ -L \"$p\" ]; then \
+         if [ -d \"$p\" ]; then k=ld; elif [ -f \"$p\" ]; then k=lf; \
+         elif [ -e \"$p\" ]; then k=s; else k=l-; fi; \
+         elif [ -d \"$p\" ]; then k=d; elif [ -f \"$p\" ]; then k=f; \
+         elif [ -e \"$p\" ]; then k=s; else echo -; continue; fi\n\
+         a=$(stat -c '%U %G %a' -- \"$p\" 2>/dev/null || \
+         stat -f '%Su %Sg %Lp' -- \"$p\" 2>/dev/null) || a='? ? ?'\n\
+         printf '%s %s\\n' \"$k\" \"$a\"\n\
+         done",
+        list.join(" ")
+    );
+    format!("sh -c {}", shell_escape(&script))
+}
+
+/// The `count` lines [`stat_listing`] printed, or `None` when they are not all there.
+fn parse_stats(stdout: &str, count: usize) -> Option<Vec<Option<PathStat>>> {
+    let lines: Vec<&str> = after_tree_mark(stdout)?.lines().map(str::trim).collect();
+    if lines.len() != count {
+        return None;
+    }
+    lines
+        .into_iter()
+        .map(|line| {
+            if line == "-" {
+                return Some(None);
+            }
+            let parts: Vec<&str> = line.split(' ').collect();
+            let [kind, owner, group, mode] = parts.as_slice() else {
+                return None;
+            };
+            let kind = match *kind {
+                "d" => PathKind::Dir,
+                "f" => PathKind::File,
+                "ld" => PathKind::Link { to_dir: Some(true) },
+                "lf" => PathKind::Link {
+                    to_dir: Some(false),
+                },
+                "l-" => PathKind::Link { to_dir: None },
+                "s" => PathKind::Special,
+                _ => return None,
+            };
+            Some(Some(PathStat {
+                kind,
+                owner: owner.to_string(),
+                group: group.to_string(),
+                mode: mode.to_string(),
+            }))
+        })
+        .collect()
+}
+
+/// `paths` in runs short enough for the 128 KiB a single argument may have: an escalated
+/// command is one argument, and a path in it is quoted up to three times — in its list, in
+/// the `sh -c` script, and by the escalation's wrapper — each `'` growing fourfold. The limit
+/// leaves room for the script and a guard's copy of the parent directories.
+///
+/// A path too long for the limit on its own is refused, naming it, rather than sent to fail
+/// on the host with "argument list too long".
+fn path_chunks(paths: &[String]) -> Result<Vec<&[String]>, GlideshError> {
+    const LIMIT: usize = 32 * 1024;
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut length = 0;
+    for (i, path) in paths.iter().enumerate() {
+        let quoted = sent_length(path);
+        if quoted > LIMIT {
+            return Err(GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "{}: the path is too long to pass to the host ({quoted} bytes once quoted)",
+                    path.escape_debug()
+                ),
+            });
+        }
+        if i > start && length + quoted > LIMIT {
+            chunks.push(&paths[start..i]);
+            start = i;
+            length = 0;
+        }
+        length += quoted;
+    }
+    if start < paths.len() {
+        chunks.push(&paths[start..]);
+    }
+    Ok(chunks)
+}
+
+/// How long `path` is once quoted three times over, as [`path_chunks`] counts it.
+fn sent_length(path: &str) -> usize {
+    shell_escape(&shell_escape(&shell_escape(path))).len() + 1
+}
+
 /// The error for a recursive owner, group or mode change whose destination is `/`: it
 /// would change the whole filesystem.
 pub fn root_refusal(path: &str) -> GlideshError {
@@ -1930,6 +2244,240 @@ done"#;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The listing prune decides from, run by a real `sh`: every name, whatever it holds,
+    /// and a symlink never followed.
+    #[cfg(unix)]
+    #[test]
+    fn the_tree_listing_names_every_entry_and_follows_no_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        for dir in ["lib", "old/deep", "sp ace"] {
+            std::fs::create_dir_all(dest.join(dir)).unwrap();
+        }
+        for file in ["a.conf", "lib/x", "old/deep/f", "sp ace/new\nline"] {
+            std::fs::write(dest.join(file), "x").unwrap();
+        }
+        std::os::unix::fs::symlink("/etc", dest.join("link")).unwrap();
+        std::os::unix::fs::symlink(&dest, tmp.path().join("aliased")).unwrap();
+        let list = |path: &std::path::Path| {
+            let path = path.to_str().unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(tree_listing(path))
+                .output()
+                .unwrap();
+            parse_tree_listing(path, &String::from_utf8_lossy(&out.stdout))
+        };
+
+        let mut listed = list(&dest).unwrap();
+        listed.sort_by(|a, b| a.1.cmp(&b.1));
+        let dirs: Vec<&str> = listed
+            .iter()
+            .filter(|(kind, _)| *kind == RemoteKind::Dir)
+            .map(|(_, p)| p.as_str())
+            .collect();
+        let others: Vec<&str> = listed
+            .iter()
+            .filter(|(kind, _)| *kind == RemoteKind::Other)
+            .map(|(_, p)| p.as_str())
+            .collect();
+        assert_eq!(dirs, ["lib", "old", "old/deep", "sp ace"]);
+        assert_eq!(
+            others,
+            ["a.conf", "lib/x", "link", "old/deep/f", "sp ace/new\nline"]
+        );
+        assert!(
+            list(&tmp.path().join("aliased"))
+                .unwrap_err()
+                .contains("is a symlink")
+        );
+        assert!(list(&tmp.path().join("missing")).unwrap().is_empty());
+        // Not made yet, behind a link to `/`: it would be made at `/glidesh-…`.
+        std::os::unix::fs::symlink("/", tmp.path().join("rootlink")).unwrap();
+        let shallow = tmp.path().join("rootlink").join("glidesh-missing-test");
+        assert!(
+            list(&shallow)
+                .unwrap_err()
+                .contains("less than two directories deep")
+        );
+    }
+
+    #[test]
+    fn a_listing_that_did_not_finish_or_holds_a_foreign_name_stops_prune() {
+        let listing = |body: &str| format!("{TREE_MARK}\nr/srv/a\0{body}");
+        let err = |body: &str| parse_tree_listing("/srv/a", &listing(body)).unwrap_err();
+        assert!(err("f./x\0@@1").contains("could not list every entry under /srv/a (1)"));
+        for foreign in [
+            "f./\u{FFFD}",
+            "f./a\r\nb",
+            "x./y",
+            "f./a//b",
+            "f./../etc",
+            "garbage",
+        ] {
+            let body = format!("{foreign}\0@@0");
+            assert!(err(&body).contains("cannot be read exactly"), "{foreign:?}");
+        }
+        assert!(
+            parse_tree_listing("/srv/a", "no mark")
+                .unwrap_err()
+                .contains("could not list /srv/a")
+        );
+        assert_eq!(
+            parse_tree_listing("/srv/a", &listing("d./x\0f./x/y\0@@0")).unwrap(),
+            [
+                (RemoteKind::Dir, "x".to_string()),
+                (RemoteKind::Other, "x/y".to_string())
+            ]
+        );
+        assert!(
+            parse_tree_listing("/srv/a", &listing("@@0"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A symlinked directory on the way can make a deep destination `/` or `/etc`: prune
+    /// holds the real path to the same depth.
+    #[test]
+    fn a_destination_shallow_on_the_host_stops_prune() {
+        for real in ["/", "/etc"] {
+            let stdout = format!("{TREE_MARK}\nr{real}\0f./passwd\0@@0");
+            let err = parse_tree_listing("/srv/link/etc", &stdout).unwrap_err();
+            assert!(
+                err.contains("less than two directories deep"),
+                "{real}: {err}"
+            );
+        }
+        assert!(
+            parse_tree_listing("/srv/a", &format!("{TREE_MARK}\nf./x\0@@0"))
+                .unwrap_err()
+                .contains("no real path")
+        );
+        // A destination not made yet is held to the depth of where it would be made.
+        let missing = |real: &str| {
+            parse_tree_listing("/srv/link/new", &format!("{TREE_MARK}\nr{real}\0@@none"))
+        };
+        assert!(missing("/srv/app/new").unwrap().is_empty());
+        assert!(
+            missing("//new")
+                .unwrap_err()
+                .contains("less than two directories deep")
+        );
+    }
+
+    /// Under `su` a PTY puts the password prompt ahead of stdout and turns `\n` into `\r\n`.
+    #[test]
+    fn a_su_prompt_ahead_of_the_mark_is_skipped() {
+        let stdout = format!("Password: \r\n{TREE_MARK}\r\nr/srv/a\0d./x\0f./x/y\0@@0");
+        assert_eq!(
+            parse_tree_listing("/srv/a", &stdout).unwrap(),
+            [
+                (RemoteKind::Dir, "x".to_string()),
+                (RemoteKind::Other, "x/y".to_string())
+            ]
+        );
+        assert_eq!(
+            after_tree_mark(&format!("Password: \r\n{TREE_MARK}\r\nroot root 644\r\n")),
+            Some("root root 644\r\n")
+        );
+    }
+
+    #[test]
+    fn long_path_lists_are_split_under_the_argument_limit() {
+        let paths: Vec<String> = (0..2000).map(|i| format!("/srv/app/{i:0>40}")).collect();
+        let chunks = path_chunks(&paths).unwrap();
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), paths.len());
+        for chunk in chunks {
+            let quoted: usize = chunk.iter().map(|p| sent_length(p)).sum();
+            assert!(quoted <= 32 * 1024);
+        }
+        assert!(path_chunks(&[]).unwrap().is_empty());
+
+        // A `'` grows fourfold at each of three quotings: the limit counts what is sent.
+        let quotes: Vec<String> = (0..40)
+            .map(|_| format!("/srv/{}", "'".repeat(100)))
+            .collect();
+        let chunks = path_chunks(&quotes).unwrap();
+        assert!(chunks.len() > 1, "6 KiB each once quoted three times");
+        for chunk in chunks {
+            let sent: usize = chunk
+                .iter()
+                .map(|p| shell_escape(&shell_escape(&shell_escape(p))).len() + 1)
+                .sum();
+            assert!(sent <= 32 * 1024, "{sent}");
+        }
+
+        // One path too long on its own is refused by name, not sent to fail with E2BIG.
+        let huge = vec![format!("/srv/{}", "'/".repeat(1000))];
+        let err = path_chunks(&huge).unwrap_err().to_string();
+        assert!(err.contains("too long to pass to the host"), "{err}");
+    }
+
+    #[test]
+    fn stats_read_the_kind_and_a_link_s_own_attributes() {
+        let stdout = format!(
+            "Password: \r\n{TREE_MARK}\r\nd root root 755\r\n-\r\nld app app 777\r\nf root root 644\r\n"
+        );
+        let stats = parse_stats(&stdout, 4).unwrap();
+        assert_eq!(stats[0].as_ref().unwrap().kind, PathKind::Dir);
+        assert!(stats[1].is_none());
+        assert_eq!(
+            stats[2].as_ref().unwrap().kind,
+            PathKind::Link { to_dir: Some(true) }
+        );
+        assert_eq!(stats[3].as_ref().unwrap().mode, "644");
+        assert!(parse_stats(&stdout, 3).is_none(), "a line short");
+        assert!(parse_stats("d root root 755\n", 1).is_none(), "no mark");
+    }
+
+    /// The batch stat, run by a real `sh`: kinds, a link's own owner, a missing path.
+    #[cfg(unix)]
+    #[test]
+    fn the_stat_listing_tells_each_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink(&dir, tmp.path().join("l")).unwrap();
+        let fifo = tmp.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let paths: Vec<String> = [
+            format!("{}/", tmp.path().join("l").display()),
+            dir.join("f").display().to_string(),
+            tmp.path().join("l").display().to_string(),
+            tmp.path().join("missing").display().to_string(),
+            fifo.display().to_string(),
+        ]
+        .to_vec();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(stat_listing(&paths))
+            .output()
+            .unwrap();
+        let stats = parse_stats(&String::from_utf8_lossy(&out.stdout), paths.len()).unwrap();
+        let kinds: Vec<Option<PathKind>> =
+            stats.iter().map(|s| s.as_ref().map(|s| s.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(PathKind::Dir),
+                Some(PathKind::File),
+                Some(PathKind::Link { to_dir: Some(true) }),
+                None,
+                Some(PathKind::Special),
+            ],
+            "a symlinked destination named `dest/` is its directory; a FIFO is no file"
+        );
+    }
 
     #[cfg(unix)]
     fn place(tmp: &std::path::Path, dest: &std::path::Path) -> std::process::Output {

@@ -1,10 +1,13 @@
 //! Checks `glidesh validate` runs on a resolved plan without contacting any host.
 
 use crate::config::plan::{is_error_var, is_item_var};
+use crate::config::template::interpolate;
 use crate::config::template::{
     Token, bound_field, defined_references, literal_hint, structure_error, tokens,
 };
 use crate::config::types::{LoopSource, ParamValue, Plan, TaskDef};
+use crate::modules::file_tree;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// A task's local `file` source, resolved as a run resolves it, or `None` for a task with
@@ -27,26 +30,85 @@ fn local_source(task: &TaskDef, plan_dir: &Path) -> Option<(String, PathBuf)> {
     Some((src.to_string(), resolved))
 }
 
-/// Every file under `dir`, and the first directory that could not be read, which a
-/// recursive upload fails on.
-fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut failed = Ok(());
-    for entry in entries {
-        let path = match entry {
-            Ok(entry) => entry.path(),
-            Err(e) => {
-                failed = failed.and(Err(format!("{}: {e}", dir.display())));
-                continue;
-            }
-        };
-        if path.is_dir() {
-            failed = failed.and(files_under(&path, out));
-        } else {
-            out.push(path);
+/// The files a `file` task uploads from `resolved`: itself, or for a directory every file
+/// under it that the task's `exclude` keeps, and the first directory that could not be read,
+/// which a recursive upload fails on. An `exclude` that cannot be read is
+/// [`file_option_problems`]' to report; the walk then leaves nothing out.
+///
+/// A run interpolates `exclude` first: a pattern the plan's `vars` resolve is read as they
+/// do, and a tree with one only a host can resolve is not walked — which files it uploads is
+/// not known yet.
+fn uploaded_files(
+    task: &TaskDef,
+    resolved: &Path,
+    vars: &HashMap<String, String>,
+) -> (Vec<PathBuf>, Option<String>) {
+    if !resolved.is_dir() {
+        return (vec![resolved.to_path_buf()], None);
+    }
+    let patterns: Vec<String> = match task.args.get("exclude") {
+        Some(ParamValue::List(items)) => items.clone(),
+        Some(ParamValue::String(one)) => vec![one.clone()],
+        _ => Vec::new(),
+    };
+    let mut interpolated = Vec::with_capacity(patterns.len());
+    for pattern in &patterns {
+        match interpolate(pattern, vars) {
+            Ok(pattern) => interpolated.push(pattern),
+            Err(_) => return (Vec::new(), None),
         }
     }
-    failed
+    let exclude = file_tree::exclude_of(&HashMap::from([(
+        "exclude".to_string(),
+        ParamValue::List(interpolated),
+    )]));
+    match file_tree::walk(resolved, &exclude) {
+        Ok(tree) => (tree.files.iter().map(|f| resolved.join(f)).collect(), None),
+        Err(unreadable) => (Vec::new(), Some(unreadable)),
+    }
+}
+
+/// `file` parameters a run would reject: a recursive-only one without `recurse=#true`, a
+/// value of the wrong kind, an `exclude` pattern that means nothing, a `prune` destination
+/// too close to `/`.
+pub fn file_option_problems(plan: &Plan) -> Vec<String> {
+    let mut problems = Vec::new();
+    for step in plan.steps() {
+        for task in step.all_tasks().filter(|t| t.module == "file") {
+            let recurse = matches!(task.args.get("recurse"), Some(ParamValue::Bool(true)));
+            // A run interpolates first: what the plan's vars resolve is checked as the run will
+            // see it; what needs a host or a prompted answer is left to the run.
+            let dest = interpolate(&task.resource, &plan.vars).ok();
+            let mut args = task.args.clone();
+            for key in ["mode", "file-mode", "dir-mode", "owner", "group"] {
+                if let Some(ParamValue::String(value)) = args.get(key) {
+                    match interpolate(value, &plan.vars) {
+                        Ok(value) => args.insert(key.to_string(), ParamValue::String(value)),
+                        Err(_) => args.remove(key),
+                    };
+                }
+            }
+            let patterns = match args.get("exclude") {
+                Some(ParamValue::List(items)) => Some(items.clone()),
+                Some(ParamValue::String(one)) => Some(vec![one.clone()]),
+                _ => None,
+            };
+            if let Some(patterns) = patterns {
+                let resolved: Vec<String> = patterns
+                    .iter()
+                    .filter_map(|p| interpolate(p, &plan.vars).ok())
+                    .collect();
+                args.insert("exclude".to_string(), ParamValue::List(resolved));
+            }
+            if let Err(problem) = file_tree::options(&args, dest.as_deref(), recurse) {
+                problems.push(format!(
+                    "step '{}': file '{}': {}",
+                    step.name, task.resource, problem
+                ));
+            }
+        }
+    }
+    problems
 }
 
 /// Warnings for `file` uploads without `template #true` whose content contains `${name}`
@@ -65,12 +127,7 @@ pub fn literal_reference_warnings(
             else {
                 continue;
             };
-            let mut files = Vec::new();
-            if resolved.is_dir() {
-                let _ = files_under(&resolved, &mut files);
-            } else {
-                files.push(resolved.clone());
-            }
+            let (files, _) = uploaded_files(task, &resolved, &plan.vars);
             for file in files {
                 let Ok(content) = std::fs::read(&file) else {
                     continue;
@@ -129,12 +186,7 @@ pub fn template_scope_problems(plan: &Plan, plan_dir: &Path) -> Vec<String> {
                 let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) else {
                     continue;
                 };
-                let mut files = Vec::new();
-                if resolved.is_dir() {
-                    let _ = files_under(&resolved, &mut files);
-                } else {
-                    files.push(resolved);
-                }
+                let (files, _) = uploaded_files(task, &resolved, &plan.vars);
                 let names: std::collections::BTreeSet<String> = files
                     .iter()
                     .filter_map(|file| std::fs::read(file).ok())
@@ -234,16 +286,12 @@ pub fn template_reference_findings(
                         )
                     };
                     let defined = |name: &str| is_defined(name) || registered.contains(name);
-                    let mut files = Vec::new();
-                    if resolved.is_dir() {
-                        if let Err(unreadable) = files_under(&resolved, &mut files) {
-                            findings.problems.push(format!(
-                                "step '{}': file '{}': template {}: cannot be read: {}",
-                                step.name, task.resource, src, unreadable
-                            ));
-                        }
-                    } else {
-                        files.push(resolved.clone());
+                    let (files, unreadable) = uploaded_files(task, &resolved, &plan.vars);
+                    if let Some(unreadable) = unreadable {
+                        findings.problems.push(format!(
+                            "step '{}': file '{}': template {}: cannot be read: {}",
+                            step.name, task.resource, src, unreadable
+                        ));
                     }
                     for file in files {
                         let shown = shown_source(&src, &resolved, &file);
@@ -1046,5 +1094,119 @@ mod tests {
             "{}",
             found.problems[0]
         );
+    }
+
+    #[test]
+    fn misused_recursive_parameters_are_problems() {
+        let p = plan(
+            r#"step "s" {
+                file "/etc/a" src="a" dir-mode="0750"
+                file "/srv" src="site" recurse=#true prune=#true
+                file "/srv/app" src="site" recurse=#true exclude="../x"
+                file "/srv/${app}" src="site" recurse=#true prune=#true
+                file "/srv/app" src="site" recurse=#true prune=#true exclude=".git"
+            }"#,
+        );
+        let problems = file_option_problems(&p);
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("file '/etc/a': dir-mode= only apply with recurse=#true"));
+        assert!(problems[1].contains("file '/srv': prune=#true needs an absolute destination"));
+        assert!(problems[2].contains("may not contain empty, `.` or `..` parts"));
+    }
+
+    /// The plan's vars are known before any host: a value they give is checked as the run
+    /// will see it.
+    #[test]
+    fn recursive_options_are_checked_with_the_plans_vars_filled_in() {
+        let p = plan(
+            r#"vars {
+                root "/srv"
+                bad "../x"
+                m "u=rw"
+            }
+            step "s" {
+                file "${root}" src="site" recurse=#true prune=#true
+                file "/srv/app" src="site" recurse=#true exclude="${bad}"
+                file "/etc/a" src="a" mode="${m}"
+                file "/srv/b" src="site" recurse=#true { exclude { - "../y"; - "${@host.name}"; } }
+                file "${@host.name}" src="site" recurse=#true prune=#true exclude="${@host.name}" mode="${@host.name}"
+            }"#,
+        );
+        let problems = file_option_problems(&p);
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        assert!(problems[0].contains("prune=#true needs an absolute destination"));
+        assert!(problems[1].contains("may not contain empty, `.` or `..` parts"));
+        assert!(problems[2].contains("mode=\"u=rw\" must be an octal mode"));
+        assert!(
+            problems[3].contains("\"../y\""),
+            "a host-only pattern beside it does not hide it: {}",
+            problems[3]
+        );
+    }
+
+    /// An excluded file is never uploaded, so a template check skips it: a binary `.git`
+    /// object is no template.
+    #[test]
+    fn a_template_check_skips_what_exclude_leaves_out() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("conf/.git")).unwrap();
+        std::fs::write(dir.path().join("conf/app.conf"), "port=${port}").unwrap();
+        std::fs::write(dir.path().join("conf/.git/index"), b"\xff${nope}").unwrap();
+        let p = plan(
+            r#"step "s" {
+                file "/etc/app/" src="conf" recurse=#true template=#true {
+                    exclude {
+                        - ".git"
+                    }
+                }
+            }"#,
+        );
+        let found = template_reference_findings(
+            &p,
+            dir.path(),
+            |n| n == "port",
+            |_| Coverage::All,
+            |_| true,
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.undefined.is_empty(), "{:?}", found.undefined);
+    }
+
+    /// A run interpolates `exclude` first: a pattern the plan's vars resolve leaves out what
+    /// the run does; one only a host resolves leaves the tree unchecked, not misread.
+    #[test]
+    fn an_interpolated_exclude_is_read_as_a_run_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("conf/.git")).unwrap();
+        std::fs::write(dir.path().join("conf/app.conf"), "port=${port}").unwrap();
+        std::fs::write(dir.path().join("conf/.git/index"), b"\xff${nope}").unwrap();
+        for (vars, pattern) in [
+            (r#"vars { ignored ".git" }"#, "${ignored}"),
+            ("", "${@host.name}"),
+        ] {
+            let p = plan(&format!(
+                r#"{vars}
+                step "s" {{
+                    file "/etc/app/" src="conf" recurse=#true template=#true {{
+                        exclude {{
+                            - "{pattern}"
+                        }}
+                    }}
+                }}"#
+            ));
+            let found = template_reference_findings(
+                &p,
+                dir.path(),
+                |n| n == "port",
+                |_| Coverage::All,
+                |_| true,
+            );
+            assert!(found.problems.is_empty(), "{pattern}: {:?}", found.problems);
+            assert!(
+                found.undefined.is_empty(),
+                "{pattern}: {:?}",
+                found.undefined
+            );
+        }
     }
 }

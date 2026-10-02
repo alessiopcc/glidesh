@@ -550,9 +550,8 @@ async fn test_run_as_recursive_owner_does_not_follow_a_link_in_the_tree() {
     let root = container.ssh_session().await;
     root.exec(
         "printf secret > /etc/glidesh-rvictim && \
-         mkdir -p /srv/glidesh-rtree/uploads && chmod 0777 /srv/glidesh-rtree/uploads && \
-         ln -s /etc/glidesh-rvictim /srv/glidesh-rtree/uploads/evil && \
-         chown -h nobody /srv/glidesh-rtree/uploads/evil",
+         mkdir -p /srv/glidesh-rtree/uploads && \
+         ln -s /etc/glidesh-rvictim /srv/glidesh-rtree/uploads/evil",
     )
     .await
     .unwrap();
@@ -562,23 +561,39 @@ async fn test_run_as_recursive_owner_does_not_follow_a_link_in_the_tree() {
     let vars = HashMap::new();
     let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
 
+    // The source has the link's path, with the content it already reads through the link,
+    // so nothing is uploaded and only the attributes reach it.
     let src = tempfile::tempdir().unwrap();
     std::fs::write(src.path().join("app.conf"), b"app").unwrap();
+    std::fs::create_dir(src.path().join("uploads")).unwrap();
+    std::fs::write(src.path().join("uploads").join("evil"), b"secret").unwrap();
     let params = upload_params(
         src.path(),
         "/srv/glidesh-rtree",
         &[
             ("recurse", ParamValue::Bool(true)),
             ("owner", ParamValue::String("nobody".to_string())),
+            ("file-mode", ParamValue::String("0600".to_string())),
         ],
     );
     FileModule.apply(&ctx, &params).await.unwrap();
 
-    // GNU `chown -R` already spares the target; busybox needs `-h`.
+    // `chown -h` changes the link itself; `chmod` skips it.
     assert_eq!(stat(&root, "/etc/glidesh-rvictim").await, "644 root:root");
+    let link = root
+        .exec("stat -c %U /srv/glidesh-rtree/uploads/evil")
+        .await
+        .unwrap();
+    assert_eq!(link.stdout.trim(), "nobody");
     assert_eq!(
         stat(&root, "/srv/glidesh-rtree/app.conf").await,
-        "644 nobody:root"
+        "600 nobody:root"
+    );
+    // The check compares the link's own owner and no mode, as the apply sets them.
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run should be ok, got {status:?}"
     );
 }
 
@@ -1292,5 +1307,59 @@ async fn test_run_as_a_sudo_password_sudo_does_not_need_is_not_sent() {
     assert!(
         !logged.stdout.contains("unused-pass"),
         "the password was logged"
+    );
+}
+
+/// Escalated, `prune` removes what only root may, and sets `dir-mode`/`file-mode` on the
+/// source's paths through the same guard as uploads.
+#[tokio::test]
+async fn test_run_as_prune_and_modes_on_a_root_owned_tree() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let root = container.ssh_session().await;
+    root.exec(
+        "mkdir -p /srv/glidesh-escalated/old && touch /srv/glidesh-escalated/old/f /srv/glidesh-escalated/stray",
+    )
+    .await
+    .unwrap();
+
+    let deploy = container.ssh_session_as("deploy").await;
+    let os_info = container.detect_os(&deploy).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context_run_as(&deploy, &os_info, &vars, false, run_as_root());
+
+    let src = tempfile::tempdir().unwrap();
+    std::fs::create_dir(src.path().join("sub")).unwrap();
+    std::fs::write(src.path().join("sub").join("app.conf"), b"app").unwrap();
+    let params = upload_params(
+        src.path(),
+        "/srv/glidesh-escalated",
+        &[
+            ("recurse", ParamValue::Bool(true)),
+            ("prune", ParamValue::Bool(true)),
+            ("dir-mode", ParamValue::String("0750".to_string())),
+            ("file-mode", ParamValue::String("0640".to_string())),
+        ],
+    );
+    FileModule.apply(&ctx, &params).await.unwrap();
+
+    let left = root
+        .exec("cd /srv/glidesh-escalated && find . | sort")
+        .await
+        .unwrap();
+    assert_eq!(left.stdout, ".\n./sub\n./sub/app.conf\n");
+    assert_eq!(
+        stat(&root, "/srv/glidesh-escalated/sub").await,
+        "750 root:root"
+    );
+    assert_eq!(
+        stat(&root, "/srv/glidesh-escalated/sub/app.conf").await,
+        "640 root:root"
+    );
+    let status = FileModule.check(&ctx, &params).await.unwrap();
+    assert!(
+        matches!(status, ModuleStatus::Satisfied),
+        "a second run should be ok, got {status:?}"
     );
 }
