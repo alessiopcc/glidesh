@@ -95,11 +95,12 @@ This is useful for ad-hoc investigation across a fleet — checking disk usage, 
 For CI pipelines, cron jobs, or when piping output, use `--no-tui` to get plain text:
 
 ```bash
-glidesh run -i inventory.kdl -p deploy.kdl --no-tui
+glidesh run -i inventory.kdl --no-tui
 ```
 
-Before the run each plan is announced once, with its group when it came from a group's
-`plan=` (a plan given with `-p`, or an ungrouped host's own `plan=`, has none). A line
+Before the run each plan is announced once. A plan the inventory assigns (`plan=` on a
+group, or on a host inside a group) names that group; a plan given with `-p`, or an
+ungrouped host's own `plan=`, is announced without one: `Plan 'deploy' (2 hosts)`. A line
 about one host starts with its inventory name in brackets; batch markers and the run
 summary are not tied to a host and carry no prefix. The label is the same whether the plan
 came from the inventory's `plan=` or from `-p`, so one `grep '^\[web-1\]'` finds a host
