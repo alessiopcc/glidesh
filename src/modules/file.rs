@@ -879,11 +879,20 @@ impl FileModule {
         let strays = Self::strays(ctx, &options, &tree, src, dest, &managed).await?;
         let removing: std::collections::HashSet<String> = strays.paths(dest).into_iter().collect();
         if let Some((blocked, _)) = mismatched.iter().find(|(p, _)| !removing.contains(p)) {
-            let fix = if options.prune {
-                "prune keeps it, as it holds a path `exclude` leaves out; remove it yourself, \
-                 or stop excluding what it holds"
-            } else {
-                "remove it, or set prune=#true"
+            let in_link = managed
+                .dir_links
+                .iter()
+                .find(|link| blocked.starts_with(&format!("{link}/")));
+            let fix = match in_link {
+                Some(link) => format!(
+                    "it is inside {link}, a link to a directory, which prune does not look \
+                     into; remove it yourself"
+                ),
+                None if options.prune => "prune keeps it, as it holds a path `exclude` leaves \
+                                          out; remove it yourself, or stop excluding what it \
+                                          holds"
+                    .to_string(),
+                None => "remove it, or set prune=#true".to_string(),
             };
             return Err(GlideshError::Module {
                 module: "file".to_string(),

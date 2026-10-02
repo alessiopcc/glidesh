@@ -1030,3 +1030,36 @@ async fn prune_keeps_a_link_to_a_directory_where_the_source_has_one() {
     let status = FileModule.check(&ctx, &params).await.unwrap();
     assert!(matches!(status, ModuleStatus::Satisfied), "{status:?}");
 }
+
+/// Prune does not look inside a kept link to a directory: an entry of the wrong kind there
+/// fails the task, naming the link, with nothing changed.
+#[tokio::test]
+async fn a_wrong_kind_inside_a_kept_directory_link_names_the_link() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-inlink /srv/glidesh-inlink-target/x && ln -s /srv/glidesh-inlink-target /srv/glidesh-inlink/cache")
+        .await
+        .unwrap();
+    let src = source_tree(&[("cache/x", "a file")]);
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-inlink",
+        vec![("prune", ParamValue::Bool(true))],
+    );
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("inside /srv/glidesh-inlink/cache, a link to a directory"),
+        "{err}"
+    );
+    let kind = ssh
+        .exec("stat -c %F /srv/glidesh-inlink-target/x")
+        .await
+        .unwrap();
+    assert_eq!(kind.stdout.trim(), "directory", "nothing changed");
+}

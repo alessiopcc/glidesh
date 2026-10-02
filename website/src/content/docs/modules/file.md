@@ -169,7 +169,8 @@ directory holding an excluded entry stays, with that entry. An entry of another 
 the source's at the same path — a file (or a link to one) where the source has a directory,
 a directory (or a link to one) where it has a file — is removed too, and the source's takes
 its place. A link to a directory where the source has a directory stays: uploads go through
-it, and `prune` does not look inside it.
+it, and `prune` does not look inside it: an entry of the wrong kind there fails the task,
+naming the link, for you to remove.
 
 `prune` deletes, so it is refused, before anything changes, for a destination that is not
 an absolute path at least two directories deep (`/srv/site`, not `/srv`), that goes through
@@ -179,7 +180,8 @@ without following symlinks: a link under the destination is removed as a link, n
 it points to. A host name it cannot be sure it read exactly stops it, since it could not be
 compared: one that is not UTF-8, or holds `U+FFFD` (which stands for bytes that were not
 UTF-8) or a carriage return (which `run-as-method="su"` adds to a line break). For the same
-reason a source name holding either is refused with `prune`, before anything changes. With `run-as`, it removes
+reason a source name holding either, or a line break, is refused with `prune`, before
+anything changes. With `run-as`, it removes
 only from directories no one else can write to, as uploads write only there.
 
 :::note
