@@ -95,21 +95,28 @@ This is useful for ad-hoc investigation across a fleet — checking disk usage, 
 For CI pipelines, cron jobs, or when piping output, use `--no-tui` to get plain text:
 
 ```bash
-glidesh run -i inventory.kdl -p deploy.kdl --no-tui
+glidesh run -i inventory.kdl --no-tui
 ```
 
-Output is printed line by line with `[group:host]` prefixes:
+Before the run each plan is announced once. A plan the inventory assigns (`plan=` on a
+group, or on a host inside a group) names that group; a plan given with `-p`, or an
+ungrouped host's own `plan=`, is announced without one: `Plan 'deploy' (2 hosts)`. A line
+about one host starts with its inventory name in brackets; batch markers and the run
+summary are not tied to a host and carry no prefix. The label is the same whether the plan
+came from the inventory's `plan=` or from `-p`, so one `grep '^\[web-1\]'` finds a host
+in any run:
 
 ```
-[web:web-1] Connecting...
-[web:web-1] Connected (ubuntu-22.04)
-[web:web-1] Step 1/3: Deploy binary
-[web:web-1]   file '/opt/app/bin': changed
-[web:web-1] Step 2/3: Restart service
-[web:web-1]   systemd 'myapp': changed
-[web:web-1] Step 3/3: Enable monitoring
-[web:web-1]   skipped (when: ${enable-monitoring})
-[web:web-1] OK (2 changed, 1 skipped)
+Plan 'deploy' on group 'web' (2 hosts)
+[web-1] Connecting...
+[web-1] Connected (ubuntu-22.04)
+[web-1] Step 1/3: Deploy binary
+[web-1]   file '/opt/app/bin': changed
+[web-1] Step 2/3: Restart service
+[web-1]   systemd 'myapp': changed
+[web-1] Step 3/3: Enable monitoring
+[web-1]   skipped (when: ${enable-monitoring})
+[web-1] OK (2 changed, 1 skipped)
 
 --- Run Complete ---
 Hosts: 2 total, 2 ok, 0 failed, 4 changed, 2 skipped

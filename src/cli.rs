@@ -272,7 +272,7 @@ pub struct RunArgs {
     pub target: Option<String>,
 
     /// Run on this one address instead of an inventory, with --plan or --command
-    #[arg(long)]
+    #[arg(long, value_parser = parse_host)]
     pub host: Option<String>,
 
     /// SSH user for --host (inventory hosts set their own) [default: root]
@@ -437,10 +437,34 @@ fn parse_concurrency(s: &str) -> Result<usize, String> {
     Ok(n)
 }
 
+/// The address is also the label on every output line, so whitespace or a control
+/// character (which no address holds) would let it break a `[host]` line in two.
+fn parse_host(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("the address is empty".to_string());
+    }
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("an address cannot contain whitespace or control characters".to_string());
+    }
+    Ok(s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn a_host_address_with_a_line_break_or_space_is_refused() {
+        assert_eq!(parse_host("10.0.0.5").unwrap(), "10.0.0.5");
+        assert_eq!(
+            parse_host("web-1.example.com").unwrap(),
+            "web-1.example.com"
+        );
+        for bad in ["", "web-1\n[db-1] OK", "web 1", "web\r"] {
+            assert!(parse_host(bad).is_err(), "{bad:?}");
+        }
+    }
 
     fn long_help(path: &[&str]) -> String {
         let mut cmd = Cli::command();
@@ -495,6 +519,7 @@ mod tests {
             "`jump #false`",
             "prune=#true removes host paths",
             "dir-mode= file-mode=",
+            "`[<host>]`, the inventory host name",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

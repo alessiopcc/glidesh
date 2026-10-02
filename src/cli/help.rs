@@ -286,7 +286,14 @@ PREVIEW AND OUTPUT
   --dry-run runs every check and nothing else; each task reports `ok` or `would change`
   with the reason. --diff adds the detail: a unified diff of file content, the container
   parameters that changed. Probes still run in a preview: shell check= commands, container
-  readiness gates. Each host's log is kept under ~/.glidesh/runs/ (see `glidesh logs`).
+  readiness gates. A plan run without the TUI (--no-tui, or no terminal) starts each line
+  about one host with `[<host>]`, the inventory host name, however the plan was chosen
+  (with --host, the address given). Before the run each plan is announced once; a plan= on
+  a group, or on a host in a group, names that group:
+  `Plan 'deploy' on group 'web' (2 hosts)`. With -p it is `Plan 'deploy' (2 hosts)`.
+  Each host's log is kept under ~/.glidesh/runs/ (see `glidesh logs`).
+  `--host <addr> --command` prints the command's output as is; `-i <inv> --command`
+  prefixes each line with `[<host>]`.
   Exit status is non-zero when any host failed or a rolling run stopped early.
 
 SSH
