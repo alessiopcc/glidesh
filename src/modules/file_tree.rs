@@ -478,7 +478,7 @@ pub fn options(
     let octal = |key: &str| -> Result<Option<String>, String> {
         let value = text(key)?;
         match &value {
-            Some(mode) if !is_octal_mode(mode) && !mode.contains("${") => Err(format!(
+            Some(mode) if !is_octal_mode(mode) => Err(format!(
                 "{key}=\"{mode}\" must be an octal mode such as \"0644\": the check compares \
                  it with the host's, so a symbolic one would never match"
             )),
@@ -656,13 +656,15 @@ mod tests {
             let err = options(&args(&[(key, s("u=rw,go="))]), Some("/srv/app"), true).unwrap_err();
             assert!(err.contains("must be an octal mode"), "{key}: {err}");
         }
-        for ok in ["644", "0644", "4755", "${m}"] {
+        for ok in ["644", "0644", "4755"] {
             assert!(
                 options(&args(&[("mode", s(ok))]), Some("/srv/app"), false).is_ok(),
                 "{ok}"
             );
         }
-        for bad in ["64", "08", "06444", "rwx"] {
+        // A run sees values already filled in: `${m}` here is the literal an escaped `$${m}`
+        // leaves, and `validate` leaves out only what it cannot fill.
+        for bad in ["64", "08", "06444", "rwx", "${m}"] {
             assert!(
                 options(&args(&[("mode", s(bad))]), Some("/srv/app"), false).is_err(),
                 "{bad}"

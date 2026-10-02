@@ -82,9 +82,10 @@ pub fn file_option_problems(plan: &Plan) -> Vec<String> {
             let mut args = task.args.clone();
             for key in ["mode", "file-mode", "dir-mode", "owner", "group"] {
                 if let Some(ParamValue::String(value)) = args.get(key) {
-                    if let Ok(value) = interpolate(value, &plan.vars) {
-                        args.insert(key.to_string(), ParamValue::String(value));
-                    }
+                    match interpolate(value, &plan.vars) {
+                        Ok(value) => args.insert(key.to_string(), ParamValue::String(value)),
+                        Err(_) => args.remove(key),
+                    };
                 }
             }
             let patterns = match args.get("exclude") {
@@ -93,14 +94,11 @@ pub fn file_option_problems(plan: &Plan) -> Vec<String> {
                 _ => None,
             };
             if let Some(patterns) = patterns {
-                let resolved: Result<Vec<String>, _> = patterns
+                let resolved: Vec<String> = patterns
                     .iter()
-                    .map(|p| interpolate(p, &plan.vars))
+                    .filter_map(|p| interpolate(p, &plan.vars).ok())
                     .collect();
-                match resolved {
-                    Ok(resolved) => args.insert("exclude".to_string(), ParamValue::List(resolved)),
-                    Err(_) => args.remove("exclude"),
-                };
+                args.insert("exclude".to_string(), ParamValue::List(resolved));
             }
             if let Err(problem) = file_tree::options(&args, dest.as_deref(), recurse) {
                 problems.push(format!(
@@ -1130,14 +1128,20 @@ mod tests {
                 file "${root}" src="site" recurse=#true prune=#true
                 file "/srv/app" src="site" recurse=#true exclude="${bad}"
                 file "/etc/a" src="a" mode="${m}"
+                file "/srv/b" src="site" recurse=#true { exclude { - "../y"; - "${@host.name}"; } }
                 file "${@host.name}" src="site" recurse=#true prune=#true exclude="${@host.name}" mode="${@host.name}"
             }"#,
         );
         let problems = file_option_problems(&p);
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems.len(), 4, "{problems:?}");
         assert!(problems[0].contains("prune=#true needs an absolute destination"));
         assert!(problems[1].contains("may not contain empty, `.` or `..` parts"));
         assert!(problems[2].contains("mode=\"u=rw\" must be an octal mode"));
+        assert!(
+            problems[3].contains("\"../y\""),
+            "a host-only pattern beside it does not hide it: {}",
+            problems[3]
+        );
     }
 
     /// An excluded file is never uploaded, so a template check skips it: a binary `.git`

@@ -1063,3 +1063,30 @@ async fn a_wrong_kind_inside_a_kept_directory_link_names_the_link() {
         .unwrap();
     assert_eq!(kind.stdout.trim(), "directory", "nothing changed");
 }
+
+/// A wrong-kind entry below a kept link to a directory is never removed: that would reach
+/// through the link, outside the destination.
+#[tokio::test]
+async fn prune_never_removes_through_a_kept_directory_link() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    ssh.exec("mkdir -p /srv/glidesh-through /srv/glidesh-elsewhere && echo keep > /srv/glidesh-elsewhere/passwd && ln -s /srv/glidesh-elsewhere /srv/glidesh-through/cache")
+        .await
+        .unwrap();
+    let src = source_tree(&[("a", "a")]);
+    std::fs::create_dir_all(src.path().join("cache/passwd")).unwrap();
+    let params = tree_params(
+        src.path(),
+        "/srv/glidesh-through",
+        vec![("prune", ParamValue::Bool(true))],
+    );
+    let err = FileModule.apply(&ctx, &params).await.unwrap_err();
+    assert!(err.to_string().contains("a link to a directory"), "{err}");
+    let kept = ssh.exec("cat /srv/glidesh-elsewhere/passwd").await.unwrap();
+    assert_eq!(kept.stdout, "keep\n", "nothing removed through the link");
+}

@@ -621,8 +621,20 @@ impl FileModule {
         let mut strays = file_tree::strays(&listed, tree, &options.exclude);
         // A link to a directory where the source has a file lists as a non-directory — the
         // kind the source has there — so only its stat tells it is in the way.
+        // Never one below a kept link to a directory: removing it would reach through the
+        // link, outside the destination; the apply refuses it, naming the link.
         let prefix = format!("{}/", dest.trim_end_matches('/'));
-        for (path, _) in managed.mismatched.iter().filter(|(_, host_dir)| !host_dir) {
+        let through_link = |path: &str| {
+            managed
+                .dir_links
+                .iter()
+                .any(|link| path.starts_with(&format!("{link}/")))
+        };
+        for (path, _) in managed
+            .mismatched
+            .iter()
+            .filter(|(path, host_dir)| !host_dir && !through_link(path))
+        {
             if let Some(rel) = path.strip_prefix(&prefix).filter(|rel| !rel.is_empty()) {
                 if !strays.files.iter().any(|file| file == rel) {
                     strays.files.push(rel.to_string());
