@@ -146,10 +146,14 @@ impl TuiState {
         }
     }
 
-    fn push_node_log(&mut self, host: &str, line: String) {
+    /// An error can carry captured output on several lines; each is logged on its own so
+    /// every line of the combined log starts with `[host]`.
+    fn push_node_log(&mut self, host: &str, text: String) {
         if let Some(&idx) = self.node_index.get(host) {
-            self.nodes[idx].log_lines.push(line.clone());
-            self.combined_log.push(format!("[{}] {}", host, line));
+            for line in text.lines() {
+                self.nodes[idx].log_lines.push(line.to_string());
+                self.combined_log.push(format!("[{}] {}", host, line));
+            }
         }
     }
 
@@ -559,6 +563,21 @@ mod tests {
             "the reason must reach the log: {:?}",
             s.nodes[0].log_lines
         );
+    }
+
+    #[test]
+    fn every_line_of_a_multiline_failure_is_labelled_with_the_host() {
+        let mut s = state();
+        s.handle_event(&ExecutorEvent::StepFailed {
+            host: "web-1".to_string(),
+            step: "Wait".to_string(),
+            error: "timed out; last output:
+not ready"
+                .to_string(),
+        });
+        let tail = &s.combined_log[s.combined_log.len() - 2..];
+        assert!(tail[0].starts_with("[web-1] "), "{:?}", s.combined_log);
+        assert_eq!(tail[1], "[web-1] not ready");
     }
 
     #[test]

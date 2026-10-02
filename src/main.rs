@@ -698,6 +698,14 @@ enum OutStream {
     Err,
 }
 
+/// `text` as lines that each start with `[host]`: an error can carry captured output (an
+/// `until=` timeout's last output), and every line of it must stay greppable by host.
+fn host_lines(host: &str, text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| format!("[{}] {}", host, line))
+        .collect()
+}
+
 /// Render an event as the lines `print_event` will write, and the stream they go to.
 /// Split out from the printing so the formatting can be asserted directly.
 fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
@@ -711,7 +719,7 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
         ),
         ExecutorEvent::NodeAuthFailed { host, error } => (
             OutStream::Err,
-            vec![format!("[{}] Auth failed: {}", host, error)],
+            host_lines(host, &format!("Auth failed: {}", error)),
         ),
         ExecutorEvent::StepStarted {
             host,
@@ -776,14 +784,14 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
             error,
         } => (
             OutStream::Err,
-            vec![format!(
-                "[{}]   FAILED {} '{}': {}",
-                host, module, resource, error
-            )],
+            host_lines(
+                host,
+                &format!("  FAILED {} '{}': {}", module, resource, error),
+            ),
         ),
         ExecutorEvent::StepFailed { host, step, error } => (
             OutStream::Err,
-            vec![format!("[{}]   FAILED step '{}': {}", host, step, error)],
+            host_lines(host, &format!("  FAILED step '{}': {}", step, error)),
         ),
         ExecutorEvent::StepSkipped { host, reason, .. } => (
             OutStream::Out,
@@ -1980,6 +1988,27 @@ mod tests {
     fn a_plan_directory_that_does_not_resolve_is_still_absolute() {
         let dir = absolute_dir(std::path::Path::new("no-such-dir/plans"));
         assert!(dir.is_absolute(), "{}", dir.display());
+    }
+
+    #[test]
+    fn every_line_of_a_multiline_failure_carries_the_host() {
+        let (stream, lines) = event_lines(&ExecutorEvent::StepFailed {
+            host: "web-1".to_string(),
+            step: "Wait".to_string(),
+            error: "until= timed out after 5s; last output:
+not ready
+still not ready"
+                .to_string(),
+        });
+        assert_eq!(stream, OutStream::Err);
+        assert_eq!(
+            lines,
+            [
+                "[web-1]   FAILED step 'Wait': until= timed out after 5s; last output:",
+                "[web-1] not ready",
+                "[web-1] still not ready",
+            ]
+        );
     }
 
     #[test]
