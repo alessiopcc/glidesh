@@ -35,17 +35,6 @@ pub struct NodeState {
     pub error: Option<String>,
 }
 
-impl NodeState {
-    /// Returns the display identifier: "group:host" if in a group, "host" otherwise.
-    pub fn display_id(&self) -> String {
-        if self.group_name.is_empty() {
-            self.host.clone()
-        } else {
-            format!("{}:{}", self.group_name, self.host)
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeStatus {
     /// Not started yet: waiting for a concurrency slot, or for an earlier batch.
@@ -160,8 +149,7 @@ impl TuiState {
     fn push_node_log(&mut self, host: &str, line: String) {
         if let Some(&idx) = self.node_index.get(host) {
             self.nodes[idx].log_lines.push(line.clone());
-            let id = self.nodes[idx].display_id();
-            self.combined_log.push(format!("[{}] {}", id, line));
+            self.combined_log.push(format!("[{}] {}", host, line));
         }
     }
 

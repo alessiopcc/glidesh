@@ -686,13 +686,6 @@ fn merge_secret_structured(
     }
 }
 
-fn display_id(host: &str, display_ids: &std::collections::HashMap<String, String>) -> String {
-    display_ids
-        .get(host)
-        .cloned()
-        .unwrap_or_else(|| host.to_string())
-}
-
 /// Which stream an event's lines belong on. Failures go to stderr so a plain-text run
 /// can be piped with the progress narration separated from the problems.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -703,30 +696,18 @@ enum OutStream {
 
 /// Render an event as the lines `print_event` will write, and the stream they go to.
 /// Split out from the printing so the formatting can be asserted directly.
-fn event_lines(
-    event: &ExecutorEvent,
-    display_ids: &std::collections::HashMap<String, String>,
-) -> (OutStream, Vec<String>) {
+fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
     match event {
-        ExecutorEvent::NodeConnecting { host } => (
-            OutStream::Out,
-            vec![format!("[{}] Connecting...", display_id(host, display_ids))],
-        ),
+        ExecutorEvent::NodeConnecting { host } => {
+            (OutStream::Out, vec![format!("[{}] Connecting...", host)])
+        }
         ExecutorEvent::NodeConnected { host, os } => (
             OutStream::Out,
-            vec![format!(
-                "[{}] Connected ({})",
-                display_id(host, display_ids),
-                os.id
-            )],
+            vec![format!("[{}] Connected ({})", host, os.id)],
         ),
         ExecutorEvent::NodeAuthFailed { host, error } => (
             OutStream::Err,
-            vec![format!(
-                "[{}] Auth failed: {}",
-                display_id(host, display_ids),
-                error
-            )],
+            vec![format!("[{}] Auth failed: {}", host, error)],
         ),
         ExecutorEvent::StepStarted {
             host,
@@ -737,7 +718,7 @@ fn event_lines(
             OutStream::Out,
             vec![format!(
                 "[{}] Step {}/{}: {}",
-                display_id(host, display_ids),
+                host,
                 step_index + 1,
                 total_steps,
                 step
@@ -749,12 +730,7 @@ fn event_lines(
             resource,
         } => (
             OutStream::Out,
-            vec![format!(
-                "[{}]   Checking {} '{}'",
-                display_id(host, display_ids),
-                module,
-                resource
-            )],
+            vec![format!("[{}]   Checking {} '{}'", host, module, resource)],
         ),
         ExecutorEvent::ModuleResult {
             host,
@@ -766,10 +742,9 @@ fn event_lines(
             stderr,
             ..
         } => {
-            let id = display_id(host, display_ids);
             let mut lines = vec![format!(
                 "[{}]   {} '{}': {}",
-                id,
+                host,
                 module,
                 resource,
                 executor::changed_label(*changed, *dry_run)
@@ -780,13 +755,13 @@ fn event_lines(
                 lines.extend(
                     crate::logging::stream_log_lines("stdout", stdout)
                         .into_iter()
-                        .map(|line| format!("[{}] {}", id, line)),
+                        .map(|line| format!("[{}] {}", host, line)),
                 );
             }
             lines.extend(
                 crate::logging::stream_log_lines("stderr", stderr)
                     .into_iter()
-                    .map(|line| format!("[{}] {}", id, line)),
+                    .map(|line| format!("[{}] {}", host, line)),
             );
             (OutStream::Out, lines)
         }
@@ -799,28 +774,16 @@ fn event_lines(
             OutStream::Err,
             vec![format!(
                 "[{}]   FAILED {} '{}': {}",
-                display_id(host, display_ids),
-                module,
-                resource,
-                error
+                host, module, resource, error
             )],
         ),
         ExecutorEvent::StepFailed { host, step, error } => (
             OutStream::Err,
-            vec![format!(
-                "[{}]   FAILED step '{}': {}",
-                display_id(host, display_ids),
-                step,
-                error
-            )],
+            vec![format!("[{}]   FAILED step '{}': {}", host, step, error)],
         ),
         ExecutorEvent::StepSkipped { host, reason, .. } => (
             OutStream::Out,
-            vec![format!(
-                "[{}]   skipped ({})",
-                display_id(host, display_ids),
-                reason
-            )],
+            vec![format!("[{}]   skipped ({})", host, reason)],
         ),
         ExecutorEvent::StepWaiting {
             host,
@@ -834,7 +797,7 @@ fn event_lines(
             OutStream::Out,
             vec![format!(
                 "[{}]   {}",
-                display_id(host, display_ids),
+                host,
                 executor::waiting_text(command, *elapsed_secs, *timeout_secs, *first, *preview)
             )],
         ),
@@ -844,12 +807,7 @@ fn event_lines(
             section,
         } => (
             OutStream::Out,
-            vec![format!(
-                "[{}]   {} step '{}'",
-                display_id(host, display_ids),
-                section.label(),
-                step
-            )],
+            vec![format!("[{}]   {} step '{}'", host, section.label(), step)],
         ),
         ExecutorEvent::TaskSkipped {
             host,
@@ -860,10 +818,7 @@ fn event_lines(
             OutStream::Out,
             vec![format!(
                 "[{}]   {} '{}': skipped ({})",
-                display_id(host, display_ids),
-                module,
-                resource,
-                reason
+                host, module, resource, reason
             )],
         ),
         ExecutorEvent::BatchStarted {
@@ -876,11 +831,7 @@ fn event_lines(
                 "--- Batch {}/{}: {} ---",
                 index + 1,
                 total,
-                hosts
-                    .iter()
-                    .map(|h| display_id(h, display_ids))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                hosts.join(", ")
             )],
         ),
         ExecutorEvent::HostsAborted { hosts, reason } => (
@@ -889,7 +840,7 @@ fn event_lines(
                 .chain(
                     hosts
                         .iter()
-                        .map(|h| format!("[{}] ABORTED (not started)", display_id(h, display_ids))),
+                        .map(|h| format!("[{}] ABORTED (not started)", h)),
                 )
                 .collect(),
         ),
@@ -903,7 +854,7 @@ fn event_lines(
             OutStream::Out,
             vec![format!(
                 "[{}] {} ({} {}{})",
-                display_id(host, display_ids),
+                host,
                 if *success { "OK" } else { "FAILED" },
                 changed,
                 if *dry_run { "would change" } else { "changed" },
@@ -937,8 +888,34 @@ fn event_lines(
     }
 }
 
-fn print_event(event: &ExecutorEvent, display_ids: &std::collections::HashMap<String, String>) {
-    let (stream, lines) = event_lines(event, display_ids);
+/// One line per plan, naming its group, so the `[host]` labels on every other line can be
+/// traced back to the group without repeating it. `host_names` is `(host, group, plan)`,
+/// a group plan's hosts next to each other.
+fn plan_announcements(host_names: &[(String, String, String)]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut rest = host_names;
+    while let Some((_, group, plan)) = rest.first() {
+        let count = rest
+            .iter()
+            .take_while(|(_, g, p)| g == group && p == plan)
+            .count();
+        let hosts = if count == 1 {
+            "1 host".to_string()
+        } else {
+            format!("{} hosts", count)
+        };
+        lines.push(if group.is_empty() {
+            format!("Plan '{}' ({})", plan, hosts)
+        } else {
+            format!("Plan '{}' on group '{}' ({})", plan, group, hosts)
+        });
+        rest = &rest[count..];
+    }
+    lines
+}
+
+fn print_event(event: &ExecutorEvent) {
+    let (stream, lines) = event_lines(event);
     for line in lines {
         match stream {
             OutStream::Out => println!("{}", line),
@@ -1806,22 +1783,16 @@ async fn run_with_ui(
     host_names: &[(String, String, String)],
     args: &cli::RunArgs,
 ) -> Result<(), GlideshError> {
-    let display_ids: std::collections::HashMap<String, String> = host_names
-        .iter()
-        .map(|(host, group, _plan)| {
-            let id = if group.is_empty() {
-                host.clone()
-            } else {
-                format!("{}:{}", group, host)
-            };
-            (host.clone(), id)
-        })
-        .collect();
-
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let mut logger = RunLogger::new(run_name)?;
     println!("Logging to: {}", logger.run_dir().display());
+    let use_tui = tui::is_tty() && !args.no_tui;
+    if !use_tui {
+        for line in plan_announcements(host_names) {
+            println!("{}", line);
+        }
+    }
 
     let concurrency = args.concurrency;
     let dry_run = args.dry_run;
@@ -1831,7 +1802,7 @@ async fn run_with_ui(
         accept_new: args.accept_new_host_key,
     };
 
-    if tui::is_tty() && !args.no_tui {
+    if use_tui {
         let connection_info: Vec<tui::state::HostConnectionInfo> = group_plans
             .iter()
             .flat_map(|gp| &gp.targets)
@@ -1914,7 +1885,7 @@ async fn run_with_ui(
         let consumer = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 logger.handle_event(&event);
-                print_event(&event, &display_ids);
+                print_event(&event);
                 if matches!(&event, ExecutorEvent::RunComplete { .. }) {
                     let _ = logger.write_summary();
                 }
@@ -2017,8 +1988,32 @@ mod tests {
         assert!(dir.is_absolute(), "{}", dir.display());
     }
 
-    fn no_display_ids() -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::new()
+    fn names(rows: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+        rows.iter()
+            .map(|(h, g, p)| (h.to_string(), g.to_string(), p.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn each_plan_is_announced_once_with_its_group() {
+        let lines = plan_announcements(&names(&[
+            ("web-1", "web", "deploy"),
+            ("web-2", "web", "deploy"),
+            ("db-1", "db", "postgres"),
+        ]));
+        assert_eq!(
+            lines,
+            [
+                "Plan 'deploy' on group 'web' (2 hosts)",
+                "Plan 'postgres' on group 'db' (1 host)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plan_given_with_dash_p_is_announced_without_a_group() {
+        let lines = plan_announcements(&names(&[("web-1", "", "deploy"), ("db-1", "", "deploy")]));
+        assert_eq!(lines, ["Plan 'deploy' (2 hosts)"]);
     }
 
     fn module_result(changed: bool, dry_run: bool, stdout: &str) -> ExecutorEvent {
@@ -2037,7 +2032,7 @@ mod tests {
     #[test]
     fn plain_output_shows_the_reason_only_for_a_preview() {
         let reason = "Recreate container lmcache (configuration changed)";
-        let (stream, lines) = event_lines(&module_result(true, true, reason), &no_display_ids());
+        let (stream, lines) = event_lines(&module_result(true, true, reason));
         assert_eq!(stream, OutStream::Out);
         assert!(lines[0].contains("would change"), "got: {:?}", lines[0]);
         assert!(
@@ -2045,10 +2040,7 @@ mod tests {
             "the reason must be printed: {lines:?}"
         );
 
-        let (_, lines) = event_lines(
-            &module_result(true, false, "some output"),
-            &no_display_ids(),
-        );
+        let (_, lines) = event_lines(&module_result(true, false, "some output"));
         assert!(lines[0].contains("changed"));
         assert!(!lines[0].contains("would change"));
         assert!(
@@ -2060,7 +2052,7 @@ mod tests {
     #[test]
     fn plain_output_calls_a_satisfied_task_ok_in_either_mode() {
         for dry_run in [true, false] {
-            let (_, lines) = event_lines(&module_result(false, dry_run, ""), &no_display_ids());
+            let (_, lines) = event_lines(&module_result(false, dry_run, ""));
             assert_eq!(lines.len(), 1);
             assert!(lines[0].ends_with("ok"), "got: {:?}", lines[0]);
         }
@@ -2080,11 +2072,11 @@ mod tests {
             },
         };
 
-        let (_, lines) = event_lines(&event(true), &no_display_ids());
+        let (_, lines) = event_lines(&event(true));
         assert!(lines[0].contains("Dry Run Complete (nothing applied)"));
         assert!(lines[1].ends_with("3 would change"), "got: {:?}", lines[1]);
 
-        let (_, lines) = event_lines(&event(false), &no_display_ids());
+        let (_, lines) = event_lines(&event(false));
         assert!(lines[0].contains("Run Complete"));
         assert!(!lines[0].contains("Dry Run"));
         assert!(lines[1].ends_with("3 changed"), "got: {:?}", lines[1]);
@@ -2101,28 +2093,25 @@ mod tests {
             dry_run,
         };
 
-        let (_, lines) = event_lines(&event(true), &no_display_ids());
+        let (_, lines) = event_lines(&event(true));
         assert!(
             lines[0].ends_with("OK (1 would change)"),
             "got: {:?}",
             lines[0]
         );
 
-        let (_, lines) = event_lines(&event(false), &no_display_ids());
+        let (_, lines) = event_lines(&event(false));
         assert!(lines[0].ends_with("OK (1 changed)"), "got: {:?}", lines[0]);
     }
 
     #[test]
     fn a_skipped_task_names_itself_and_its_condition() {
-        let (stream, lines) = event_lines(
-            &ExecutorEvent::TaskSkipped {
-                host: "web-1".to_string(),
-                module: "package".to_string(),
-                resource: "nginx".to_string(),
-                reason: "when: ${@os.family} == redhat".to_string(),
-            },
-            &no_display_ids(),
-        );
+        let (stream, lines) = event_lines(&ExecutorEvent::TaskSkipped {
+            host: "web-1".to_string(),
+            module: "package".to_string(),
+            resource: "nginx".to_string(),
+            reason: "when: ${@os.family} == redhat".to_string(),
+        });
         assert_eq!(stream, OutStream::Out);
         assert_eq!(
             lines,
@@ -2132,15 +2121,12 @@ mod tests {
 
     #[test]
     fn a_skipped_step_gives_its_reason() {
-        let (_, lines) = event_lines(
-            &ExecutorEvent::StepSkipped {
-                host: "web-1".to_string(),
-                step: "Install".to_string(),
-                tasks: 2,
-                reason: "when: ${x}".to_string(),
-            },
-            &no_display_ids(),
-        );
+        let (_, lines) = event_lines(&ExecutorEvent::StepSkipped {
+            host: "web-1".to_string(),
+            step: "Install".to_string(),
+            tasks: 2,
+            reason: "when: ${x}".to_string(),
+        });
         assert_eq!(lines, ["[web-1]   skipped (when: ${x})"]);
     }
 
@@ -2150,14 +2136,11 @@ mod tests {
             (Section::Rescue, "[web-1]   RESCUE step 'Deploy'"),
             (Section::Always, "[web-1]   ALWAYS step 'Deploy'"),
         ] {
-            let (stream, lines) = event_lines(
-                &ExecutorEvent::SectionStarted {
-                    host: "web-1".to_string(),
-                    step: "Deploy".to_string(),
-                    section,
-                },
-                &no_display_ids(),
-            );
+            let (stream, lines) = event_lines(&ExecutorEvent::SectionStarted {
+                host: "web-1".to_string(),
+                step: "Deploy".to_string(),
+                section,
+            });
             assert_eq!(stream, OutStream::Out);
             assert_eq!(lines, [expected]);
         }
@@ -2165,18 +2148,15 @@ mod tests {
 
     #[test]
     fn a_waiting_step_shows_its_gate() {
-        let (_, lines) = event_lines(
-            &ExecutorEvent::StepWaiting {
-                host: "web-1".to_string(),
-                step: "Wait".to_string(),
-                command: "curl -sf localhost".to_string(),
-                elapsed_secs: 0,
-                timeout_secs: 300,
-                first: true,
-                preview: false,
-            },
-            &no_display_ids(),
-        );
+        let (_, lines) = event_lines(&ExecutorEvent::StepWaiting {
+            host: "web-1".to_string(),
+            step: "Wait".to_string(),
+            command: "curl -sf localhost".to_string(),
+            elapsed_secs: 0,
+            timeout_secs: 300,
+            first: true,
+            preview: false,
+        });
         assert_eq!(
             lines,
             ["[web-1]   waiting until: curl -sf localhost (up to 300s)"]
@@ -2185,32 +2165,26 @@ mod tests {
 
     #[test]
     fn skips_are_counted_in_both_summaries() {
-        let (_, lines) = event_lines(
-            &ExecutorEvent::NodeComplete {
-                host: "web-1".to_string(),
-                success: true,
-                changed: 1,
-                skipped: 2,
-                dry_run: false,
-            },
-            &no_display_ids(),
-        );
+        let (_, lines) = event_lines(&ExecutorEvent::NodeComplete {
+            host: "web-1".to_string(),
+            success: true,
+            changed: 1,
+            skipped: 2,
+            dry_run: false,
+        });
         assert!(lines[0].ends_with("OK (1 changed, 2 skipped)"), "{lines:?}");
 
-        let (_, lines) = event_lines(
-            &ExecutorEvent::RunComplete {
-                summary: executor::result::RunSummary {
-                    total_hosts: 1,
-                    succeeded: 1,
-                    failed: 0,
-                    total_changed: 1,
-                    total_skipped: 2,
-                    aborted: 0,
-                    dry_run: true,
-                },
+        let (_, lines) = event_lines(&ExecutorEvent::RunComplete {
+            summary: executor::result::RunSummary {
+                total_hosts: 1,
+                succeeded: 1,
+                failed: 0,
+                total_changed: 1,
+                total_skipped: 2,
+                aborted: 0,
+                dry_run: true,
             },
-            &no_display_ids(),
-        );
+        });
         assert!(lines[1].ends_with("1 would change, 2 skipped"), "{lines:?}");
     }
 
@@ -2318,14 +2292,11 @@ mod tests {
 
     #[test]
     fn failures_go_to_stderr() {
-        let (stream, _) = event_lines(
-            &ExecutorEvent::StepFailed {
-                host: "web-1".to_string(),
-                step: "Deploy".to_string(),
-                error: "boom".to_string(),
-            },
-            &no_display_ids(),
-        );
+        let (stream, _) = event_lines(&ExecutorEvent::StepFailed {
+            host: "web-1".to_string(),
+            step: "Deploy".to_string(),
+            error: "boom".to_string(),
+        });
         assert_eq!(stream, OutStream::Err);
     }
 
@@ -2426,27 +2397,21 @@ mod tests {
 
     #[test]
     fn a_batch_names_its_hosts() {
-        let (stream, lines) = event_lines(
-            &ExecutorEvent::BatchStarted {
-                index: 1,
-                total: 3,
-                hosts: vec!["web-3".into(), "web-4".into()],
-            },
-            &no_display_ids(),
-        );
+        let (stream, lines) = event_lines(&ExecutorEvent::BatchStarted {
+            index: 1,
+            total: 3,
+            hosts: vec!["web-3".into(), "web-4".into()],
+        });
         assert_eq!(stream, OutStream::Out);
         assert_eq!(lines, ["--- Batch 2/3: web-3, web-4 ---"]);
     }
 
     #[test]
     fn a_stopped_rollout_gives_its_reason_and_every_host_left_out() {
-        let (stream, lines) = event_lines(
-            &ExecutorEvent::HostsAborted {
-                hosts: vec!["web-5".into(), "web-6".into()],
-                reason: "3 of 6 hosts failed, more than max-fail 1".into(),
-            },
-            &no_display_ids(),
-        );
+        let (stream, lines) = event_lines(&ExecutorEvent::HostsAborted {
+            hosts: vec!["web-5".into(), "web-6".into()],
+            reason: "3 of 6 hosts failed, more than max-fail 1".into(),
+        });
         assert_eq!(stream, OutStream::Err);
         assert_eq!(
             lines,
@@ -2472,14 +2437,7 @@ mod tests {
 
     #[test]
     fn the_summary_counts_aborted_hosts_only_when_there_are_some() {
-        let line = |s| {
-            event_lines(
-                &ExecutorEvent::RunComplete { summary: s },
-                &no_display_ids(),
-            )
-            .1[1]
-                .clone()
-        };
+        let line = |s| event_lines(&ExecutorEvent::RunComplete { summary: s }).1[1].clone();
         assert_eq!(
             line(summary_with(1, 0)),
             "Hosts: 6 total, 5 ok, 1 failed, 1 changed"

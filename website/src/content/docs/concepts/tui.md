@@ -98,18 +98,21 @@ For CI pipelines, cron jobs, or when piping output, use `--no-tui` to get plain 
 glidesh run -i inventory.kdl -p deploy.kdl --no-tui
 ```
 
-Output is printed line by line with `[group:host]` prefixes:
+Each plan is announced once, with the group it runs on, and every other line starts with
+the host's inventory name in brackets. The label is the same whether the plan came from
+the inventory's `plan=` or from `-p`, so one `grep '^\[web-1\]'` finds a host in any run:
 
 ```
-[web:web-1] Connecting...
-[web:web-1] Connected (ubuntu-22.04)
-[web:web-1] Step 1/3: Deploy binary
-[web:web-1]   file '/opt/app/bin': changed
-[web:web-1] Step 2/3: Restart service
-[web:web-1]   systemd 'myapp': changed
-[web:web-1] Step 3/3: Enable monitoring
-[web:web-1]   skipped (when: ${enable-monitoring})
-[web:web-1] OK (2 changed, 1 skipped)
+Plan 'deploy' on group 'web' (2 hosts)
+[web-1] Connecting...
+[web-1] Connected (ubuntu-22.04)
+[web-1] Step 1/3: Deploy binary
+[web-1]   file '/opt/app/bin': changed
+[web-1] Step 2/3: Restart service
+[web-1]   systemd 'myapp': changed
+[web-1] Step 3/3: Enable monitoring
+[web-1]   skipped (when: ${enable-monitoring})
+[web-1] OK (2 changed, 1 skipped)
 
 --- Run Complete ---
 Hosts: 2 total, 2 ok, 0 failed, 4 changed, 2 skipped

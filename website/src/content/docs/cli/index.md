@@ -132,15 +132,15 @@ glidesh run -i inventory.kdl -p plan.kdl --dry-run --diff
 ```
 
 ```
-[web:web-1]   file '/etc/app.conf': would change
-[web:web-1]     stdout | Upload app.conf -> /etc/app.conf
-[web:web-1]     stdout | --- /etc/app.conf (host)
-[web:web-1]     stdout | +++ /etc/app.conf (plan)
-[web:web-1]     stdout | @@ -1,2 +1,2 @@
-[web:web-1]     stdout |  name=app
-[web:web-1]     stdout | -port=80
-[web:web-1]     stdout | +port=8080
-[web:web-1]     stdout | [dry-run] Would copy app.conf -> /etc/app.conf
+[web-1]   file '/etc/app.conf': would change
+[web-1]     stdout | Upload app.conf -> /etc/app.conf
+[web-1]     stdout | --- /etc/app.conf (host)
+[web-1]     stdout | +++ /etc/app.conf (plan)
+[web-1]     stdout | @@ -1,2 +1,2 @@
+[web-1]     stdout |  name=app
+[web-1]     stdout | -port=80
+[web-1]     stdout | +port=8080
+[web-1]     stdout | [dry-run] Would copy app.conf -> /etc/app.conf
 ```
 
 Two modules describe their changes: [`file`](/modules/file/#--diff) shows a unified diff
