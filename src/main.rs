@@ -366,6 +366,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
     let mut group_plans = Vec::new();
     let mut all_host_names: Vec<(String, String, String)> = Vec::new();
+    let mut announcements = Vec::new();
     let mut run_name_parts = Vec::new();
 
     if let Some(fp_path) = &args.plan {
@@ -421,6 +422,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
         let pn = plan.name.clone();
         run_name_parts.push(pn.clone());
+        announcements.push(plan_announcement("", &pn, targets.len()));
         all_host_names.extend(
             targets
                 .iter()
@@ -535,6 +537,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             let pn = plan.name.clone();
             let gn = group_name.clone();
             run_name_parts.push(format!("{}-{}", gn, pn));
+            announcements.push(plan_announcement(&gn, &pn, filtered_targets.len()));
             all_host_names.extend(
                 filtered_targets
                     .iter()
@@ -601,6 +604,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         Arc::new(tags),
         &run_name,
         &all_host_names,
+        &announcements,
         &args,
     )
     .await
@@ -888,30 +892,19 @@ fn event_lines(event: &ExecutorEvent) -> (OutStream, Vec<String>) {
     }
 }
 
-/// One line per plan, naming its group, so the `[host]` labels on every other line can be
-/// traced back to the group without repeating it. `host_names` is `(host, group, plan)`,
-/// a group plan's hosts next to each other.
-fn plan_announcements(host_names: &[(String, String, String)]) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut rest = host_names;
-    while let Some((_, group, plan)) = rest.first() {
-        let count = rest
-            .iter()
-            .take_while(|(_, g, p)| g == group && p == plan)
-            .count();
-        let hosts = if count == 1 {
-            "1 host".to_string()
-        } else {
-            format!("{} hosts", count)
-        };
-        lines.push(if group.is_empty() {
-            format!("Plan '{}' ({})", plan, hosts)
-        } else {
-            format!("Plan '{}' on group '{}' ({})", plan, group, hosts)
-        });
-        rest = &rest[count..];
+/// The line announcing one plan entry before the run, naming its group (if any), so the
+/// `[host]` labels on host lines can be traced back to the group without repeating it.
+fn plan_announcement(group: &str, plan: &str, hosts: usize) -> String {
+    let hosts = if hosts == 1 {
+        "1 host".to_string()
+    } else {
+        format!("{} hosts", hosts)
+    };
+    if group.is_empty() {
+        format!("Plan '{}' ({})", plan, hosts)
+    } else {
+        format!("Plan '{}' on group '{}' ({})", plan, group, hosts)
     }
-    lines
 }
 
 fn print_event(event: &ExecutorEvent) {
@@ -1781,6 +1774,7 @@ async fn run_with_ui(
     tags: Arc<TagFilter>,
     run_name: &str,
     host_names: &[(String, String, String)],
+    announcements: &[String],
     args: &cli::RunArgs,
 ) -> Result<(), GlideshError> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1789,7 +1783,7 @@ async fn run_with_ui(
     println!("Logging to: {}", logger.run_dir().display());
     let use_tui = tui::is_tty() && !args.no_tui;
     if !use_tui {
-        for line in plan_announcements(host_names) {
+        for line in announcements {
             println!("{}", line);
         }
     }
@@ -1988,32 +1982,24 @@ mod tests {
         assert!(dir.is_absolute(), "{}", dir.display());
     }
 
-    fn names(rows: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
-        rows.iter()
-            .map(|(h, g, p)| (h.to_string(), g.to_string(), p.to_string()))
-            .collect()
-    }
-
     #[test]
-    fn each_plan_is_announced_once_with_its_group() {
-        let lines = plan_announcements(&names(&[
-            ("web-1", "web", "deploy"),
-            ("web-2", "web", "deploy"),
-            ("db-1", "db", "postgres"),
-        ]));
+    fn a_plan_is_announced_with_its_group_and_host_count() {
         assert_eq!(
-            lines,
-            [
-                "Plan 'deploy' on group 'web' (2 hosts)",
-                "Plan 'postgres' on group 'db' (1 host)",
-            ]
+            plan_announcement("web", "deploy", 2),
+            "Plan 'deploy' on group 'web' (2 hosts)"
+        );
+        assert_eq!(
+            plan_announcement("db", "postgres", 1),
+            "Plan 'postgres' on group 'db' (1 host)"
         );
     }
 
     #[test]
     fn a_plan_given_with_dash_p_is_announced_without_a_group() {
-        let lines = plan_announcements(&names(&[("web-1", "", "deploy"), ("db-1", "", "deploy")]));
-        assert_eq!(lines, ["Plan 'deploy' (2 hosts)"]);
+        assert_eq!(
+            plan_announcement("", "deploy", 2),
+            "Plan 'deploy' (2 hosts)"
+        );
     }
 
     fn module_result(changed: bool, dry_run: bool, stdout: &str) -> ExecutorEvent {
