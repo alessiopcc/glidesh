@@ -12,35 +12,72 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ## Installation
 
-Download a release archive from [GitHub Releases](https://github.com/alessiopcc/glidesh/releases).
-Each release ships one archive per target, plus `checksums-sha256.txt` to verify against.
-
 <Tabs>
   <TabItem label="Linux">
     ```bash
-    # x86_64 — for arm64, use aarch64-unknown-linux-gnu
-    curl -L https://github.com/alessiopcc/glidesh/releases/download/v1.2.0/glidesh-v1.2.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
-    chmod +x glidesh
-    sudo mv glidesh /usr/local/bin/
+    curl -fsSL https://glidesh.netlify.app/install.sh | sh
     ```
+
+    Installs the latest release to `~/.local/bin` (`/usr/local/bin` as root), after checking
+    it against the release's SHA-256 sums. The Linux binary is static: it runs on any
+    distribution. [Homebrew](https://brew.sh) works too, as on macOS.
   </TabItem>
   <TabItem label="macOS">
     ```bash
-    # Apple silicon — for Intel Macs, use x86_64-apple-darwin
-    curl -L https://github.com/alessiopcc/glidesh/releases/download/v1.2.0/glidesh-v1.2.0-aarch64-apple-darwin.tar.gz | tar xz
-    chmod +x glidesh
-    sudo mv glidesh /usr/local/bin/
+    brew install alessiopcc/tap/glidesh
+    ```
+
+    Or, without Homebrew, the same script as on Linux:
+
+    ```bash
+    curl -fsSL https://glidesh.netlify.app/install.sh | sh
     ```
   </TabItem>
   <TabItem label="Windows">
     ```powershell
-    # x86_64 — for arm64, use aarch64-pc-windows-msvc
-    Invoke-WebRequest -Uri https://github.com/alessiopcc/glidesh/releases/download/v1.2.0/glidesh-v1.2.0-x86_64-pc-windows-msvc.zip -OutFile glidesh.zip
-    Expand-Archive glidesh.zip -DestinationPath .
-    Move-Item glidesh.exe C:\Windows\System32\
+    scoop bucket add alessiopcc https://github.com/alessiopcc/scoop-bucket
+    scoop install alessiopcc/glidesh
     ```
+
+    With [Scoop](https://scoop.sh). Windows binaries for x64 and arm64 are also on the
+    release page (see below).
   </TabItem>
 </Tabs>
+
+### Upgrade and uninstall
+
+| Installed with | Upgrade | Uninstall |
+|---|---|---|
+| `install.sh` | run it again | delete `glidesh` from the directory it went to: `~/.local/bin`, `/usr/local/bin` as root, or your `GLIDESH_INSTALL_DIR` |
+| Homebrew | `brew upgrade glidesh` | `brew uninstall glidesh` |
+| Scoop | `scoop update glidesh` | `scoop uninstall glidesh` |
+
+### Script options
+
+The script takes its options from the environment; `sh install.sh --help` lists them.
+
+```bash
+# A given version, into a directory of your choice
+curl -fsSL https://glidesh.netlify.app/install.sh | GLIDESH_VERSION=v2.0.0 GLIDESH_INSTALL_DIR=/opt/bin sh
+```
+
+It never runs `sudo`: to install into a system directory, run it as root. To read it before
+running it, download it first: `curl -fsSLO https://glidesh.netlify.app/install.sh`.
+
+### Manual download
+
+Every [GitHub release](https://github.com/alessiopcc/glidesh/releases) has one archive per
+target, named `glidesh-<version>-<target>.tar.gz` (`.zip` on Windows), and
+`checksums-sha256.txt` to verify them against:
+
+| System | Target |
+|---|---|
+| Linux x86_64 / arm64 | `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` |
+| macOS Intel / Apple silicon | `x86_64-apple-darwin` / `aarch64-apple-darwin` |
+| Windows x64 / arm64 | `x86_64-pc-windows-msvc` / `aarch64-pc-windows-msvc` |
+
+The archive holds the single `glidesh` binary (`glidesh.exe`); put it on your `PATH`.
+Releases before 2.0 built Linux against glibc (`-unknown-linux-gnu`).
 
 ### From source
 
