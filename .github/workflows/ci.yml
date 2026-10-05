@@ -42,18 +42,26 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
 
   examples:
     name: Examples
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
       - name: Validate every example
@@ -62,7 +70,7 @@ jobs:
           for dir in examples/*/; do
             [ -f "$dir/plan.kdl" ] || continue
             echo "::group::$dir"
-            out=$(./target/debug/glidesh validate -p "$dir/plan.kdl" -i "$dir/inventory.kdl" 2>&1) || status=1
+            out=$(./target/x86_64-unknown-linux-musl/debug/glidesh validate -p "$dir/plan.kdl" -i "$dir/inventory.kdl" 2>&1) || status=1
             echo "$out"
             # A warning in an example is a mistake a user would copy.
             if echo "$out" | grep -q "warning:"; then status=1; fi
@@ -73,9 +81,13 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --test 'integration_*'
         env:

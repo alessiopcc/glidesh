@@ -19,10 +19,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use-cross: false
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use-cross: true
           - target: x86_64-apple-darwin
@@ -61,6 +61,11 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }}
           fi
+
+      - name: Check the binary is static
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/b:ro" alpine /b/glidesh --version
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -103,14 +108,41 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             artifacts/glidesh-*.tar.gz
             artifacts/glidesh-*.zip
             artifacts/checksums-sha256.txt
 
+  verify-install:
+    name: Verify Install (${{ matrix.os }})
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck website/public/install.sh
+
+      - name: install.sh
+        env:
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ contains(github.ref_name, '-') }}
+        run: |
+          if [ "$PRERELEASE" = true ]; then export GLIDESH_VERSION="$TAG"; fi
+          GLIDESH_INSTALL_DIR="$RUNNER_TEMP/bin" sh website/public/install.sh
+          version=$("$RUNNER_TEMP/bin/glidesh" --version)
+          [ "$version" = "glidesh ${TAG#v}" ] || { echo "installed '$version', expected $TAG"; exit 1; }
+
   deploy-docs:
     name: Deploy Documentation
-    needs: release
+    needs: verify-install
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Netlify deploy

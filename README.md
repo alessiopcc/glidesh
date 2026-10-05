@@ -31,13 +31,24 @@
 
 ## Install
 
-Download the latest binary from [GitHub Releases](https://github.com/alessiopcc/glidesh/releases):
-
 ```bash
-curl -L https://github.com/alessiopcc/glidesh/releases/latest/download/glidesh-linux-amd64 -o glidesh
-chmod +x glidesh
-sudo mv glidesh /usr/local/bin/
+# Linux and macOS
+curl -fsSL https://glidesh.netlify.app/install.sh | sh
+
+# macOS (or Linux) with Homebrew
+brew install alessiopcc/tap/glidesh
 ```
+
+```powershell
+# Windows, with Scoop
+scoop bucket add alessiopcc https://github.com/alessiopcc/scoop-bucket
+scoop install alessiopcc/glidesh
+```
+
+Or download an archive for your platform from
+[GitHub Releases](https://github.com/alessiopcc/glidesh/releases); see
+[Installation](https://glidesh.netlify.app/getting-started/#installation) for the targets,
+upgrading and the script's options.
 
 ### From source
 
