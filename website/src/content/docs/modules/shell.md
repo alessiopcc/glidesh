@@ -92,7 +92,7 @@ step "Nginx config is valid" {
 }
 
 step "Enough disk for the release" {
-    shell "echo 'less than 2 GiB free on /srv' >&2; exit 1" check="test $(df --output=avail -k /srv | tail -1) -gt 2097152"
+    shell "echo 'less than 2 GiB free on /srv' >&2; exit 1" check="test $(df --output=avail -k /srv | tail -1) -ge 2097152"
 }
 ```
 
