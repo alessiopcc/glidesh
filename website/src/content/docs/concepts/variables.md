@@ -420,8 +420,8 @@ To keep a `${…}` for something else to read — a shell script's `${HOME}`, a 
 shell "echo $${HOME} deploys ${app}"   // runs: echo ${HOME} deploys api
 ```
 
-:::caution[Earlier versions]
-Before `$${` was an escape, `$${name}` meant a `$` followed by the value of `name`. Now it
+:::caution[Changed in glidesh 2.0]
+Before 2.0, `$${name}` meant a `$` followed by the value of `name`. Now it
 writes `${name}` as it is. For a `$` before a value, put the `$` into the value.
 `glidesh validate` warns about a `$${name}` whose `name` is a defined variable, as that
 is likely the old meaning.

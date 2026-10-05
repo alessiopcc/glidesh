@@ -209,8 +209,8 @@ task's output names the absolute path written:
 fetch /var/backups/db.sql -> /home/me/project/plans/backups/web-1-dump.sql (48213 bytes)
 ```
 
-:::caution[Earlier versions]
-Earlier versions resolved a relative fetch destination from the directory glidesh ran in.
+:::caution[Changed in glidesh 2.0]
+Before 2.0, glidesh resolved a relative fetch destination from the directory glidesh ran in.
 A plan run from its own directory writes where it did; one run from elsewhere now writes
 beside the plan file.
 :::

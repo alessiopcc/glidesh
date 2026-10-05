@@ -69,8 +69,8 @@ plan "web" {
 }
 ```
 
-:::caution[Changed after v1.2.0]
-Earlier versions resolved an included plan's `file` sources from the top-level plan's
+:::caution[Changed in glidesh 2.0]
+Before 2.0, glidesh resolved an included plan's `file` sources from the top-level plan's
 directory. [`glidesh validate`](/cli/#glidesh-validate) points at a source it finds only
 there: `…/nginx.conf exists, but an included plan's sources resolve from its own directory`.
 Move the file next to the included plan, or give `src` a path relative to it.
