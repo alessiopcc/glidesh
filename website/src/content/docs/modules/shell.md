@@ -97,9 +97,10 @@ step "Enough disk for the release" {
 ```
 
 When the condition holds, the task reports `ok` and nothing else runs. When it does not, the
-command runs and fails the host, so its output becomes the error: repeat the probe (as with
-`nginx -t`) to show what the host said, or print your own message. A failed assertion stops
-the host like any failed task, and runs the step's [`rescue`](/advanced/rescue/) if it has one.
+command runs and the task fails, so its output becomes the error: repeat the probe (as with
+`nginx -t`) to show what the host said, or print your own message. A failed assertion is
+handled like any failed task: without a [`rescue`](/advanced/rescue/) the host stops there;
+a step's `rescue` runs instead, and if it succeeds the host goes on.
 
 Why not just `shell "nginx -t"`? That runs as work: it reports a change on every run and
 triggers subscribers (`changed-when=#false` fixes that). More importantly, a task's command
@@ -116,7 +117,7 @@ Which one to use:
 | Wait for something on the host to become true | [`until=`](/advanced/until/) — polls until a timeout; an assertion asks once |
 
 Do not put an assertion in a step that [`subscribe`](/advanced/subscribe/)s: a triggered
-step skips the `check` gate, so the failing command runs and the host fails.
+step skips the `check` gate, so the failing command runs and the task fails.
 
 ## Reporting changes with `changed-when`
 

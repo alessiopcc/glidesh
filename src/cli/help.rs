@@ -237,7 +237,8 @@ MODULES (each checks the host first and changes only what differs)
                               Runs every time unless check= says the work is done.
                               Assertion: the condition in check=, a failing command
                               (`shell \"nginx -t\" check=\"nginx -t\"`): ok when it holds,
-                              else the host fails; --dry-run shows it as would change.
+                              else the task fails (the host stops unless the step's
+                              rescue succeeds); --dry-run shows it as would change.
                               Not in a subscribing step (triggered skips check=).
   file \"<dest>\"               src= (required)  template=#true  recurse=#true  fetch=#true
                               owner= group= mode=\"0644\"  diff=#false
