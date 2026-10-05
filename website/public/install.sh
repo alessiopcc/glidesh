@@ -111,7 +111,8 @@ main() {
 
     wanted=$(targets)
     tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+    staged=""
+    trap 'rm -rf "$tmp" ${staged:+"$staged"}' EXIT
 
     fetch "$sums_url" "$tmp/sums"
 
@@ -138,10 +139,13 @@ main() {
 
     tar -xzf "$tmp/$asset" -C "$tmp" glidesh || fail "could not unpack $asset"
     mkdir -p "$dir" || fail "cannot create $dir"
-    # Copied beside the target and renamed over it, so a running glidesh is replaced whole.
-    cp "$tmp/glidesh" "$dir/.glidesh.new" || fail "cannot write to $dir"
-    chmod 755 "$dir/.glidesh.new"
-    mv -f "$dir/.glidesh.new" "$dir/glidesh"
+    # Copied beside the target and renamed over it, so a running glidesh is replaced whole;
+    # a staging name of its own keeps two installs at once from writing the same file.
+    staged=$(mktemp "$dir/.glidesh.XXXXXX") || fail "cannot write to $dir"
+    cp "$tmp/glidesh" "$staged" || fail "cannot write to $dir"
+    chmod 755 "$staged"
+    mv -f "$staged" "$dir/glidesh"
+    staged=""
 
     say "installed $("$dir/glidesh" --version) to $dir/glidesh"
     case ":$PATH:" in
