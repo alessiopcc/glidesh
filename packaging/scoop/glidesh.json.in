@@ -1,0 +1,33 @@
+{
+    "version": "@VERSION@",
+    "description": "Fast, stateless, SSH-only infrastructure automation",
+    "homepage": "https://glidesh.netlify.app",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/alessiopcc/glidesh/releases/download/@TAG@/glidesh-@TAG@-x86_64-pc-windows-msvc.zip",
+            "hash": "@SHA256_x86_64-pc-windows-msvc@"
+        },
+        "arm64": {
+            "url": "https://github.com/alessiopcc/glidesh/releases/download/@TAG@/glidesh-@TAG@-aarch64-pc-windows-msvc.zip",
+            "hash": "@SHA256_aarch64-pc-windows-msvc@"
+        }
+    },
+    "bin": "glidesh.exe",
+    "checkver": {
+        "github": "https://github.com/alessiopcc/glidesh"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/alessiopcc/glidesh/releases/download/v$version/glidesh-v$version-x86_64-pc-windows-msvc.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/alessiopcc/glidesh/releases/download/v$version/glidesh-v$version-aarch64-pc-windows-msvc.zip"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/checksums-sha256.txt"
+        }
+    }
+}

@@ -1,0 +1,36 @@
+class Glidesh < Formula
+  desc "Fast, stateless, SSH-only infrastructure automation"
+  homepage "https://glidesh.netlify.app"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/alessiopcc/glidesh/releases/download/@TAG@/glidesh-@TAG@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "https://github.com/alessiopcc/glidesh/releases/download/@TAG@/glidesh-@TAG@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/alessiopcc/glidesh/releases/download/@TAG@/glidesh-@TAG@-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_aarch64-unknown-linux-musl@"
+    end
+    on_intel do
+      url "https://github.com/alessiopcc/glidesh/releases/download/@TAG@/glidesh-@TAG@-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256_x86_64-unknown-linux-musl@"
+    end
+  end
+
+  def install
+    bin.install "glidesh"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/glidesh --version")
+  end
+end
