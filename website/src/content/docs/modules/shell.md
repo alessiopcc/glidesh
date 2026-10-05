@@ -82,6 +82,42 @@ step "Install package" {
 
 In a step [triggered by `subscribe`](/advanced/subscribe/#what-a-triggered-task-does), the gate is skipped and the command runs: being triggered means the work must be done again. `check="true"` therefore makes a command that runs only when triggered.
 
+## Assertions: `check` as the condition
+
+`check` can hold the condition a host must meet, and the command can be the failure:
+
+```kdl
+step "Nginx config is valid" {
+    shell "nginx -t" check="nginx -t"
+}
+
+step "Enough disk for the release" {
+    shell "echo 'less than 2 GiB free on /srv' >&2; exit 1" check="test $(df --output=avail -k /srv | tail -1) -gt 2097152"
+}
+```
+
+When the condition holds, the task reports `ok` and nothing else runs. When it does not, the
+command runs and fails the host, so its output becomes the error: repeat the probe (as with
+`nginx -t`) to show what the host said, or print your own message. A failed assertion stops
+the host like any failed task, and runs the step's [`rescue`](/advanced/rescue/) if it has one.
+
+Why not just `shell "nginx -t"`? That runs as work: it reports a change on every run and
+triggers subscribers (`changed-when=#false` fixes that). More importantly, a task's command
+never runs in a [`--dry-run`](/cli/#previewing-a-run), so a plain `nginx -t` cannot tell a
+preview anything; `check` does run there, so an assertion reports `ok` when it holds and
+`would change` when the real run would fail.
+
+Which one to use:
+
+| You want to | Use |
+|---|---|
+| Stop the host when something on it is wrong | an assertion (`check` + failing command) |
+| Leave out a task for hosts where it does not apply, decided from variables | [`when=`](/advanced/conditionals/) — reports `skipped`, never fails |
+| Wait for something on the host to become true | [`until=`](/advanced/until/) — polls until a timeout; an assertion asks once |
+
+Do not put an assertion in a step that [`subscribe`](/advanced/subscribe/)s: a triggered
+step skips the `check` gate, so the failing command runs and the host fails.
+
 ## Reporting changes with `changed-when`
 
 A shell command that runs counts as a change — glidesh cannot tell what it did. `changed-when` says otherwise.

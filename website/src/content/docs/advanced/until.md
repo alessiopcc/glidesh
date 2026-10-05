@@ -47,6 +47,9 @@ subscriber.
 (`wait`, `ready-cmd`): that one belongs to a container task and asks whether *that container*
 is ready. `until=` asks whether the host is ready for a whole step.
 
+To check a condition once and fail the host when it does not hold, without waiting, use a
+`shell` [assertion](/modules/shell/#assertions-check-as-the-condition) instead.
+
 ## Rules
 
 - The gate runs on **every** run, before the step's tasks, once per step — a step with a

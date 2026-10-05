@@ -191,6 +191,10 @@ Use `when` for decisions you can make from what you know — the OS, inventory v
 flags, an earlier registered value. Use `check=` when only the host can tell you, such as
 whether a file already exists. They combine: a task whose `when` holds still runs its `check=`.
 
+Neither one fails the host. To stop a host whose state is wrong, use `check=` as an
+[assertion](/modules/shell/#assertions-check-as-the-condition): the condition goes in `check=`
+and the command is the failure.
+
 ## With `host` tasks
 
 A [`host`](/modules/host/) task runs once and shares its result with every target. Its `when`

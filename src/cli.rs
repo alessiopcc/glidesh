@@ -488,6 +488,7 @@ mod tests {
         for needle in [
             "sh.glide.param-hash",
             "check=",
+            "Assertion: the condition in check=",
             "retries",
             "timeout",
             "success_codes",
