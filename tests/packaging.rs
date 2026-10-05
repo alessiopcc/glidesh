@@ -130,6 +130,17 @@ fn a_release_missing_an_archive_renders_nothing_usable() {
 }
 
 #[test]
+fn an_empty_sums_file_renders_nothing_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let sums = sums(dir.path(), "v2.0.0", &[]);
+
+    let out = render("packaging/homebrew/glidesh.rb.in", "v2.0.0", &sums);
+
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no archive for"));
+}
+
+#[test]
 fn checksums_of_another_tag_are_not_used() {
     let dir = tempfile::tempdir().unwrap();
     let sums = sums(dir.path(), "v1.9.0", TARGETS);

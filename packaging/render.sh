@@ -15,7 +15,7 @@ set -eu
 }
 
 awk -v tag="$2" -v version="${2#v}" '
-    NR == FNR {
+    FILENAME == ARGV[1] {
         hash[$2] = $1
         next
     }
