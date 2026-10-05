@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -90,6 +90,8 @@ jobs:
   release:
     name: Create Release
     needs: build
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,30 +116,97 @@ jobs:
             artifacts/glidesh-*.zip
             artifacts/checksums-sha256.txt
 
+  packages:
+    name: Update Packages
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alessiopcc/homebrew-tap
+          token: ${{ secrets.PACKAGES_TOKEN }}
+          path: homebrew-tap
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alessiopcc/scoop-bucket
+          token: ${{ secrets.PACKAGES_TOKEN }}
+          path: scoop-bucket
+
+      - name: Render
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" -p checksums-sha256.txt -D "$RUNNER_TEMP"
+          sums="$RUNNER_TEMP/checksums-sha256.txt"
+          sh packaging/render.sh packaging/homebrew/glidesh.rb.in "$TAG" "$sums" > "$RUNNER_TEMP/glidesh.rb"
+          sh packaging/render.sh packaging/scoop/glidesh.json.in "$TAG" "$sums" > "$RUNNER_TEMP/glidesh.json"
+          cp "$RUNNER_TEMP/glidesh.rb" homebrew-tap/Formula/glidesh.rb
+          cp "$RUNNER_TEMP/glidesh.json" scoop-bucket/bucket/glidesh.json
+
+      - name: Push
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          for repo in homebrew-tap scoop-bucket; do
+            git -C "$repo" config user.name "github-actions[bot]"
+            git -C "$repo" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C "$repo" add -A
+            git -C "$repo" diff --cached --quiet || git -C "$repo" commit -m "glidesh ${TAG#v}"
+            git -C "$repo" push
+          done
+
   verify-install:
     name: Verify Install (${{ matrix.os }})
-    needs: release
+    needs: [release, packages]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    env:
+      TAG: ${{ github.ref_name }}
+      PRERELEASE: ${{ contains(github.ref_name, '-') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: shellcheck
         if: runner.os == 'Linux'
         run: shellcheck website/public/install.sh
 
       - name: install.sh
-        env:
-          TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ contains(github.ref_name, '-') }}
+        if: runner.os != 'Windows'
         run: |
           if [ "$PRERELEASE" = true ]; then export GLIDESH_VERSION="$TAG"; fi
           GLIDESH_INSTALL_DIR="$RUNNER_TEMP/bin" sh website/public/install.sh
           version=$("$RUNNER_TEMP/bin/glidesh" --version)
           [ "$version" = "glidesh ${TAG#v}" ] || { echo "installed '$version', expected $TAG"; exit 1; }
+
+      - name: brew
+        if: runner.os == 'macOS' && env.PRERELEASE == 'false'
+        run: |
+          brew install alessiopcc/tap/glidesh
+          version=$("$(brew --prefix)/bin/glidesh" --version)
+          [ "$version" = "glidesh ${TAG#v}" ] || { echo "installed '$version', expected $TAG"; exit 1; }
+
+      - name: scoop
+        if: runner.os == 'Windows' && env.PRERELEASE == 'false'
+        shell: pwsh
+        run: |
+          iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
+          $shims = "$env:USERPROFILE\scoop\shims"
+          & "$shims\scoop.cmd" bucket add alessiopcc https://github.com/alessiopcc/scoop-bucket
+          & "$shims\scoop.cmd" install alessiopcc/glidesh
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $version = & "$shims\glidesh.exe" --version
+          if ($version -ne "glidesh $($env:TAG.TrimStart('v'))") { Write-Error "installed '$version', expected $env:TAG"; exit 1 }
 
   deploy-docs:
     name: Deploy Documentation
