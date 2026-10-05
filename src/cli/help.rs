@@ -292,8 +292,9 @@ PREVIEW AND OUTPUT
   a group, or on a host in a group, names that group:
   `Plan 'deploy' on group 'web' (2 hosts)`. With -p it is `Plan 'deploy' (2 hosts)`.
   Each host's log is kept under ~/.glidesh/runs/ (see `glidesh logs`).
-  `--host <addr> --command` prints the command's output as is; `-i <inv> --command`
-  prefixes each line with `[<host>]`.
+  `run --host <addr> --command` prints the command's output as is, as does
+  `glidesh console -t <target> -c` on one host; on several it prefixes each line with
+  `[<host>]`.
   Exit status is non-zero when any host failed or a rolling run stopped early.
 
 SSH
