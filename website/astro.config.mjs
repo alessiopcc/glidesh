@@ -1,11 +1,12 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import pkg from './package.json' with { type: 'json' };
 
 export default defineConfig({
 	integrations: [
 		starlight({
-			title: 'glide·sh v1.2.0',
+			title: `glide·sh v${pkg.version}`,
 			logo: {
 				dark: './public/logo-white.webp',
 				light: './public/logo-black.webp',
