@@ -1,3 +1,4 @@
+use crate::tui::scroll;
 use crate::tui::tunnel_store::{self, SavedTunnel};
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -22,6 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// Rows PgUp/PgDn move the cursor by, as in the run TUI's log panel.
+const PAGE: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -140,9 +144,12 @@ struct ConsoleState {
     groups: Vec<GroupView>,
     rows: Vec<TreeRow>,
     cursor: usize,
+    /// First tree row on screen, kept by the renderer so `cursor` stays visible.
+    tree_offset: usize,
     selection: HashSet<usize>, // host indices
     focus: Focus,
     tunnel_cursor: usize,
+    tunnel_offset: usize,
     tunnels: Vec<TunnelEntry>,
     dialog: Option<TunnelDialog>,
     confirm_quit: bool,
@@ -216,9 +223,11 @@ impl ConsoleState {
             groups,
             rows: Vec::new(),
             cursor: 0,
+            tree_offset: 0,
             selection: HashSet::new(),
             focus: Focus::Tree,
             tunnel_cursor: 0,
+            tunnel_offset: 0,
             tunnels: Vec::new(),
             dialog: None,
             confirm_quit: false,
@@ -509,6 +518,12 @@ async fn handle_tree_key(
         KeyCode::Down | KeyCode::Char('j') if state.cursor + 1 < state.rows.len() => {
             state.cursor += 1;
         }
+        KeyCode::PageUp => state.cursor = state.cursor.saturating_sub(PAGE),
+        KeyCode::PageDown => {
+            state.cursor = (state.cursor + PAGE).min(state.rows.len().saturating_sub(1));
+        }
+        KeyCode::Home => state.cursor = 0,
+        KeyCode::End => state.cursor = state.rows.len().saturating_sub(1),
         KeyCode::Left => {
             if let Some(TreeRow::Group(gi)) = state.rows.get(state.cursor) {
                 state.groups[*gi].expanded = false;
@@ -911,7 +926,7 @@ async fn open_single_shell(
 
 // ---------- Rendering ----------
 
-fn render(frame: &mut ratatui::Frame, state: &ConsoleState) {
+fn render(frame: &mut ratatui::Frame, state: &mut ConsoleState) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -962,7 +977,7 @@ fn render_header(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
     );
 }
 
-fn render_tree(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
+fn render_tree(frame: &mut ratatui::Frame, area: Rect, state: &mut ConsoleState) {
     let title = if state.focus == Focus::Tree {
         " Hosts [focused] "
     } else {
@@ -972,8 +987,12 @@ fn render_tree(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let visible = inner.height as usize;
+    state.tree_offset = scroll::follow(state.tree_offset, state.cursor, state.rows.len(), visible);
+    let first = state.tree_offset;
+
     let mut lines: Vec<ListItem> = Vec::new();
-    for (ri, row) in state.rows.iter().enumerate() {
+    for (ri, row) in state.rows.iter().enumerate().skip(first).take(visible) {
         let is_cursor = ri == state.cursor && state.focus == Focus::Tree;
         let line = match row {
             TreeRow::Group(gi) => {
@@ -1010,9 +1029,10 @@ fn render_tree(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
         lines.push(ListItem::new(line).style(style));
     }
     frame.render_widget(List::new(lines), inner);
+    scroll::render_scrollbar(frame, area, state.rows.len(), visible, first);
 }
 
-fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
+fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &mut ConsoleState) {
     let title = if state.focus == Focus::Tunnels {
         " Tunnels [focused] "
     } else {
@@ -1033,10 +1053,22 @@ fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) 
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
+    // Below the header row.
+    let visible = inner.height.saturating_sub(1) as usize;
+    state.tunnel_offset = scroll::follow(
+        state.tunnel_offset,
+        state.tunnel_cursor,
+        state.tunnels.len(),
+        visible,
+    );
+    let first = state.tunnel_offset;
+
     let rows: Vec<Row> = state
         .tunnels
         .iter()
         .enumerate()
+        .skip(first)
+        .take(visible)
         .map(|(i, t)| {
             let dir = match t.direction {
                 TunnelDirection::Local => "L",
@@ -1088,6 +1120,7 @@ fn render_tunnels(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) 
     ];
     let table = Table::new(rows, widths).header(header);
     frame.render_widget(table, inner);
+    scroll::render_scrollbar(frame, area, state.tunnels.len(), visible, first);
 }
 
 fn render_plan_panel(frame: &mut ratatui::Frame, area: Rect, state: &ConsoleState) {
@@ -1233,4 +1266,62 @@ fn render_confirm(frame: &mut ratatui::Frame, area: Rect, text: &str) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(text), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn console(hosts: usize) -> ConsoleState {
+        let body: String = (0..hosts)
+            .map(|i| format!("    host \"host-{i:02}\" \"10.0.0.{i}\"\n"))
+            .collect();
+        let inventory =
+            glidesh::config::inventory::parse_inventory(&format!("group \"web\" {{\n{body}}}\n"))
+                .unwrap();
+        ConsoleState::new(
+            PathBuf::from("inventory.kdl"),
+            &inventory,
+            PathBuf::from("id_ed25519"),
+            HostKeyPolicy {
+                verify: true,
+                accept_new: false,
+            },
+        )
+    }
+
+    fn screen(state: &mut ConsoleState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| render(f, state)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_tree_scrolls_to_the_cursor() {
+        let mut state = console(30);
+        state.cursor = state.rows.len() - 1;
+        let shown = screen(&mut state);
+        assert!(shown.contains("host-29"), "{shown}");
+        assert!(!shown.contains("host-00"), "{shown}");
+        assert!(state.tree_offset > 0);
+    }
+
+    #[test]
+    fn collapsing_a_group_brings_the_view_back() {
+        let mut state = console(30);
+        state.cursor = state.rows.len() - 1;
+        screen(&mut state);
+        state.groups[0].expanded = false;
+        state.recompute_rows();
+        let shown = screen(&mut state);
+        assert_eq!(state.tree_offset, 0);
+        assert!(shown.contains("▸ web"), "{shown}");
+    }
 }

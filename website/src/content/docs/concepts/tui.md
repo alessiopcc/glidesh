@@ -14,7 +14,7 @@ glidesh ships several terminal UIs, each suited to a different workflow:
 When you run a plan, the TUI shows a split-screen view:
 
 - **Top**: progress bar with host count, changes, elapsed time
-- **Middle**: node table with host status, current step, and timing
+- **Middle**: node table with host status, current step, and timing; with more hosts than fit, it scrolls to keep the selected node in view
 - **Bottom**: scrollable log panel (combined or per-node)
 
 A host's status is one of:

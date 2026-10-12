@@ -38,7 +38,7 @@ glidesh
 
 The **Listen** column is the side that accepts incoming connections (your local box for `-L`, the remote sshd for `-R`). The **Forwards to** column is the destination the bytes get delivered to.
 
-- **Top-left**: collapsible group → host tree, with multi-select markers
+- **Top-left**: collapsible group → host tree, with multi-select markers. A tree taller than the panel scrolls with the cursor, with a scrollbar on its right edge
 - **Top-right**: plan associated with the focused row (group plan, host plan, or none)
 - **Bottom**: live table of active tunnels (direction, local port, via-host, remote target, accept count, saved flag, status)
 - **Footer**: keybindings + transient flash messages (errors, status updates)
@@ -50,6 +50,8 @@ The **Listen** column is the side that accepts incoming connections (your local 
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` or `j` / `k` | Move cursor |
+| `PgUp` / `PgDn` | Move cursor by 10 rows |
+| `Home` / `End` | Move cursor to the first / last row |
 | `←` / `→` | Collapse / expand the focused group |
 | `Space` | Toggle selection of host (or every host in a group) |
 | `Esc` | Clear all selections |

@@ -11,10 +11,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState,
-};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
 use russh_keys::key::PrivateKeyWithHashAlg;
 use std::io;
 use std::sync::Arc;
@@ -458,22 +455,7 @@ fn render_output(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
 
-    if total > visible_height {
-        let scrollbar_area = Rect {
-            x: area.x + area.width - 1,
-            y: area.y + 1,
-            width: 1,
-            height: area.height.saturating_sub(2),
-        };
-        let mut scrollbar_state =
-            ScrollbarState::new(total.saturating_sub(visible_height)).position(scroll);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("\u{25b2}"))
-            .end_symbol(Some("\u{25bc}"))
-            .track_symbol(Some("\u{2591}"))
-            .thumb_symbol("\u{2588}");
-        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
-    }
+    super::scroll::render_scrollbar(frame, area, total, visible_height, scroll);
 }
 
 fn render_input(frame: &mut ratatui::Frame, area: Rect, state: &ShellTuiState) {
