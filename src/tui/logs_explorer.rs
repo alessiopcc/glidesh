@@ -781,7 +781,7 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
                     KeyCode::Char('e') if state.view == LogsView::NodeLog => {
                         if let Some(path) = state.current_log_path() {
                             terminal::disable_raw_mode()?;
-                            io::stdout().execute(LeaveAlternateScreen)?;
+                            crate::tui::release_screen(&mut io::stdout())?;
                             if let Err(e) = open_in_editor(&path) {
                                 state.set_flash(&format!("Editor failed: {}", e));
                             }

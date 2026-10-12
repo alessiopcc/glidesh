@@ -588,7 +588,7 @@ async fn handle_tree_key(
                 targets.iter().map(|&i| state.hosts[i].clone()).collect();
             // Tear down TUI, launch shell, restore.
             terminal::disable_raw_mode()?;
-            io::stdout().execute(LeaveAlternateScreen)?;
+            crate::tui::release_screen(&mut io::stdout())?;
 
             let result = if hosts.len() == 1 {
                 open_single_shell(pool, &hosts[0]).await
@@ -645,7 +645,7 @@ async fn run_plan(
     };
 
     terminal::disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
+    crate::tui::release_screen(&mut io::stdout())?;
 
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("run")
