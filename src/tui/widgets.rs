@@ -1,11 +1,11 @@
+use crate::tui::scroll;
 use crate::tui::state::{FocusPanel, NodeStatus, TuiState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, LineGauge, List, ListItem, Paragraph, Row, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Table,
+    Block, BorderType, Borders, Clear, LineGauge, List, ListItem, Paragraph, Row, Table,
 };
 use std::time::Duration;
 
@@ -118,7 +118,17 @@ fn render_header(frame: &mut Frame, area: Rect, state: &TuiState) {
     frame.render_widget(gauge, area);
 }
 
-fn render_node_table(frame: &mut Frame, area: Rect, state: &TuiState) {
+fn render_node_table(frame: &mut Frame, area: Rect, state: &mut TuiState) {
+    // Two borders and the header row.
+    let visible = area.height.saturating_sub(3) as usize;
+    state.node_offset = scroll::follow(
+        state.node_offset,
+        state.selected_node,
+        state.nodes.len(),
+        visible,
+    );
+    let first = state.node_offset;
+
     let is_focused = state.focus == FocusPanel::Nodes;
     let border_color = if is_focused {
         frame_color(state)
@@ -140,6 +150,8 @@ fn render_node_table(frame: &mut Frame, area: Rect, state: &TuiState) {
         .nodes
         .iter()
         .enumerate()
+        .skip(first)
+        .take(visible)
         .map(|(i, node)| {
             let icon = status_icon(&node.status, state.spinner_tick);
             let icon_color = match node.status {
@@ -255,6 +267,7 @@ fn render_node_table(frame: &mut Frame, area: Rect, state: &TuiState) {
     );
 
     frame.render_widget(table, area);
+    scroll::render_scrollbar(frame, area, state.nodes.len(), visible, first);
 }
 
 /// Split a line into chunks of at most `width` characters on char boundaries.
@@ -380,22 +393,7 @@ fn render_log_panel(frame: &mut Frame, area: Rect, state: &mut TuiState) {
 
     frame.render_widget(list, area);
 
-    if total_lines > visible_height {
-        let scrollbar_area = Rect {
-            x: area.x + area.width - 1,
-            y: area.y + 1,
-            width: 1,
-            height: area.height.saturating_sub(2),
-        };
-        let mut scrollbar_state =
-            ScrollbarState::new(total_lines.saturating_sub(visible_height)).position(scroll);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .track_symbol(Some("░"))
-            .thumb_symbol("█");
-        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
-    }
+    scroll::render_scrollbar(frame, area, total_lines, visible_height, scroll);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
@@ -500,6 +498,29 @@ fn elapsed_str(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn the_node_table_scrolls_to_the_selected_node() {
+        let hosts: Vec<(String, String, String)> = (0..30)
+            .map(|i| {
+                (
+                    format!("host-{i:02}"),
+                    "web".to_string(),
+                    "deploy".to_string(),
+                )
+            })
+            .collect();
+        let mut state = TuiState::new(&hosts, Vec::new(), false);
+        state.prev_node();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(f, &mut state)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let shown: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(shown.contains("host-29"), "{shown}");
+        assert!(!shown.contains("host-00"), "{shown}");
+    }
 
     fn fg(line: &str) -> Option<Color> {
         line_style(line).fg

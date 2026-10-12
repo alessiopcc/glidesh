@@ -64,6 +64,8 @@ pub struct TuiState {
     pub nodes: Vec<NodeState>,
     pub node_index: HashMap<String, usize>,
     pub selected_node: usize,
+    /// First node row on screen, kept by the renderer so `selected_node` stays visible.
+    pub node_offset: usize,
     pub log_scroll: usize,
     pub completed: usize,
     pub total: usize,
@@ -124,6 +126,7 @@ impl TuiState {
             nodes,
             node_index,
             selected_node: 0,
+            node_offset: 0,
             log_scroll: 0,
             completed: 0,
             total: hosts.len(),

@@ -1,5 +1,6 @@
 pub mod console;
 pub mod logs_explorer;
+pub mod scroll;
 pub mod shell_tui;
 pub mod state;
 pub mod tunnel_store;
