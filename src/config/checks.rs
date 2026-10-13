@@ -145,18 +145,10 @@ pub fn literal_reference_warnings(
                     continue;
                 };
                 let shown = shown_source(&src, &resolved, &file);
-                let bindings: Vec<&str> = std::str::from_utf8(&content)
-                    .map(|text| {
-                        tokens(text)
-                            .into_iter()
-                            .filter_map(|(_, token)| match token {
-                                Token::For { binding, .. } => Some(binding),
-                                _ => None,
-                            })
-                            .collect()
-                    })
+                let loops = std::str::from_utf8(&content)
+                    .map(loop_reads)
                     .unwrap_or_default();
-                if !bindings.is_empty() {
+                if loops.any {
                     warnings.push(format!(
                         "step '{}': {} contains a ${{for}} loop but is uploaded as-is, because \
                          `template` is not set; add `template #true` to expand it",
@@ -176,7 +168,7 @@ pub fn literal_reference_warnings(
                 }
                 let typos: Vec<String> = defined_references(&content, |name| !is_defined(name))
                     .iter()
-                    .filter(|name| bindings.iter().all(|b| bound_field(name, b).is_none()))
+                    .filter(|name| !loops.bound_only.contains(name.as_str()))
                     .filter_map(|name| match closest(name, known.iter().copied()) {
                         Some(meant) => Some(format!("${{{name}}} (did you mean ${{{meant}}}?)")),
                         None => glidesh_style(name).then(|| format!("${{{name}}}")),
@@ -195,6 +187,42 @@ pub fn literal_reference_warnings(
         }
     }
     warnings
+}
+
+/// What a file's `${for}` loops read, for a file that is not a template.
+#[derive(Default)]
+struct LoopReads<'a> {
+    /// The file has a `${for}`.
+    any: bool,
+    /// `${binding.field}` names read only inside a loop over `binding`: a template would
+    /// fill them, so they are no mistyped variable. One also read outside is.
+    bound_only: std::collections::HashSet<&'a str>,
+}
+
+fn loop_reads(text: &str) -> LoopReads<'_> {
+    let mut reads = LoopReads::default();
+    let mut unbound = std::collections::HashSet::new();
+    let mut open: Vec<&str> = Vec::new();
+    for (_, token) in tokens(text) {
+        match token {
+            Token::For { binding, .. } => {
+                reads.any = true;
+                open.push(binding);
+            }
+            Token::EndFor => {
+                open.pop();
+            }
+            Token::Var(name) if open.iter().any(|b| bound_field(name, b).is_some()) => {
+                reads.bound_only.insert(name);
+            }
+            Token::Var(name) => {
+                unbound.insert(name);
+            }
+            _ => {}
+        }
+    }
+    reads.bound_only.retain(|name| !unbound.contains(name));
+    reads
 }
 
 /// Whether `name` is written as glidesh names are and a shell's are not: lowercase, with a
@@ -844,6 +872,22 @@ e ${HOME}
         );
         assert!(!w.concat().contains("x.name"), "{w:?}");
         assert!(!w.concat().contains("HOME"), "{w:?}");
+    }
+
+    #[test]
+    fn a_loop_field_read_outside_its_loop_still_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plain.conf"),
+            "${for x in xs}${x.name}${endfor}${x.naem}
+",
+        )
+        .unwrap();
+        let p = plan(r#"step "plain" { file "/tmp/plain.conf" src="plain.conf" }"#);
+        let w = warnings_for(&p, dir.path(), &[]);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[1].contains("contains undefined ${x.naem};"), "{}", w[1]);
+        assert!(!w[1].contains("x.name}"), "{}", w[1]);
     }
 
     #[test]
