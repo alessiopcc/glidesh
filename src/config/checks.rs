@@ -1,13 +1,14 @@
 //! Checks `glidesh validate` runs on a resolved plan without contacting any host.
 
 use crate::config::plan::{is_error_var, is_item_var};
+use crate::config::prompts::closest;
 use crate::config::template::interpolate;
 use crate::config::template::{
     Token, bound_field, defined_references, literal_hint, structure_error, tokens,
 };
 use crate::config::types::{LoopSource, ParamValue, Plan, TaskDef};
 use crate::modules::file_tree;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// A task's local `file` source, resolved as a run resolves it, or `None` for a task with
@@ -111,13 +112,24 @@ pub fn file_option_problems(plan: &Plan) -> Vec<String> {
     problems
 }
 
-/// Warnings for `file` uploads without `template #true` whose content contains `${name}`
-/// references that `is_defined` accepts — they would ship verbatim.
+/// Warnings for `file` uploads without `template #true` whose content holds what only a
+/// template expands, and so would ship verbatim: a `${for}` loop, a name `is_defined` accepts
+/// or the plan registers, or an undefined name that is likely mistyped — close to one of
+/// `known`, or written as only glidesh writes names ([`glidesh_style`]). Any other undefined
+/// name is left alone: a shell script's `${HOME}` is no glidesh variable.
 pub fn literal_reference_warnings(
     plan: &Plan,
     plan_dir: &Path,
     is_defined: impl Fn(&str) -> bool,
+    known: &[&str],
 ) -> Vec<String> {
+    let registered = registered(plan);
+    let is_defined = |name: &str| is_defined(name) || registered.contains(name);
+    let known: Vec<&str> = known
+        .iter()
+        .copied()
+        .chain(registered.iter().copied())
+        .collect();
     let mut warnings = Vec::new();
     for step in plan.steps() {
         for task in step.all_tasks() {
@@ -132,23 +144,70 @@ pub fn literal_reference_warnings(
                 let Ok(content) = std::fs::read(&file) else {
                     continue;
                 };
-                let names = defined_references(&content, &is_defined);
-                if names.is_empty() {
-                    continue;
-                }
                 let shown = shown_source(&src, &resolved, &file);
-                let refs: Vec<String> = names.iter().map(|n| format!("${{{n}}}")).collect();
-                warnings.push(format!(
-                    "step '{}': {} contains {} but is uploaded as-is, because `template` is not \
-                     set; add `template #true` to substitute",
-                    step.name,
-                    shown,
-                    refs.join(", ")
-                ));
+                let bindings: Vec<&str> = std::str::from_utf8(&content)
+                    .map(|text| {
+                        tokens(text)
+                            .into_iter()
+                            .filter_map(|(_, token)| match token {
+                                Token::For { binding, .. } => Some(binding),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !bindings.is_empty() {
+                    warnings.push(format!(
+                        "step '{}': {} contains a ${{for}} loop but is uploaded as-is, because \
+                         `template` is not set; add `template #true` to expand it",
+                        step.name, shown
+                    ));
+                }
+                let names = defined_references(&content, is_defined);
+                if !names.is_empty() {
+                    let refs: Vec<String> = names.iter().map(|n| format!("${{{n}}}")).collect();
+                    warnings.push(format!(
+                        "step '{}': {} contains {} but is uploaded as-is, because `template` is \
+                         not set; add `template #true` to substitute",
+                        step.name,
+                        shown,
+                        refs.join(", ")
+                    ));
+                }
+                let typos: Vec<String> = defined_references(&content, |name| !is_defined(name))
+                    .iter()
+                    .filter(|name| bindings.iter().all(|b| bound_field(name, b).is_none()))
+                    .filter_map(|name| match closest(name, known.iter().copied()) {
+                        Some(meant) => Some(format!("${{{name}}} (did you mean ${{{meant}}}?)")),
+                        None => glidesh_style(name).then(|| format!("${{{name}}}")),
+                    })
+                    .collect();
+                if !typos.is_empty() {
+                    warnings.push(format!(
+                        "step '{}': {} contains undefined {}; it is uploaded as-is, because \
+                         `template` is not set, so it ships literally",
+                        step.name,
+                        shown,
+                        typos.join(", ")
+                    ));
+                }
             }
         }
     }
     warnings
+}
+
+/// Whether `name` is written as glidesh names are and a shell's are not: lowercase, with a
+/// `-` or `.`, or a leading `@`. No shell variable name holds any of these; the shell forms
+/// that do — `${VAR-default}`, `${HOME:-/root}`, `${VAR-}`, `${1-x}`, `${@}` — have an
+/// uppercase name, a `:` or `/`, an empty default, a leading digit, or nothing after the
+/// `@`. A lowercase default such as `${foo-bar}` is the one shell form it still matches.
+fn glidesh_style(name: &str) -> bool {
+    let chars_ok = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-_.@".contains(c));
+    let marked = name.contains(['-', '.']) || (name.starts_with('@') && name.len() > 1);
+    chars_ok && marked && !name.ends_with('-') && !name.starts_with(|c: char| c.is_ascii_digit())
 }
 
 /// Tasks, the variables they cannot read, and why.
@@ -209,7 +268,7 @@ pub fn template_scope_problems(plan: &Plan, plan_dir: &Path) -> Vec<String> {
 #[derive(Debug, Default)]
 pub struct TemplateFindings {
     /// What fails the upload whatever the variables: a template `render` cannot read, a
-    /// loop over a list nothing defines.
+    /// loop over a list nothing defines, a field the list's items lack.
     pub problems: Vec<String>,
     /// `${name}` references nothing defines — unless an inventory `validate` was not
     /// given does.
@@ -218,6 +277,49 @@ pub struct TemplateFindings {
     pub partial: Vec<String>,
     /// `$${name}` whose `name` is defined: see [`old_escape_warning`].
     pub warnings: Vec<String>,
+}
+
+/// A list a template can loop over, as `validate` knows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum List {
+    /// Its items are not known here: a secrets-file list, or `@group.*` without an inventory.
+    Unknown,
+    /// The field names of each item.
+    Items(Vec<BTreeSet<String>>),
+}
+
+impl List {
+    pub fn of(items: &[HashMap<String, String>]) -> Self {
+        List::Items(
+            items
+                .iter()
+                .map(|item| item.keys().cloned().collect())
+                .collect(),
+        )
+    }
+
+    /// Why reading `field` of each item fails the render, or `None` when it does not. An
+    /// empty list renders nothing, so no field of it is ever read.
+    fn missing(&self, collection: &str, field: &str) -> Option<String> {
+        let List::Items(items) = self else {
+            return None;
+        };
+        let lacking = items.iter().filter(|item| !item.contains(field)).count();
+        if lacking == 0 {
+            return None;
+        }
+        if lacking < items.len() {
+            return Some(format!(
+                "{lacking} of the {} items of '{collection}' have no field '{field}'",
+                items.len()
+            ));
+        }
+        let fields: BTreeSet<&str> = items.iter().flatten().map(String::as_str).collect();
+        Some(format!(
+            "no item of '{collection}' has a field '{field}' (available: {})",
+            fields.into_iter().collect::<Vec<_>>().join(", ")
+        ))
+    }
 }
 
 /// Which of the hosts a plan may run on define a variable.
@@ -248,24 +350,29 @@ fn old_escape_warning(at: &str, name: &str) -> String {
 }
 
 /// Checks every local templated `file` source the way `render` will read it. The template
-/// must be readable, each `${for}` must loop over a list `is_list` accepts, and each
-/// `${name}` must be defined: `is_defined` (for every host), a name a task before this one
-/// registers, the binding of a `${for}` around it, or a host variable — `hosts` tells which
-/// hosts define it. Each name is reported once per file, at its first line.
+/// must be readable, each `${for}` must loop over a list `list` knows, each field read of
+/// a loop's item must be on every item `list` knows of, and each `${name}` must be defined:
+/// `is_defined` (for every host), a name a task before this one registers, the binding of a
+/// `${for}` around it, or a host variable — `hosts` tells which hosts define it. Each name
+/// is reported once per file, at its first line.
 pub fn template_reference_findings(
     plan: &Plan,
     plan_dir: &Path,
     is_defined: impl Fn(&str) -> bool,
     hosts: impl Fn(&str) -> Coverage,
-    is_list: impl Fn(&str) -> bool,
+    list: impl Fn(&str) -> Option<List>,
 ) -> TemplateFindings {
     let mut registered: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut findings = TemplateFindings::default();
     for step in plan.steps() {
-        let item = match &step.loop_source {
-            None => Item::NoLoop,
-            Some(LoopSource::Variable(list)) if is_list(list) => Item::Fields,
-            Some(_) => Item::Value,
+        let looped = match &step.loop_source {
+            Some(LoopSource::Variable(name)) => list(name).map(|items| (name.as_str(), items)),
+            _ => None,
+        };
+        let item = match (&step.loop_source, &looped) {
+            (None, _) => Item::NoLoop,
+            (_, Some((name, items))) => Item::Fields(name, items),
+            (Some(_), None) => Item::Value,
         };
         // `rescue` and `always` run after the loop; `template_scope_problems` reports it.
         let blocks = [
@@ -320,7 +427,7 @@ pub fn template_reference_findings(
                             &|line| at(&shown, line),
                             &defined,
                             &hosts,
-                            &is_list,
+                            &list,
                             item,
                             &mut findings,
                         );
@@ -336,14 +443,14 @@ pub fn template_reference_findings(
 }
 
 /// What `${@item…}` a task's template can read: a step's own tasks get the loop's item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Item {
+#[derive(Debug, Clone, Copy)]
+enum Item<'a> {
     /// The step has no `loop=`.
     NoLoop,
     /// A loop over lines or literal items: `${@item}`.
     Value,
-    /// A loop over a list variable: `${@item.<field>}`.
-    Fields,
+    /// A loop over a list variable — its name and items: `${@item.<field>}`.
+    Fields(&'a str, &'a List),
     /// A `rescue` or `always` task, checked by [`template_scope_problems`].
     Elsewhere,
 }
@@ -355,10 +462,10 @@ fn item_problem(name: &str, item: Item) -> Option<&'static str> {
         Item::Elsewhere => None,
         Item::NoLoop => Some("the step has no `loop=`"),
         Item::Value if fields => Some("the step loops over lines or items, read as ${@item}"),
-        Item::Fields if !fields => {
+        Item::Fields(..) if !fields => {
             Some("the step loops over a list, whose fields are read as ${@item.<field>}")
         }
-        Item::Value | Item::Fields => None,
+        Item::Value | Item::Fields(..) => None,
     }
 }
 
@@ -367,7 +474,7 @@ fn check_template(
     at: &dyn Fn(usize) -> String,
     defined: &dyn Fn(&str) -> bool,
     hosts: &dyn Fn(&str) -> Coverage,
-    is_list: &dyn Fn(&str) -> bool,
+    list: &dyn Fn(&str) -> Option<List>,
     item: Item,
     findings: &mut TemplateFindings,
 ) {
@@ -376,9 +483,10 @@ fn check_template(
         return;
     }
     let mut seen_names = std::collections::HashSet::new();
+    let mut seen_fields = std::collections::HashSet::new();
     let mut seen_lists = std::collections::HashSet::new();
     let mut seen_escapes = std::collections::HashSet::new();
-    let mut bindings: Vec<&str> = Vec::new();
+    let mut bindings: Vec<(&str, &str, Option<List>)> = Vec::new();
     for (line, token) in tokens(text) {
         match token {
             Token::For {
@@ -386,33 +494,57 @@ fn check_template(
                 collection,
                 ..
             } => {
-                if !is_list(collection) && seen_lists.insert(collection) {
+                let items = list(collection);
+                if items.is_none() && seen_lists.insert(collection) {
                     findings.problems.push(format!(
                         "{}: loops over '{}', which is not a defined list",
                         at(line),
                         collection
                     ));
                 }
-                bindings.push(binding);
+                bindings.push((binding, collection, items));
             }
             Token::EndFor => {
                 bindings.pop();
             }
             Token::Var(name) => {
+                // The innermost binding wins, as in `render`.
                 let bound = bindings
                     .iter()
-                    .any(|binding| bound_field(name, binding).is_some());
-                if bound || !seen_names.insert(name) {
+                    .rev()
+                    .find_map(|(binding, collection, items)| {
+                        bound_field(name, binding).map(|field| (field, *collection, items))
+                    });
+                if let Some((field, collection, items)) = bound {
+                    let why = items
+                        .as_ref()
+                        .and_then(|items| items.missing(collection, field));
+                    if let Some(why) = why.filter(|_| seen_fields.insert((name, collection))) {
+                        findings
+                            .problems
+                            .push(format!("{}: ${{{}}}: {}", at(line), name, why));
+                    }
+                    continue;
+                }
+                if !seen_names.insert(name) {
                     continue;
                 }
                 if name == "@item" || name.starts_with("@item.") {
-                    if let Some(why) = item_problem(name, item) {
-                        findings.problems.push(format!(
-                            "{}: ${{{}}} is not defined here: {}",
-                            at(line),
-                            name,
-                            why
-                        ));
+                    let why = item_problem(name, item)
+                        .map(|why| format!(" is not defined here: {why}"))
+                        .or_else(|| {
+                            let field = name.strip_prefix("@item.")?;
+                            let Item::Fields(collection, items) = item else {
+                                return None;
+                            };
+                            items
+                                .missing(collection, field)
+                                .map(|why| format!(": {why}"))
+                        });
+                    if let Some(why) = why {
+                        findings
+                            .problems
+                            .push(format!("{}: ${{{}}}{}", at(line), name, why));
                     }
                     continue;
                 }
@@ -445,7 +577,7 @@ fn check_template(
             Token::Escaped(name) => {
                 let bound = bindings
                     .iter()
-                    .any(|binding| bound_field(name, binding).is_some());
+                    .any(|(binding, ..)| bound_field(name, binding).is_some());
                 if (bound || defined(name) || hosts(name) != Coverage::None)
                     && seen_escapes.insert(name)
                 {
@@ -660,7 +792,92 @@ mod tests {
     }
 
     fn warnings_for(p: &Plan, dir: &Path, defined: &[&str]) -> Vec<String> {
-        literal_reference_warnings(p, dir, |n| defined.contains(&n))
+        literal_reference_warnings(p, dir, |n| defined.contains(&n), defined)
+    }
+
+    #[test]
+    fn an_untemplated_file_with_a_mistyped_reference_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("app.env"),
+            "DIR=${some-var}\nHOST=${@host.nme}\nHOME=${HOME}\nX=${elsewhere}\n",
+        )
+        .unwrap();
+        let p = plan(r#"step "Env" { file "/etc/app.env" src="app.env" }"#);
+        let w = warnings_for(&p, dir.path(), &["some-vars", "@host.name"]);
+        assert_eq!(
+            w,
+            [
+                "step 'Env': app.env contains undefined ${@host.nme} (did you mean \
+              ${@host.name}?), ${some-var} (did you mean ${some-vars}?); it is uploaded \
+              as-is, because `template` is not set, so it ships literally"
+            ]
+        );
+    }
+
+    /// A defined name, a misspelled glidesh-style name, a mistyped built-in and a loop each
+    /// warn; a shell variable and the loop's own field do not.
+    #[test]
+    fn an_untemplated_file_with_template_syntax_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plain.conf"),
+            "a ${known}
+b ${knwon-typo}
+c ${@host.nme}
+             d ${for x in @group.g}${x.name}${endfor}
+e ${HOME}
+",
+        )
+        .unwrap();
+        let p = plan(r#"step "plain" { file "/tmp/plain.conf" src="plain.conf" }"#);
+        let w = warnings_for(&p, dir.path(), &["known", "@host.name"]);
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("contains a ${for} loop but"), "{}", w[0]);
+        assert!(w[1].contains("contains ${known} but"), "{}", w[1]);
+        assert!(
+            w[2].contains(
+                "contains undefined ${@host.nme} (did you mean ${@host.name}?), ${knwon-typo};"
+            ),
+            "{}",
+            w[2]
+        );
+        assert!(!w.concat().contains("x.name"), "{w:?}");
+        assert!(!w.concat().contains("HOME"), "{w:?}");
+    }
+
+    #[test]
+    fn only_names_no_shell_writes_are_glidesh_style() {
+        for name in ["knwon-typo", "app.dir", "@host.nme", "db_host-2"] {
+            assert!(glidesh_style(name), "{name}");
+        }
+        for name in [
+            "HOME",
+            "home",
+            "VAR-default",
+            "HOME:-/root",
+            "var-",
+            "@",
+            "1-x",
+            "x:-y",
+        ] {
+            assert!(!glidesh_style(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_registered_name_in_an_untemplated_file_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.env"), "V=${version}\n").unwrap();
+        let p = plan(
+            r#"step "Env" {
+                shell "cat VERSION" register="version"
+                file "/etc/app.env" src="app.env"
+            }"#,
+        );
+        let w = warnings_for(&p, dir.path(), &[]);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("contains ${version} but"), "{}", w[0]);
     }
 
     #[test]
@@ -788,8 +1005,98 @@ mod tests {
                 "tier" => Coverage::Partial(vec!["db-1".to_string(), "db-2".to_string()]),
                 _ => Coverage::None,
             },
-            |list| ["api-keys", "hosts", "@group.web"].contains(&list),
+            list_of,
         )
+    }
+
+    /// `@group.db`, `vms` and `empty` have known items; `vms`' second has no `port`.
+    fn list_of(name: &str) -> Option<List> {
+        let items = |items: &[&[&str]]| {
+            List::Items(
+                items
+                    .iter()
+                    .map(|fields| fields.iter().map(|f| f.to_string()).collect())
+                    .collect(),
+            )
+        };
+        match name {
+            "api-keys" | "hosts" | "@group.web" => Some(List::Unknown),
+            "@group.db" => {
+                let host: &[&str] = &["name", "address", "user", "port"];
+                Some(items(&[host, host]))
+            }
+            "vms" => Some(items(&[&["name", "port"], &["name"]])),
+            "empty" => Some(items(&[])),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_field_no_item_has_is_a_problem() {
+        let found = template_findings(
+            "${for a in @group.db}\n${a.address} ${a.bogus} ${a.bogus}\n${endfor}",
+            TEMPLATED,
+        );
+        assert_eq!(
+            found.problems,
+            [
+                "step 'Deploy': file '/etc/app.conf': template app.conf, line 2: ${a.bogus}: no \
+              item of '@group.db' has a field 'bogus' (available: address, name, port, user)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_field_only_some_items_have_is_a_problem() {
+        let found = template_findings("${for v in vms}${v.port}${endfor}", TEMPLATED);
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0].contains("${v.port}: 1 of the 2 items of 'vms' have no field 'port'"),
+            "{}",
+            found.problems[0]
+        );
+    }
+
+    /// Unknown items may have any field; an empty list renders no item at all.
+    #[test]
+    fn fields_of_unknown_or_empty_lists_are_not_checked() {
+        let found = template_findings(
+            "${for k in api-keys}${k.bogus}${endfor}${for e in empty}${e.bogus}${endfor}",
+            TEMPLATED,
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+    }
+
+    #[test]
+    fn a_field_is_read_from_the_innermost_binding() {
+        let found = template_findings(
+            "${for a in vms}${for a in @group.db}${a.address}${endfor}${a.address}${endfor}",
+            TEMPLATED,
+        );
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0].contains("no item of 'vms' has a field 'address'"),
+            "{}",
+            found.problems[0]
+        );
+    }
+
+    #[test]
+    fn a_loop_items_field_is_checked_against_the_list() {
+        let found = template_findings(
+            "${@item.name} ${@item.bogus}",
+            r#"step "Deploy" loop="${vms}" {
+                file "/etc/app.conf" src="app.conf" template=#true
+            }"#,
+        );
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0].contains(
+                "${@item.bogus}: no item of 'vms' has a field 'bogus' (available: name, port)"
+            ),
+            "{}",
+            found.problems[0]
+        );
     }
 
     const TEMPLATED: &str =
@@ -1047,8 +1354,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("app.conf"), b"\xff\xfe").unwrap();
         let p = plan(TEMPLATED);
-        let found =
-            template_reference_findings(&p, dir.path(), |_| true, |_| Coverage::All, |_| true);
+        let found = template_reference_findings(
+            &p,
+            dir.path(),
+            |_| true,
+            |_| Coverage::All,
+            |_| Some(List::Unknown),
+        );
         assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
         assert!(
             found.problems[0].contains("is not valid UTF-8"),
@@ -1085,8 +1397,13 @@ mod tests {
         std::fs::create_dir_all(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let p = plan(r#"step "s" { file "/etc/app/" src="conf" recurse=#true template=#true }"#);
-        let found =
-            template_reference_findings(&p, dir.path(), |_| true, |_| Coverage::All, |_| true);
+        let found = template_reference_findings(
+            &p,
+            dir.path(),
+            |_| true,
+            |_| Coverage::All,
+            |_| Some(List::Unknown),
+        );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
         assert!(
@@ -1166,7 +1483,7 @@ mod tests {
             dir.path(),
             |n| n == "port",
             |_| Coverage::All,
-            |_| true,
+            |_| Some(List::Unknown),
         );
         assert!(found.problems.is_empty(), "{:?}", found.problems);
         assert!(found.undefined.is_empty(), "{:?}", found.undefined);
@@ -1199,7 +1516,7 @@ mod tests {
                 dir.path(),
                 |n| n == "port",
                 |_| Coverage::All,
-                |_| true,
+                |_| Some(List::Unknown),
             );
             assert!(found.problems.is_empty(), "{pattern}: {:?}", found.problems);
             assert!(

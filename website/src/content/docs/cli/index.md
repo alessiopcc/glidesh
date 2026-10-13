@@ -291,11 +291,13 @@ glidesh validate [OPTIONS]
 |------|-------|-------------|
 | `--plan <PATH>` | `-p` | Validate a plan file |
 | `--inventory <PATH>` | `-i` | Validate an inventory file; without `-p`, also the plans it names with `plan=` |
+| `--strict` | — | Fail on warnings too: exit non-zero when any check warns |
 
 ```bash
 glidesh validate -p plan.kdl
 glidesh validate -i inventory.kdl
 glidesh validate -p plan.kdl -i inventory.kdl
+glidesh validate -i inventory.kdl --strict   # in CI: a warning fails the job
 ```
 
 A plan is loaded exactly as `run` loads it, then checked for everything that can be known
@@ -329,12 +331,17 @@ without contacting a host:
   `${@item.<field>}` only as the step's [`loop=`](/advanced/loops-register/) gives it), an `@inventory.*` value the
   inventory has, the binding of a `${for}` around it — or an inventory variable of every host
   the plan runs on. Every `${for}` must be well formed and loop over a list the plan or the
-  secrets file defines, or a group the inventory has. A problem names the template, the line
-  and the name. Without `-i`, a name the inventory might set is a warning instead; with `-p`,
+  secrets file defines, or a group the inventory has. A field of a loop's item — `${h.<field>}`
+  inside `${for h in …}`, or `${@item.<field>}` — must be on every item, as the render fails
+  on the first item without it. That is checked when the items are known: a group's hosts
+  (`name`, `address`, `user`, `port`) with `-i`, or a list the plan defines; a secrets-file
+  list's fields are not. A problem names the template, the line and the name. Without `-i`, a name the inventory might set is a warning instead; with `-p`,
   so is one only some hosts set, as the run may not target the others. A literal `${…}` is
   written [`$${…}`](/concepts/variables/#interpolation).
 
 Every problem is listed, not only the first, and the command exits non-zero if there is any.
+Warnings are listed too but do not fail validation, unless `--strict` is given: then any
+warning fails it as well, so a CI job that checks only the exit code catches them.
 
 With `-i` alone, each plan the inventory names with [`plan=`](#inventory-linked-plans) is
 checked as well: once per file, however many groups and hosts name it, resolved from the
@@ -344,7 +351,14 @@ with `-p` does not use them.
 
 It also **warns**, without failing, when a `file` upload without `template #true` contains
 `${name}` for a variable a run would define — a plan variable, any host's inventory variable
-when `-i` is given, a secrets-file name, or a built-in such as `${@host.name}`. See
+when `-i` is given, a secrets-file name, a registered name, or a built-in such as
+`${@host.name}`; about a `${for}` loop, which only a template expands; and about an
+undefined `${name}` that is most likely a mistyped variable — one close to a defined name
+(`${some-var}` when `some-vars` is defined, with a "did you mean"), or one written as only
+glidesh writes names: lowercase, with a `-` or `.`, or starting with `@` (`${knwon-typo}`,
+`${@host.nme}`). Any other undefined name is left alone, as it may be the shell's: `${HOME}`,
+`${VAR-default}`, `${HOME:-/root}`. A lowercase shell default such as `${foo-bar}` does warn.
+See
 [Forgetting `template`](/modules/file/#forgetting-template). It warns, too, about a
 `$${name}` — in a template, a task's resource or parameters, or an `until=` command — whose
 `name` is a defined variable: it writes a literal `${name}` now, where it used to write `$`
