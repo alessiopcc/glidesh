@@ -23,6 +23,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Leaves the alternate screen to hand the terminal to another program — a shell, an
+/// editor, `glidesh run` — with the cursor shown: ratatui hides it on every frame, and
+/// leaving the alternate screen does not bring it back.
+pub fn release_screen(out: &mut impl io::Write) -> io::Result<()> {
+    crossterm::execute!(out, LeaveAlternateScreen, crossterm::cursor::Show)
+}
+
 /// Check if we're in a TTY (interactive terminal).
 pub fn is_tty() -> bool {
     crossterm::tty::IsTty::is_tty(&io::stdout())
@@ -138,7 +145,7 @@ pub async fn run_tui(
         // Handle shell request outside the mutex scope
         if let Some(info) = shell_request {
             terminal::disable_raw_mode()?;
-            io::stdout().execute(LeaveAlternateScreen)?;
+            release_screen(&mut io::stdout())?;
 
             let shell_result = open_shell_for_host(&info, &ssh_key, host_key_policy).await;
 
@@ -202,4 +209,19 @@ async fn open_shell_for_host(
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_screen;
+
+    #[test]
+    fn releasing_the_screen_shows_the_cursor_after_leaving() {
+        let mut out = Vec::new();
+        release_screen(&mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let leave = out.find("[?1049l").expect(&out);
+        let show = out.find("[?25h").expect(&out);
+        assert!(leave < show, "{out:?}");
+    }
 }
