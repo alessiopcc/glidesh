@@ -114,9 +114,10 @@ pub fn file_option_problems(plan: &Plan) -> Vec<String> {
 
 /// Warnings for `file` uploads without `template #true` whose content holds what only a
 /// template expands, and so would ship verbatim: a `${for}` loop, a name `is_defined` accepts
-/// or the plan registers, or an undefined name that is likely mistyped — close to one of
-/// `known`, or written as only glidesh writes names ([`glidesh_style`]). Any other undefined
-/// name is left alone: a shell script's `${HOME}` is no glidesh variable.
+/// or the plan registers, or an undefined name written as only glidesh writes names
+/// ([`glidesh_style`]), which is likely mistyped, with the closest of `known` suggested. Any
+/// other undefined name is left alone, even one close to a defined name: a shell script's
+/// `${HOME}` is no glidesh variable, whatever `HOMES` the plan defines.
 pub fn literal_reference_warnings(
     plan: &Plan,
     plan_dir: &Path,
@@ -168,10 +169,10 @@ pub fn literal_reference_warnings(
                 }
                 let typos: Vec<String> = defined_references(&content, |name| !is_defined(name))
                     .iter()
-                    .filter(|name| !loops.bound_only.contains(name.as_str()))
-                    .filter_map(|name| match closest(name, known.iter().copied()) {
-                        Some(meant) => Some(format!("${{{name}}} (did you mean ${{{meant}}}?)")),
-                        None => glidesh_style(name).then(|| format!("${{{name}}}")),
+                    .filter(|name| !loops.bound_only.contains(name.as_str()) && glidesh_style(name))
+                    .map(|name| match closest(name, known.iter().copied()) {
+                        Some(meant) => format!("${{{name}}} (did you mean ${{{meant}}}?)"),
+                        None => format!("${{{name}}}"),
                     })
                     .collect();
                 if !typos.is_empty() {
@@ -872,6 +873,20 @@ e ${HOME}
         );
         assert!(!w.concat().contains("x.name"), "{w:?}");
         assert!(!w.concat().contains("HOME"), "{w:?}");
+    }
+
+    #[test]
+    fn a_shell_variable_close_to_a_defined_name_does_not_warn() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("run.sh"),
+            "cd ${HOME}
+echo ${VAR-default}
+",
+        )
+        .unwrap();
+        let p = plan(r#"step "s" { file "/run.sh" src="run.sh" }"#);
+        assert!(warnings_for(&p, dir.path(), &["HOMES", "VAR-defaults"]).is_empty());
     }
 
     #[test]

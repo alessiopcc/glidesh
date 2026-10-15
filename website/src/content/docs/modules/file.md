@@ -84,9 +84,9 @@ Only names glidesh defines count, so shell and environment variables do not trig
 file is still uploaded unchanged: it is a warning, not an error, because the content may be
 intentional. [`glidesh validate`](/cli/#glidesh-validate) reports the same thing before any
 run, for directory uploads too. It also warns about a `${for}` loop in such a file, and
-about an undefined name that is likely a mistyped variable: one close to a defined name, or
-one written as only glidesh writes names (lowercase with a `-` or `.`, or starting with `@`),
-since a typo would ship literally too.
+about an undefined name that is likely a mistyped variable: one written as only glidesh
+writes names (lowercase with a `-` or `.`, or starting with `@`), since a typo would ship
+literally too.
 
 ## Recursive Directory Copy
 

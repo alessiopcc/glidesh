@@ -353,11 +353,12 @@ It also **warns**, without failing, when a `file` upload without `template #true
 `${name}` for a variable a run would define — a plan variable, any host's inventory variable
 when `-i` is given, a secrets-file name, a registered name, or a built-in such as
 `${@host.name}`; about a `${for}` loop, which only a template expands; and about an
-undefined `${name}` that is most likely a mistyped variable — one close to a defined name
-(`${some-var}` when `some-vars` is defined, with a "did you mean"), or one written as only
-glidesh writes names: lowercase, with a `-` or `.`, or starting with `@` (`${knwon-typo}`,
-`${@host.nme}`). Any other undefined name is left alone, as it may be the shell's: `${HOME}`,
-`${VAR-default}`, `${HOME:-/root}`. A lowercase shell default such as `${foo-bar}` does warn.
+undefined `${name}` that is most likely a mistyped variable — one written as only glidesh
+writes names: lowercase, with a `-` or `.`, or starting with `@` (`${knwon-typo}`,
+`${@host.nme}`), with a "did you mean" when it is close to a defined name (`${some-var}` when
+`some-vars` is defined). Any other undefined name is left alone, as it may be the shell's,
+even when it is close to a defined one: `${HOME}`, `${VAR-default}`, `${HOME:-/root}`. A
+lowercase shell default such as `${foo-bar}` does warn.
 See
 [Forgetting `template`](/modules/file/#forgetting-template). It warns, too, about a
 `$${name}` — in a template, a task's resource or parameters, or an `until=` command — whose
