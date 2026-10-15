@@ -84,7 +84,8 @@ Non-interactive use (scripts, CI, agents):
   - Encrypted secrets need a passphrase: set GLIDESH_SECRET_PASS or GLIDESH_SECRET_PASS_FILE.
   - A plan's vars-prompt is answered with --var name=value; without a terminal, a prompt
     with no --var and no default fails the run before it connects, naming the fix.
-  - `run` exits non-zero when any host failed; `validate` when any check failed.
+  - `run` exits non-zero when any host failed; `validate` when any check failed, and with
+    --strict when any check warned (an untemplated file with ${…} in it, for instance).
 
 `glidesh run --help` documents plan syntax, variables, conditions and every module's
 parameters. Each command's --help lists its flags.
@@ -161,7 +162,8 @@ VARIABLES
             ${@inventory.<host>.address|user|port|vars.<name>}
             ${@error.msg} ${@error.task} (in rescue and always blocks only)
   In `file` templates: ${for h in @group.web}${h.address}${endfor}, and loops over list
-  variables. An undefined variable fails the task; `validate` finds it in local templates.
+  variables. An undefined variable, or a field not on every item (${h.bogus}), fails the
+  task; `validate` finds both in local templates, the group fields with -i.
   $${NAME} writes a literal ${NAME} (a shell's ${HOME}, a unit's ${MAINPID}), in templates
   and parameters alike; it is no reference.
 

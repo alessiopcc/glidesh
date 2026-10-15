@@ -357,8 +357,8 @@ fn write_nodes<'a>(
 /// duplicates.
 ///
 /// Used to warn when a file uploaded without `template #true` would ship a reference
-/// literally. Only names glidesh defines count: a shell script's `${HOME}` is not a glidesh
-/// variable and must not be flagged. Works on bytes, since a plain upload may be binary.
+/// literally; `is_defined` decides which names count, so a shell script's `${HOME}` is not
+/// flagged as a glidesh variable. Works on bytes, since a plain upload may be binary.
 pub fn defined_references(content: &[u8], is_defined: impl Fn(&str) -> bool) -> Vec<String> {
     let mut found = std::collections::BTreeSet::new();
     let mut rest = content;
