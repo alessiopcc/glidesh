@@ -1,5 +1,6 @@
 //! Checks `glidesh validate` runs on a resolved plan without contacting any host.
 
+use crate::config::condition::{Condition, Outcome, Scope};
 use crate::config::plan::{is_error_var, is_item_var};
 use crate::config::prompts::closest;
 use crate::config::template::interpolate;
@@ -349,6 +350,38 @@ impl List {
             fields.into_iter().collect::<Vec<_>>().join(", ")
         ))
     }
+
+    /// The items a task guarded by `when` certainly runs for. Only the item's field names are
+    /// known here, so a guard that compares a field's value, or reads any other variable,
+    /// cannot be decided and leaves that item out.
+    fn guarded(&self, when: &Condition) -> List {
+        let List::Items(items) = self else {
+            return List::Unknown;
+        };
+        let others: std::collections::HashSet<String> = when
+            .variables()
+            .filter(|var| !var.starts_with("@item."))
+            .map(String::from)
+            .collect();
+        let collections = HashMap::new();
+        let runs = |item: &BTreeSet<String>| {
+            let vars: HashMap<String, String> = item
+                .iter()
+                .map(|field| (format!("@item.{field}"), String::new()))
+                .collect();
+            let unknown = others.iter().cloned().chain(vars.keys().cloned()).collect();
+            let scope = Scope {
+                vars: &vars,
+                collections: &collections,
+                unknown: &unknown,
+            };
+            !matches!(
+                when.eval(&scope),
+                Ok(Outcome::False | Outcome::Undetermined(_))
+            )
+        };
+        List::Items(items.iter().filter(|item| runs(item)).cloned().collect())
+    }
 }
 
 /// Which of the hosts a plan may run on define a variable.
@@ -413,6 +446,16 @@ pub fn template_reference_findings(
             .into_iter()
             .flat_map(|(tasks, item)| tasks.iter().map(move |task| (task, item)))
         {
+            // The executor evaluates a task's `when=` per item before rendering, so a guarded
+            // item's template never reads the fields it lacks.
+            let guarded = match (item, &task.when) {
+                (Item::Fields(name, items), Some(when)) => Some((name, items.guarded(when))),
+                _ => None,
+            };
+            let item = match &guarded {
+                Some((name, items)) => Item::Fields(name, items),
+                None => item,
+            };
             if matches!(task.args.get("template"), Some(ParamValue::Bool(true))) {
                 if let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) {
                     let at = |shown: &str, line: usize| {
@@ -537,6 +580,10 @@ fn check_template(
                 bindings.pop();
             }
             Token::Var(name) => {
+                // Inside a loop over an empty list nothing renders, so no field is read.
+                let unreachable = bindings.iter().any(
+                    |(.., items)| matches!(items, Some(List::Items(items)) if items.is_empty()),
+                );
                 // The innermost binding wins, as in `render`.
                 let bound = bindings
                     .iter()
@@ -547,12 +594,16 @@ fn check_template(
                 if let Some((field, collection, items)) = bound {
                     let why = items
                         .as_ref()
+                        .filter(|_| !unreachable)
                         .and_then(|items| items.missing(collection, field));
                     if let Some(why) = why.filter(|_| seen_fields.insert((name, collection))) {
                         findings
                             .problems
                             .push(format!("{}: ${{{}}}: {}", at(line), name, why));
                     }
+                    continue;
+                }
+                if unreachable && name.starts_with("@item.") {
                     continue;
                 }
                 if !seen_names.insert(name) {
@@ -1156,6 +1207,51 @@ echo ${VAR-default}
             "{}",
             found.problems[0]
         );
+    }
+
+    #[test]
+    fn a_field_inside_a_loop_over_an_empty_list_is_never_read() {
+        let found = template_findings(
+            "${for e in empty}${for v in vms}${v.port}${endfor}${@item.port}${endfor}             ${for v in vms}${v.name}${endfor}${@item.bogus}",
+            r#"step "Deploy" loop="${vms}" {
+                file "/etc/app.conf" src="app.conf" template=#true
+            }"#,
+        );
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0].contains("${@item.bogus}: no item of 'vms'"),
+            "{}",
+            found.problems[0]
+        );
+    }
+
+    /// The executor evaluates the guard per item before rendering, so the item without
+    /// `port` never reaches the template.
+    #[test]
+    fn a_when_guard_leaves_out_the_items_it_skips() {
+        let guarded = |when: &str| {
+            template_findings(
+                "${@item.port}",
+                &format!(
+                    r#"step "Deploy" loop="${{vms}}" {{
+                        file "/etc/app.conf" src="app.conf" template=#true when="{when}"
+                    }}"#
+                ),
+            )
+            .problems
+        };
+        assert!(guarded("defined ${@item.port}").is_empty());
+        assert!(guarded("defined ${env} && defined ${@item.port}").is_empty());
+        // Reading `port` in the guard itself fails the item without it, so the run does.
+        for when in ["defined ${@item.name}", "${@item.port} == 80"] {
+            let problems = guarded(when);
+            assert_eq!(problems.len(), 1, "{when}: {problems:?}");
+            assert!(
+                problems[0].contains("field 'port'"),
+                "{when}: {}",
+                problems[0]
+            );
+        }
     }
 
     const TEMPLATED: &str =

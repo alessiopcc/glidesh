@@ -335,7 +335,9 @@ without contacting a host:
   inside `${for h in …}`, or `${@item.<field>}` — must be on every item, as the render fails
   on the first item without it. That is checked when the items are known: a group's hosts
   (`name`, `address`, `user`, `port`) with `-i`, or a list the plan defines; a secrets-file
-  list's fields are not. A problem names the template, the line and the name. Without `-i`, a name the inventory might set is a warning instead; with `-p`,
+  list's fields are not. An item a task's `when="defined ${@item.<field>}"` skips is not
+  checked, nor is a loop inside a `${for}` over an empty list. A problem names the template,
+  the line and the name. Without `-i`, a name the inventory might set is a warning instead; with `-p`,
   so is one only some hosts set, as the run may not target the others. A literal `${…}` is
   written [`$${…}`](/concepts/variables/#interpolation).
 
