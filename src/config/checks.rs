@@ -9,6 +9,7 @@ use crate::config::template::{
 };
 use crate::config::types::{LoopSource, ParamValue, Plan, TaskDef};
 use crate::modules::file_tree;
+use crate::secrets::token::contains_secret_token;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -353,6 +354,73 @@ impl List {
     }
 }
 
+/// What a `when=` can read before a run. A list, or a name every host defines, is present
+/// with its value unknown. A registered name may be absent, as a skipped task leaves it
+/// undefined, and so may any other. An encrypted item value is decrypted only on the host.
+struct GuardScope {
+    vars: HashMap<String, String>,
+    collections: HashMap<String, Vec<HashMap<String, String>>>,
+    unknown: std::collections::HashSet<String>,
+}
+
+impl GuardScope {
+    fn new<'c>(
+        conditions: impl Iterator<Item = &'c Condition>,
+        defined: &dyn Fn(&str) -> bool,
+        is_list: &dyn Fn(&str) -> bool,
+    ) -> Self {
+        let mut scope = GuardScope {
+            vars: HashMap::new(),
+            collections: HashMap::new(),
+            unknown: std::collections::HashSet::new(),
+        };
+        for var in conditions.flat_map(Condition::variables) {
+            if is_list(var) {
+                scope.collections.insert(var.to_string(), Vec::new());
+                continue;
+            }
+            scope.unknown.insert(var.to_string());
+            if defined(var) || is_item_var(var) {
+                scope.vars.insert(var.to_string(), String::new());
+            }
+        }
+        scope
+    }
+
+    /// Whether `when` lets the task run, for `item` of a loop over a list.
+    fn reach(&self, when: Option<&Condition>, item: Option<&HashMap<String, String>>) -> Reach {
+        let Some(when) = when else {
+            return Reach::Sure;
+        };
+        let mut vars = self.vars.clone();
+        let mut unknown = self.unknown.clone();
+        if let Some(item) = item {
+            vars.retain(|var, _| !is_item_var(var));
+            unknown.retain(|var| !is_item_var(var));
+            for (field, value) in item {
+                let var = format!("@item.{field}");
+                if contains_secret_token(value) {
+                    unknown.insert(var.clone());
+                    vars.insert(var, String::new());
+                } else {
+                    vars.insert(var, value.clone());
+                }
+            }
+        }
+        let scope = Scope {
+            vars: &vars,
+            collections: &self.collections,
+            unknown: &unknown,
+        };
+        match when.eval(&scope) {
+            Ok(Outcome::False) => Reach::Never,
+            Ok(Outcome::Undetermined(_)) => Reach::Maybe,
+            // A guard that cannot be evaluated fails the task rather than skip it.
+            Ok(Outcome::True) | Err(_) => Reach::Sure,
+        }
+    }
+}
+
 /// The items of a step's `loop=` one of its tasks renders for. The executor evaluates the
 /// task's `when=` per item before rendering, so an item it skips never reaches the template.
 #[derive(Debug)]
@@ -360,57 +428,32 @@ struct Looped<'a> {
     name: &'a str,
     /// The items the task certainly renders for.
     runs: List,
-    /// The items its `when=` may skip or not, depending on a value only a host knows.
+    /// The items it may render for or not, depending on a value only a host knows.
     maybe: Vec<HashMap<String, String>>,
 }
 
 impl<'a> Looped<'a> {
-    /// Evaluates `when` against each item's own fields. Any other variable it reads is
-    /// defined when `defined` or `is_list` says so, and its value unknown.
+    /// `gate` is whether the step runs at all.
     fn new(
         name: &'a str,
         items: &List,
+        gate: Reach,
         when: Option<&Condition>,
-        defined: &dyn Fn(&str) -> bool,
-        is_list: &dyn Fn(&str) -> bool,
+        guards: &GuardScope,
     ) -> Self {
-        let (List::Items(items), Some(when)) = (items, when) else {
+        let List::Items(items) = items else {
             return Looped {
                 name,
-                runs: items.clone(),
+                runs: List::Unknown,
                 maybe: Vec::new(),
             };
         };
-        let mut vars = HashMap::new();
-        let mut collections = HashMap::new();
-        let mut unknown = std::collections::HashSet::new();
-        for var in when.variables().filter(|var| !is_item_var(var)) {
-            if is_list(var) {
-                collections.insert(var.to_string(), Vec::new());
-            } else {
-                unknown.insert(var.to_string());
-                if defined(var) {
-                    vars.insert(var.to_string(), String::new());
-                }
-            }
-        }
         let (mut runs, mut maybe) = (Vec::new(), Vec::new());
         for item in items {
-            let mut vars = vars.clone();
-            vars.extend(
-                item.iter()
-                    .map(|(field, value)| (format!("@item.{field}"), value.clone())),
-            );
-            let scope = Scope {
-                vars: &vars,
-                collections: &collections,
-                unknown: &unknown,
-            };
-            match when.eval(&scope) {
-                Ok(Outcome::False) => {}
-                Ok(Outcome::Undetermined(_)) => maybe.push(item.clone()),
-                // A guard that cannot be evaluated fails the task rather than skip it.
-                Ok(Outcome::True) | Err(_) => runs.push(item.clone()),
+            match gate.and(guards.reach(when, Some(item))) {
+                Reach::Sure => runs.push(item.clone()),
+                Reach::Maybe => maybe.push(item.clone()),
+                Reach::Never => {}
             }
         }
         Looped {
@@ -437,13 +480,23 @@ impl<'a> Looped<'a> {
     }
 }
 
-/// Whether a task renders its template: a `loop=` over no items, or none its `when=` lets
-/// through, never does.
+/// Whether a task renders its template: a `when=` that is false, or a `loop=` over no items
+/// it lets through, never does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reach {
     Sure,
     Maybe,
     Never,
+}
+
+impl Reach {
+    fn and(self, other: Reach) -> Reach {
+        match (self, other) {
+            (Reach::Never, _) | (_, Reach::Never) => Reach::Never,
+            (Reach::Maybe, _) | (_, Reach::Maybe) => Reach::Maybe,
+            (Reach::Sure, Reach::Sure) => Reach::Sure,
+        }
+    }
 }
 
 /// Which of the hosts a plan may run on define a variable.
@@ -512,16 +565,23 @@ pub fn template_reference_findings(
                         )
                     };
                     let defined = |name: &str| is_defined(name) || registered.contains(name);
-                    let looped = looped.as_ref().filter(|_| own).map(|(name, items)| {
-                        Looped::new(name, items, task.when.as_ref(), &defined, &|var| {
+                    let guards =
+                        GuardScope::new(step.when.iter().chain(&task.when), &is_defined, &|var| {
                             list(var).is_some()
-                        })
+                        });
+                    let gate = guards.reach(step.when.as_ref(), None);
+                    let looped = looped.as_ref().filter(|_| own).map(|(name, items)| {
+                        Looped::new(name, items, gate, task.when.as_ref(), &guards)
                     });
                     let item = match (&step.loop_source, &looped) {
                         _ if !own => Item::Elsewhere,
                         (None, _) => Item::NoLoop,
                         (_, Some(looped)) => Item::Fields(looped),
                         (Some(_), None) => Item::Value,
+                    };
+                    let reach = match &looped {
+                        Some(looped) => gate.and(looped.reach()),
+                        None => gate.and(guards.reach(task.when.as_ref(), None)),
                     };
                     let (files, unreadable) = uploaded_files(task, &resolved, &plan.vars);
                     if let Some(unreadable) = unreadable {
@@ -558,7 +618,7 @@ pub fn template_reference_findings(
                             &defined,
                             &hosts,
                             &list,
-                            item,
+                            Render { item, reach },
                             &mut findings,
                         );
                     }
@@ -585,6 +645,13 @@ enum Item<'a> {
     Elsewhere,
 }
 
+/// What a task's template reads `${@item…}` as, and whether the task renders it at all.
+#[derive(Debug, Clone, Copy)]
+struct Render<'a> {
+    item: Item<'a>,
+    reach: Reach,
+}
+
 /// Why `name`, an `@item` reference, is not what `item` provides, or `None` when it is.
 fn item_problem(name: &str, item: Item) -> Option<&'static str> {
     let fields = name.starts_with("@item.");
@@ -605,7 +672,7 @@ fn check_template(
     defined: &dyn Fn(&str) -> bool,
     hosts: &dyn Fn(&str) -> Coverage,
     list: &dyn Fn(&str) -> Option<List>,
-    item: Item,
+    Render { item, reach }: Render,
     findings: &mut TemplateFindings,
 ) {
     if let Some((line, message)) = structure_error(text) {
@@ -616,10 +683,6 @@ fn check_template(
     let mut seen_fields = std::collections::HashSet::new();
     let mut seen_lists = std::collections::HashSet::new();
     let mut seen_escapes = std::collections::HashSet::new();
-    let reach = match item {
-        Item::Fields(looped) => looped.reach(),
-        _ => Reach::Sure,
-    };
     let mut bindings: Vec<(&str, &str, Option<List>)> = Vec::new();
     for (line, token) in tokens(text) {
         match token {
@@ -662,9 +725,9 @@ fn check_template(
                     if let Some(why) = why.filter(|_| seen_fields.insert((name, collection))) {
                         let message = format!("{}: ${{{}}}: {}", at(line), name, why);
                         if reach == Reach::Maybe {
-                            findings.warnings.push(format!(
-                                "{message}, unless the task's `when=` skips every item of its loop"
-                            ));
+                            findings
+                                .warnings
+                                .push(format!("{message}, unless a `when=` skips the task"));
                         } else {
                             findings.problems.push(message);
                         }
@@ -1194,7 +1257,8 @@ echo ${VAR-default}
         )
     }
 
-    /// `@group.db`, `vms` and `empty` have known items; `vms`' second, `db`, has no `port`.
+    /// `@group.db`, `vms`, `flags` and `empty` have known items; `vms`' second, `db`, has no
+    /// `port`, and `flags`' first has an encrypted `enabled`.
     fn list_of(name: &str) -> Option<List> {
         let items = |items: &[&[&str]]| {
             List::Items(
@@ -1219,6 +1283,10 @@ echo ${VAR-default}
                 Some(items(&[host, host]))
             }
             "vms" => Some(items(&[&["name=web", "port=80"], &["name=db"]])),
+            "flags" => Some(items(&[
+                &["name=web", "enabled=secret:v1:AAAA"],
+                &["name=db", "enabled=no"],
+            ])),
             "empty" => Some(items(&[])),
             _ => None,
         }
@@ -1373,7 +1441,72 @@ echo ${VAR-default}
         let found = guarded("${for v in vms}${v.port}${endfor}", "${env} == prod");
         assert!(found.problems.is_empty(), "{:?}", found.problems);
         assert!(
-            found.warnings[0].contains("unless the task's `when=` skips every item of its loop"),
+            found.warnings[0].contains("unless a `when=` skips the task"),
+            "{}",
+            found.warnings[0]
+        );
+    }
+
+    /// A task whose `register=` is skipped leaves its name undefined, so a guard on it is
+    /// undecided, never false.
+    #[test]
+    fn a_guard_on_a_registered_name_is_undecided() {
+        let found = template_findings(
+            "${@item.bogus}",
+            r#"step "Probe" { shell "echo x" register="out" when="false" }
+            step "Deploy" loop="${vms}" {
+                file "/etc/app.conf" src="app.conf" template=#true when="undefined ${out}"
+            }"#,
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+        assert!(
+            found.warnings[0].contains("no item of 'vms' has a field 'bogus'"),
+            "{}",
+            found.warnings[0]
+        );
+    }
+
+    /// The host compares the decrypted value, not the token.
+    #[test]
+    fn a_guard_on_an_encrypted_value_is_undecided() {
+        let found = template_findings(
+            "${@item.port}",
+            r#"step "Deploy" loop="${flags}" {
+                file "/etc/app.conf" src="app.conf" template=#true when="${@item.enabled} == yes"
+            }"#,
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+        assert!(
+            found.warnings[0].contains("no item of 'flags' has a field 'port'"),
+            "{}",
+            found.warnings[0]
+        );
+    }
+
+    /// A task or step guard skips the render whether or not the step loops.
+    #[test]
+    fn a_guard_without_a_loop_decides_whether_the_template_renders() {
+        let template = "${for v in vms}${v.port}${endfor}";
+        let skipped = [
+            r#"step "Deploy" { file "/etc/app.conf" src="app.conf" template=#true when="false" }"#,
+            r#"step "Deploy" when="false" { file "/etc/app.conf" src="app.conf" template=#true }"#,
+        ];
+        for body in skipped {
+            let found = template_findings(template, body);
+            assert!(found.problems.is_empty(), "{body}: {:?}", found.problems);
+            assert!(found.warnings.is_empty(), "{body}: {:?}", found.warnings);
+        }
+        let found = template_findings(
+            template,
+            r#"step "Deploy" {
+                file "/etc/app.conf" src="app.conf" template=#true when="${env} == prod"
+            }"#,
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(
+            found.warnings[0].contains("have no field 'port', unless a `when=` skips the task"),
             "{}",
             found.warnings[0]
         );
