@@ -354,9 +354,9 @@ impl List {
     }
 }
 
-/// What a `when=` can read before a run. A list, or a name every host defines, is present
-/// with its value unknown. A registered name may be absent, as a skipped task leaves it
-/// undefined, and so may any other. An encrypted item value is decrypted only on the host.
+/// What a `when=` can read before a run: a list, and the names `present` says are
+/// (`Some(true)`) or are not (`Some(false)`) defined, all with their values unknown. Any
+/// other name may or may not be. An encrypted item value is decrypted only on the host.
 struct GuardScope {
     vars: HashMap<String, String>,
     collections: HashMap<String, Vec<HashMap<String, String>>>,
@@ -366,7 +366,7 @@ struct GuardScope {
 impl GuardScope {
     fn new<'c>(
         conditions: impl Iterator<Item = &'c Condition>,
-        defined: &dyn Fn(&str) -> bool,
+        present: &dyn Fn(&str) -> Option<bool>,
         is_list: &dyn Fn(&str) -> bool,
     ) -> Self {
         let mut scope = GuardScope {
@@ -379,9 +379,15 @@ impl GuardScope {
                 scope.collections.insert(var.to_string(), Vec::new());
                 continue;
             }
-            scope.unknown.insert(var.to_string());
-            if defined(var) || is_item_var(var) {
-                scope.vars.insert(var.to_string(), String::new());
+            match present(var) {
+                Some(false) => {}
+                Some(true) => {
+                    scope.unknown.insert(var.to_string());
+                    scope.vars.insert(var.to_string(), String::new());
+                }
+                None => {
+                    scope.unknown.insert(var.to_string());
+                }
             }
         }
         scope
@@ -430,6 +436,7 @@ struct Looped<'a> {
     runs: List,
     /// The items it may render for or not, depending on a value only a host knows.
     maybe: Vec<HashMap<String, String>>,
+    reach: Reach,
 }
 
 impl<'a> Looped<'a> {
@@ -446,6 +453,7 @@ impl<'a> Looped<'a> {
                 name,
                 runs: List::Unknown,
                 maybe: Vec::new(),
+                reach: gate.and(guards.reach(when, None)),
             };
         };
         let (mut runs, mut maybe) = (Vec::new(), Vec::new());
@@ -456,18 +464,16 @@ impl<'a> Looped<'a> {
                 Reach::Never => {}
             }
         }
+        let reach = match (runs.is_empty(), maybe.is_empty()) {
+            (false, _) => Reach::Sure,
+            (true, false) => Reach::Maybe,
+            (true, true) => Reach::Never,
+        };
         Looped {
             name,
             runs: List::Items(runs),
             maybe,
-        }
-    }
-
-    fn reach(&self) -> Reach {
-        match &self.runs {
-            List::Items(runs) if runs.is_empty() && self.maybe.is_empty() => Reach::Never,
-            List::Items(runs) if runs.is_empty() => Reach::Maybe,
-            _ => Reach::Sure,
+            reach,
         }
     }
 
@@ -548,14 +554,15 @@ pub fn template_reference_findings(
         };
         // `rescue` and `always` run after the loop; `template_scope_problems` reports it.
         let blocks = [
-            (&step.tasks, true),
-            (&step.rescue, false),
-            (&step.always, false),
+            (&step.tasks, Part::Tasks),
+            (&step.rescue, Part::Rescue),
+            (&step.always, Part::Always),
         ];
-        for (task, own) in blocks
+        for (task, part) in blocks
             .into_iter()
-            .flat_map(|(tasks, own)| tasks.iter().map(move |task| (task, own)))
+            .flat_map(|(tasks, part)| tasks.iter().map(move |task| (task, part)))
         {
+            let own = part == Part::Tasks;
             if matches!(task.args.get("template"), Some(ParamValue::Bool(true))) {
                 if let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) {
                     let at = |shown: &str, line: usize| {
@@ -565,8 +572,34 @@ pub fn template_reference_findings(
                         )
                     };
                     let defined = |name: &str| is_defined(name) || registered.contains(name);
+                    let present = |var: &str| -> Option<bool> {
+                        if is_item_var(var) {
+                            return match (own, &step.loop_source, &looped) {
+                                (false, ..) | (_, None, _) => Some(false),
+                                (_, _, None) => Some(var == "@item"),
+                                // A known item's fields are its own; see `GuardScope::reach`.
+                                (_, _, Some((_, List::Items(_)))) => Some(false),
+                                (_, _, Some((_, List::Unknown))) => {
+                                    (var == "@item").then_some(false)
+                                }
+                            };
+                        }
+                        if is_error_var(var) {
+                            return match part {
+                                Part::Tasks => Some(false),
+                                Part::Rescue => Some(true),
+                                // `always` runs after a failure or none.
+                                Part::Always => None,
+                            };
+                        }
+                        if registered.contains(var) {
+                            // A skipped task leaves its `register=` undefined.
+                            return None;
+                        }
+                        (is_defined(var) || hosts(var) == Coverage::All).then_some(true)
+                    };
                     let guards =
-                        GuardScope::new(step.when.iter().chain(&task.when), &is_defined, &|var| {
+                        GuardScope::new(step.when.iter().chain(&task.when), &present, &|var| {
                             list(var).is_some()
                         });
                     let gate = guards.reach(step.when.as_ref(), None);
@@ -580,7 +613,7 @@ pub fn template_reference_findings(
                         (Some(_), None) => Item::Value,
                     };
                     let reach = match &looped {
-                        Some(looped) => gate.and(looped.reach()),
+                        Some(looped) => gate.and(looped.reach),
                         None => gate.and(guards.reach(task.when.as_ref(), None)),
                     };
                     let (files, unreadable) = uploaded_files(task, &resolved, &plan.vars);
@@ -643,6 +676,14 @@ enum Item<'a> {
     Fields(&'a Looped<'a>),
     /// A `rescue` or `always` task, checked by [`template_scope_problems`].
     Elsewhere,
+}
+
+/// Where in its step a task is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Tasks,
+    Rescue,
+    Always,
 }
 
 /// What a task's template reads `${@item…}` as, and whether the task renders it at all.
@@ -1247,7 +1288,11 @@ echo ${VAR-default}
         template_reference_findings(
             &p,
             dir.path(),
-            |name| ["port", "db-host"].contains(&name) || name.starts_with("@host."),
+            |name| {
+                ["port", "db-host"].contains(&name)
+                    || name.starts_with("@host.")
+                    || name.starts_with("@error.")
+            },
             |name| match name {
                 "region" => Coverage::All,
                 "tier" => Coverage::Partial(vec!["db-1".to_string(), "db-2".to_string()]),
@@ -1510,6 +1555,84 @@ echo ${VAR-default}
             "{}",
             found.warnings[0]
         );
+    }
+
+    fn in_step(attrs: &str, task_when: &str) -> String {
+        format!(
+            r#"step "Deploy" {attrs} {{
+                file "/etc/app.conf" src="app.conf" template=#true when="{task_when}"
+            }}"#
+        )
+    }
+
+    const VMS_PORT: &str = "${for v in vms}${v.port}${endfor}";
+
+    /// A loop over lines binds `${@item}` alone, so no `${@item.<field>}` is defined.
+    #[test]
+    fn a_line_loop_has_no_item_fields_for_a_guard() {
+        let found = template_findings(
+            VMS_PORT,
+            &in_step(r#"loop="${lines}""#, "defined ${@item.port}"),
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    }
+
+    /// `rescue` runs only after a failure, `always` after one or none.
+    #[test]
+    fn error_variables_are_defined_in_rescue_and_maybe_in_always() {
+        let body = |block: &str| {
+            format!(
+                r#"step "Deploy" {{
+                    shell "true"
+                    {block} {{
+                        file "/etc/app.conf" src="app.conf" template=#true when="undefined ${{@error.msg}}"
+                    }}
+                }}"#
+            )
+        };
+        let found = template_findings(VMS_PORT, &body("rescue"));
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+        let found = template_findings(VMS_PORT, &body("always"));
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+        assert!(
+            found.warnings[0].contains("unless a `when=` skips the task"),
+            "{}",
+            found.warnings[0]
+        );
+    }
+
+    /// Items `validate` cannot see may have any field, but the task's guard still decides
+    /// whether it renders.
+    #[test]
+    fn a_guard_over_an_unknown_list_decides_whether_the_template_renders() {
+        let loop_attr = r#"loop="${api-keys}""#;
+        let found = template_findings(VMS_PORT, &in_step(loop_attr, "false"));
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+        for when in ["${env} == prod", "defined ${@item.port}"] {
+            let found = template_findings(VMS_PORT, &in_step(loop_attr, when));
+            assert!(found.problems.is_empty(), "{when}: {:?}", found.problems);
+            assert_eq!(found.warnings.len(), 1, "{when}: {:?}", found.warnings);
+        }
+    }
+
+    /// `region` is set on every host the plan runs on.
+    #[test]
+    fn a_variable_every_host_sets_is_defined_for_a_guard() {
+        let found = template_findings(
+            "${@item.port}",
+            &in_step(r#"loop="${vms}""#, "defined ${region}"),
+        );
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        let found = template_findings(
+            "${@item.port}",
+            &in_step(r#"loop="${vms}""#, "undefined ${region}"),
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
     }
 
     #[test]

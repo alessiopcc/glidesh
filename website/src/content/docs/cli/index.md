@@ -337,7 +337,8 @@ without contacting a host:
   (`name`, `address`, `user`, `port`) with `-i`, or a list the plan defines; a secrets-file
   list's fields are not. A step's and a task's `when=` are evaluated first, per item, as a
   run does: a task or item they skip is not checked, and one they may skip — on a value only
-  a host knows, an encrypted value, or a name a skipped task leaves unregistered — is a
+  a host knows, an encrypted value, a name a skipped task leaves unregistered, or `${@error.*}` in
+  `always` — is a
   warning. A loop inside a `${for}` over an empty list is not checked. A problem names the template,
   the line and the name. Without `-i`, a name the inventory might set is a warning instead; with `-p`,
   so is one only some hosts set, as the run may not target the others. A literal `${…}` is
