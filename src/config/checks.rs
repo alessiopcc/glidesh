@@ -534,7 +534,8 @@ fn old_escape_warning(at: &str, name: &str) -> String {
 
 /// Checks every local templated `file` source the way `render` will read it. The template
 /// must be readable, each `${for}` must loop over a list `list` knows, each field read of
-/// a loop's item must be on every item `list` knows of, and each `${name}` must be defined:
+/// a loop's item must be on every item `list` knows of that the task renders for (a
+/// `when=` that may skip it only warns), and each `${name}` must be defined:
 /// `is_defined` (for every host), a name a task before this one registers, the binding of a
 /// `${for}` around it, or a host variable — `hosts` tells which hosts define it. Each name
 /// is reported once per file, at its first line.
@@ -585,6 +586,9 @@ pub fn template_reference_findings(
                             };
                         }
                         if is_error_var(var) {
+                            if !["@error.msg", "@error.task"].contains(&var) {
+                                return Some(false);
+                            }
                             return match part {
                                 Part::Tasks => Some(false),
                                 Part::Rescue => Some(true),
@@ -602,7 +606,16 @@ pub fn template_reference_findings(
                         GuardScope::new(step.when.iter().chain(&task.when), &present, &|var| {
                             list(var).is_some()
                         });
-                    let gate = guards.reach(step.when.as_ref(), None);
+                    let no_items = matches!(
+                        &step.loop_source,
+                        Some(LoopSource::Literal(items)) if items.is_empty()
+                    );
+                    // A loop over no items runs none of the step's own tasks; `rescue` and
+                    // `always` still run.
+                    let gate = match guards.reach(step.when.as_ref(), None) {
+                        _ if own && no_items => Reach::Never,
+                        gate => gate,
+                    };
                     let looped = looped.as_ref().filter(|_| own).map(|(name, items)| {
                         Looped::new(name, items, gate, task.when.as_ref(), &guards)
                     });
@@ -746,7 +759,8 @@ fn check_template(
                 bindings.pop();
             }
             Token::Var(name) => {
-                // Inside a loop over an empty list nothing renders, so no field is read.
+                // Nothing renders in a task that never runs, or inside a loop over an empty
+                // list, so no field is read there.
                 let unreachable = reach == Reach::Never
                     || bindings.iter().any(
                         |(.., items)| matches!(items, Some(List::Items(items)) if items.is_empty()),
@@ -1447,7 +1461,8 @@ echo ${VAR-default}
         }
     }
 
-    /// Reading `port` in the guard itself fails the item without it, so the run does.
+    /// An item a guard lets through is checked, and so is one it fails on: reading `port`
+    /// in the guard fails the item without it, so the run does.
     #[test]
     fn a_guard_true_for_an_item_still_checks_its_fields() {
         for when in [
@@ -1633,6 +1648,35 @@ echo ${VAR-default}
         );
         assert!(found.problems.is_empty(), "{:?}", found.problems);
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    }
+
+    /// Only `@error.msg` and `@error.task` are ever bound.
+    #[test]
+    fn an_error_variable_glidesh_never_sets_is_undefined_in_rescue() {
+        let found = template_findings(
+            VMS_PORT,
+            r#"step "Deploy" {
+                shell "true"
+                rescue {
+                    file "/etc/app.conf" src="app.conf" template=#true when="undefined ${@error.code}"
+                }
+            }"#,
+        );
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+    }
+
+    #[test]
+    fn a_literal_loop_over_no_items_renders_nothing() {
+        let found = template_findings(VMS_PORT, &in_step(r#"loop="""#, "true"));
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        let found = template_findings(
+            VMS_PORT,
+            r#"step "Deploy" loop="" {
+                shell "true"
+                always { file "/etc/app.conf" src="app.conf" template=#true }
+            }"#,
+        );
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
     }
 
     #[test]
