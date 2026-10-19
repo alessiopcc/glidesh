@@ -399,8 +399,8 @@ impl GuardScope {
         scope
     }
 
-    /// Whether `when` lets the task run, for `item` of a loop over a list.
-    fn reach(&self, when: Option<&Condition>, item: Option<&HashMap<String, String>>) -> Reach {
+    /// Whether `when` lets the task run, for `item` of the step's loop.
+    fn reach(&self, when: Option<&Condition>, item: Option<Bound>) -> Reach {
         let Some(when) = when else {
             return Reach::Sure;
         };
@@ -409,13 +409,19 @@ impl GuardScope {
         if let Some(item) = item {
             vars.retain(|var, _| !is_item_var(var));
             unknown.retain(|var| !is_item_var(var));
-            for (field, value) in item {
-                let var = format!("@item.{field}");
+            let bound: Vec<(String, &str)> = match item {
+                Bound::Fields(fields) => fields
+                    .iter()
+                    .map(|(field, value)| (format!("@item.{field}"), value.as_str()))
+                    .collect(),
+                Bound::Value(value) => vec![("@item".to_string(), value)],
+            };
+            for (var, value) in bound {
                 if contains_secret_token(value) {
                     unknown.insert(var.clone());
                     vars.insert(var, String::new());
                 } else {
-                    vars.insert(var, value.clone());
+                    vars.insert(var, value.to_string());
                 }
             }
         }
@@ -431,6 +437,15 @@ impl GuardScope {
             Ok(Outcome::True) | Err(_) => Reach::Sure,
         }
     }
+}
+
+/// The `${@item…}` a task's guard sees for one item of the step's loop.
+#[derive(Debug, Clone, Copy)]
+enum Bound<'i> {
+    /// An item of a loop over a list: `${@item.<field>}`.
+    Fields(&'i HashMap<String, String>),
+    /// A literal item: `${@item}`.
+    Value(&'i str),
 }
 
 /// The items of a step's `loop=` one of its tasks renders for. The executor evaluates the
@@ -464,7 +479,7 @@ impl<'a> Looped<'a> {
         };
         let (mut runs, mut maybe) = (Vec::new(), Vec::new());
         for item in items {
-            match gate.and(guards.reach(when, Some(item))) {
+            match gate.and(guards.reach(when, Some(Bound::Fields(item)))) {
                 Reach::Sure => runs.push(item.clone()),
                 Reach::Maybe => maybe.push(item.clone()),
                 Reach::Never => {}
@@ -507,6 +522,14 @@ impl Reach {
             (Reach::Never, _) | (_, Reach::Never) => Reach::Never,
             (Reach::Maybe, _) | (_, Reach::Maybe) => Reach::Maybe,
             (Reach::Sure, Reach::Sure) => Reach::Sure,
+        }
+    }
+
+    fn or(self, other: Reach) -> Reach {
+        match (self, other) {
+            (Reach::Sure, _) | (_, Reach::Sure) => Reach::Sure,
+            (Reach::Maybe, _) | (_, Reach::Maybe) => Reach::Maybe,
+            (Reach::Never, Reach::Never) => Reach::Never,
         }
     }
 }
@@ -615,16 +638,7 @@ pub fn template_reference_findings(
                         presence(var, &registered)
                     };
                     let guards = GuardScope::new(task.when.iter(), &present, &list);
-                    let no_items = matches!(
-                        &step.loop_source,
-                        Some(LoopSource::Literal(items)) if items.is_empty()
-                    );
-                    // A loop over no items runs none of the step's own tasks; `rescue` and
-                    // `always` still run.
-                    let gate = match step_gate {
-                        _ if own && no_items => Reach::Never,
-                        gate => gate,
-                    };
+                    let gate = step_gate;
                     let looped = looped.as_ref().filter(|_| own).map(|(name, items)| {
                         Looped::new(name, items, gate, task.when.as_ref(), &guards)
                     });
@@ -634,9 +648,16 @@ pub fn template_reference_findings(
                         (_, Some(looped)) => Item::Fields(looped),
                         (Some(_), None) => Item::Value,
                     };
-                    let reach = match &looped {
-                        Some(looped) => gate.and(looped.reach),
-                        None => gate.and(guards.reach(task.when.as_ref(), None)),
+                    let reach = match (&looped, &step.loop_source) {
+                        (Some(looped), _) => gate.and(looped.reach),
+                        // Literal items are known: the task renders if its guard lets one
+                        // through, and a loop over none runs no task of the step's own.
+                        (None, Some(LoopSource::Literal(items))) if own => {
+                            gate.and(items.iter().fold(Reach::Never, |reach, item| {
+                                reach.or(guards.reach(task.when.as_ref(), Some(Bound::Value(item))))
+                            }))
+                        }
+                        (None, _) => gate.and(guards.reach(task.when.as_ref(), None)),
                     };
                     let (files, unreadable) = uploaded_files(task, &resolved, &plan.vars);
                     if let Some(unreadable) = unreadable {
@@ -1684,6 +1705,18 @@ echo ${VAR-default}
         );
         assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    }
+
+    /// A literal loop's items are known, so a guard on `${@item}` is decided per item.
+    #[test]
+    fn a_guard_on_a_literal_item_is_decided_by_its_value() {
+        let found = template_findings(VMS_PORT, &in_step(r#"loop="web""#, "${@item} == web"));
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        let found = template_findings(VMS_PORT, &in_step(r#"loop="db""#, "${@item} == web"));
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+        let found = template_findings(VMS_PORT, &in_step(r#"loop="db\nweb""#, "${@item} == web"));
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
     }
 
     /// Only `@error.msg` and `@error.task` are ever bound.
