@@ -1152,7 +1152,7 @@ fn validate_plan_file(
             Some(List::of(items))
         } else if list.starts_with("@group.") {
             match scope.inventory_data {
-                None => Some(List::Unknown),
+                None => Some(List::Unresolved),
                 Some(data) => data.collections.get(list).map(|items| List::of(items)),
             }
         } else {

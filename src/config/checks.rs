@@ -313,8 +313,10 @@ pub struct TemplateFindings {
 /// A list a template can loop over, as `validate` knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum List {
-    /// Its items are not known here: a secrets-file list, or `@group.*` without an inventory.
+    /// Its items are not known here: a secrets-file list.
     Unknown,
+    /// `@group.*` without an inventory: the group may not exist, and its items are not known.
+    Unresolved,
     Items(Vec<HashMap<String, String>>),
 }
 
@@ -367,7 +369,7 @@ impl GuardScope {
     fn new<'c>(
         conditions: impl Iterator<Item = &'c Condition>,
         present: &dyn Fn(&str) -> Option<bool>,
-        is_list: &dyn Fn(&str) -> bool,
+        list: &dyn Fn(&str) -> Option<List>,
     ) -> Self {
         let mut scope = GuardScope {
             vars: HashMap::new(),
@@ -375,11 +377,15 @@ impl GuardScope {
             unknown: std::collections::HashSet::new(),
         };
         for var in conditions.flat_map(Condition::variables) {
-            if is_list(var) {
-                scope.collections.insert(var.to_string(), Vec::new());
-                continue;
-            }
-            match present(var) {
+            let presence = match list(var) {
+                Some(List::Unresolved) => None,
+                Some(_) => {
+                    scope.collections.insert(var.to_string(), Vec::new());
+                    continue;
+                }
+                None => present(var),
+            };
+            match presence {
                 Some(false) => {}
                 Some(true) => {
                     scope.unknown.insert(var.to_string());
@@ -481,7 +487,7 @@ impl<'a> Looped<'a> {
     fn all(&self) -> List {
         match &self.runs {
             List::Items(runs) => List::Items(runs.iter().chain(&self.maybe).cloned().collect()),
-            List::Unknown => List::Unknown,
+            _ => List::Unknown,
         }
     }
 }
@@ -548,11 +554,21 @@ pub fn template_reference_findings(
 ) -> TemplateFindings {
     let mut registered: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut findings = TemplateFindings::default();
+    let presence = |var: &str, registered: &std::collections::HashSet<&str>| {
+        if registered.contains(var) {
+            // A skipped task leaves its `register=` undefined.
+            return None;
+        }
+        (is_defined(var) || hosts(var) == Coverage::All).then_some(true)
+    };
     for step in plan.steps() {
         let looped = match &step.loop_source {
             Some(LoopSource::Variable(name)) => list(name).map(|items| (name.as_str(), items)),
             _ => None,
         };
+        // The executor decides the step's `when=` once, before any of its tasks registers.
+        let step_gate = GuardScope::new(step.when.iter(), &|var| presence(var, &registered), &list)
+            .reach(step.when.as_ref(), None);
         // `rescue` and `always` run after the loop; `template_scope_problems` reports it.
         let blocks = [
             (&step.tasks, Part::Tasks),
@@ -580,7 +596,7 @@ pub fn template_reference_findings(
                                 (_, _, None) => Some(var == "@item"),
                                 // A known item's fields are its own; see `GuardScope::reach`.
                                 (_, _, Some((_, List::Items(_)))) => Some(false),
-                                (_, _, Some((_, List::Unknown))) => {
+                                (_, _, Some((_, List::Unknown | List::Unresolved))) => {
                                     (var == "@item").then_some(false)
                                 }
                             };
@@ -596,23 +612,16 @@ pub fn template_reference_findings(
                                 Part::Always => None,
                             };
                         }
-                        if registered.contains(var) {
-                            // A skipped task leaves its `register=` undefined.
-                            return None;
-                        }
-                        (is_defined(var) || hosts(var) == Coverage::All).then_some(true)
+                        presence(var, &registered)
                     };
-                    let guards =
-                        GuardScope::new(step.when.iter().chain(&task.when), &present, &|var| {
-                            list(var).is_some()
-                        });
+                    let guards = GuardScope::new(task.when.iter(), &present, &list);
                     let no_items = matches!(
                         &step.loop_source,
                         Some(LoopSource::Literal(items)) if items.is_empty()
                     );
                     // A loop over no items runs none of the step's own tasks; `rescue` and
                     // `always` still run.
-                    let gate = match guards.reach(step.when.as_ref(), None) {
+                    let gate = match step_gate {
                         _ if own && no_items => Reach::Never,
                         gate => gate,
                     };
@@ -1337,6 +1346,7 @@ echo ${VAR-default}
         };
         match name {
             "api-keys" | "hosts" | "@group.web" => Some(List::Unknown),
+            "@group.optional" => Some(List::Unresolved),
             "@group.db" => {
                 let host: &[&str] = &["name", "address", "user", "port"];
                 Some(items(&[host, host]))
@@ -1647,6 +1657,32 @@ echo ${VAR-default}
             &in_step(r#"loop="${vms}""#, "undefined ${region}"),
         );
         assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    }
+
+    /// Without an inventory, a group may not exist at all.
+    #[test]
+    fn a_guard_on_an_unresolved_group_is_undecided() {
+        let found = template_findings(
+            "${@item.port}",
+            &in_step(r#"loop="${vms}""#, "undefined ${@group.optional}"),
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+    }
+
+    /// The step's `when=` is decided before its tasks run, so their `register=` cannot change
+    /// it.
+    #[test]
+    fn a_step_guard_sees_what_was_registered_before_the_step() {
+        let found = template_findings(
+            "${@item.port}",
+            r#"step "Deploy" loop="${vms}" when="defined ${port}" {
+                shell "echo 1" register="port"
+                file "/etc/app.conf" src="app.conf" template=#true
+            }"#,
+        );
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
     }
 
