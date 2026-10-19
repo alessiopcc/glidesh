@@ -83,7 +83,10 @@ warning: files/vllm.env contains ${cuda-devices} but is uploaded as-is, because 
 Only names glidesh defines count, so shell and environment variables do not trigger it. The
 file is still uploaded unchanged: it is a warning, not an error, because the content may be
 intentional. [`glidesh validate`](/cli/#glidesh-validate) reports the same thing before any
-run, for directory uploads too.
+run, for directory uploads too. It also warns about a `${for}` loop in such a file, and
+about an undefined name that is likely a mistyped variable: one written as only glidesh
+writes names (lowercase with a `-` or `.`, or starting with `@`), since a typo would ship
+literally too.
 
 ## Recursive Directory Copy
 

@@ -246,6 +246,107 @@ fn an_inventory_variable_counts_as_defined() {
     assert!(text.contains("contains ${db-host}"), "{text}");
 }
 
+/// A CI job checks the exit code, which a warning alone leaves at zero without --strict.
+#[test]
+fn strict_fails_on_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app.env",
+        "DIR=${app-dir}
+",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "Env" { file "/etc/app.env" src="app.env" } }"#,
+    );
+    let run = |strict: bool| {
+        let mut args = vec!["validate", "-p", "plan.kdl"];
+        if strict {
+            args.push("--strict");
+        }
+        let out = Command::cargo_bin("glidesh")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.success(), text)
+    };
+    let (ok, out) = run(false);
+    assert!(ok, "{out}");
+    assert!(out.contains("warning:"), "{out}");
+    let (ok, out) = run(true);
+    assert!(!ok, "{out}");
+    assert!(out.contains("--strict fails on warnings"), "{out}");
+}
+
+/// `render` fails on the first item without the field, so validate must too.
+#[test]
+fn a_loop_field_no_host_has_fails_with_an_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "hosts.conf",
+        "${for a in @group.g}${a.address} ${a.bogus}
+${endfor}",
+    );
+    write(
+        dir.path(),
+        "inventory.kdl",
+        "group \"g\" plan=\"plan.kdl\" {
+    host \"web\" \"10.0.0.1\"
+}
+",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" { step "s" { file "/etc/hosts.conf" src="hosts.conf" template=#true } }"#,
+    );
+    let (ok, out) = validate_inventory(dir.path());
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("${a.bogus}: no item of '@group.g' has a field 'bogus'"),
+        "{out}"
+    );
+}
+
+/// A typo of a defined name in a file uploaded as-is would ship literally.
+#[test]
+fn a_mistyped_variable_in_an_untemplated_file_warns_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "app.env",
+        "DIR=${some-var}
+HOME=${HOME}
+",
+    );
+    write(
+        dir.path(),
+        "plan.kdl",
+        r#"plan "p" {
+            vars { some-vars "/opt" }
+            step "Env" { file "/etc/app.env" src="app.env" }
+        }"#,
+    );
+    let (ok, out) = validate(dir.path());
+    assert!(
+        ok,
+        "a warning must not fail validation:
+{out}"
+    );
+    assert!(
+        out.contains("contains undefined ${some-var} (did you mean ${some-vars}?)"),
+        "{out}"
+    );
+    assert!(!out.contains("${HOME}"), "{out}");
+}
+
 #[test]
 fn a_missing_file_source_fails_and_every_problem_is_listed() {
     let dir = tempfile::tempdir().unwrap();
@@ -377,8 +478,8 @@ group "cache" {
     );
     let (ok, out) = validate_inventory(dir.path());
     assert!(ok, "{out}");
-    assert!(out.contains("contains ${db-host}"), "{out}");
-    assert!(!out.contains("${cache-host}"), "{out}");
+    assert!(out.contains("contains ${db-host} but"), "{out}");
+    assert!(out.contains("contains undefined ${cache-host};"), "{out}");
 }
 
 /// With `-p`, the inventory's own plans are not checked: the run would not use them.
