@@ -61,7 +61,7 @@ host "web-1" "10.0.0.1" user="deploy" {
 
 ## Groups
 
-A `group` node collects hosts under a name that can be targeted in plans or via `--target` on the CLI. Groups can define their own `vars` block and an optional `plan=` attribute to link a plan file (see [Inline Plans](#inline-plans)).
+A `group` node collects hosts under a name. Select that name with `--target` on the command line (`-t web`, a host name, or `group:host`). Groups can define their own `vars` block and an optional `plan=` attribute to link a plan file (see [Inline Plans](#inline-plans)).
 
 ## Jump Hosts
 

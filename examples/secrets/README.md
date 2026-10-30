@@ -44,7 +44,7 @@ revokes access per person, with no shared secret to distribute:
 glidesh secret init --provider age --recipient ~/.ssh/id_ed25519.pub --file team.kdl
 ```
 
-See the [Secrets documentation](https://glidesh.dev/concepts/secrets/#sharing-a-vault-with-a-team).
+See the [Secrets documentation](https://glidesh.netlify.app/concepts/secrets/#sharing-a-vault-with-a-team).
 
 ## How it works
 
@@ -53,4 +53,4 @@ See the [Secrets documentation](https://glidesh.dev/concepts/secrets/#sharing-a-
 - Each value is a short, self-describing `secret:v1:…` token — the key that decrypts it lives in
   `secrets.kdl`, so rekeying re-wraps the DEK without touching any value token.
 
-See the [Secrets documentation](https://glidesh.dev/concepts/secrets/) for the full reference.
+See the [Secrets documentation](https://glidesh.netlify.app/concepts/secrets/) for the full reference.

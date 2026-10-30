@@ -92,3 +92,27 @@ Connect to internal hosts through an SSH bastion (jump host). Demonstrates one j
 **Features used:** jump hosts, SSH tunneling
 
 [View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/jump-host)
+
+## run-as
+
+Connect as an unprivileged user and escalate selected tasks with `sudo`, `doas`, or `su`. Shows inventory, step, and per-task `run-as`, including opting a single task out with `run-as=""`.
+
+**Features used:** run-as
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/run-as)
+
+## secrets
+
+Keep variable values encrypted in a committed `secrets.kdl`. The plan references them like any other variable; glidesh decrypts them in memory and redacts them from output and logs.
+
+**Features used:** secrets
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/secrets)
+
+## shared-token
+
+Generate one value on the controller and write that same value on every host. The `host` task runs once; `register` broadcasts its stdout.
+
+**Modules used:** host, shell
+
+[View source →](https://github.com/alessiopcc/glidesh/tree/main/examples/shared-token)
