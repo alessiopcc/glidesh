@@ -299,10 +299,8 @@ fn the_multi_tier_example_gets_its_variable_from_the_included_plan() {
 fn every_example_is_listed_and_has_the_files_the_docs_promise() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
-    let index = std::fs::read_to_string(
-        root.join("website/src/content/docs/examples/index.md"),
-    )
-    .unwrap();
+    let index =
+        std::fs::read_to_string(root.join("website/src/content/docs/examples/index.md")).unwrap();
     let mut found = 0;
     let mut missing = Vec::new();
     for entry in std::fs::read_dir(root.join("examples")).unwrap() {
