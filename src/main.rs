@@ -1047,7 +1047,8 @@ fn provider_detail(cfg: &secrets_config::SecretsConfig) -> String {
     }
 }
 
-/// What `validate` found in a plan. `problems` fail validation; `warnings` do not.
+/// What `validate` found in a plan. `problems` fail validation; `warnings` only with
+/// `--strict`.
 #[derive(Default)]
 struct PlanCheck {
     steps: usize,
@@ -1141,23 +1142,49 @@ fn validate_plan_file(
     };
     let for_some_host =
         |name: &str| for_every_host(name) || hosts(name) != config::checks::Coverage::None;
-    let is_list = |list: &str| {
-        plan.structured_vars.contains_key(list)
-            || scope.secrets.structured.contains(list)
-            || (list.starts_with("@group.")
-                && scope
-                    .inventory_data
-                    .is_none_or(|data| data.collections.contains_key(list)))
+    // A secrets-file list replaces the plan's in a run, and `validate` knows only its name,
+    // so its fields cannot be checked.
+    let list = |list: &str| {
+        use config::checks::List;
+        if scope.secrets.structured.contains(list) {
+            Some(List::Unknown)
+        } else if let Some(items) = plan.structured_vars.get(list) {
+            Some(List::of(items))
+        } else if list.starts_with("@group.") {
+            match scope.inventory_data {
+                None => Some(List::Unresolved),
+                Some(data) => data.collections.get(list).map(|items| List::of(items)),
+            }
+        } else {
+            None
+        }
     };
+    let known: Vec<&str> = plan
+        .vars
+        .keys()
+        .map(String::as_str)
+        .chain(plan.prompts.iter().map(|p| p.name.as_str()))
+        .chain(scope.secrets.vars.iter().map(String::as_str))
+        .chain(
+            scope
+                .hosts
+                .iter()
+                .flatten()
+                .flat_map(|(_, vars)| vars.iter().map(String::as_str)),
+        )
+        .chain(BUILTIN_VARS.iter().copied())
+        .chain(
+            scope
+                .inventory_data
+                .into_iter()
+                .flat_map(|data| data.extra_vars.keys().map(String::as_str)),
+        )
+        .collect();
 
-    check.warnings = config::checks::literal_reference_warnings(&plan, plan_dir, for_some_host);
-    let templates = config::checks::template_reference_findings(
-        &plan,
-        plan_dir,
-        for_every_host,
-        hosts,
-        is_list,
-    );
+    check.warnings =
+        config::checks::literal_reference_warnings(&plan, plan_dir, for_some_host, &known);
+    let templates =
+        config::checks::template_reference_findings(&plan, plan_dir, for_every_host, hosts, list);
     check.problems.extend(templates.problems);
     if scope.hosts.is_some() {
         check.problems.extend(templates.undefined);
@@ -1265,6 +1292,7 @@ fn report_plan(check: &PlanCheck) -> bool {
 
 fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
     let mut valid = true;
+    let mut warned = false;
 
     // Read leniently here — a broken file is reported by its own check below.
     let inventory = args
@@ -1312,7 +1340,9 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
             shadow_warnings(plan, fp_path, inventory.as_ref(), &secret_names, &hosts)
         };
         print!("Validating plan '{}'... ", fp_path.display());
-        valid &= report_plan(&validate_plan_file(fp_path, inv_dir, &scope, shadows));
+        let check = validate_plan_file(fp_path, inv_dir, &scope, shadows);
+        valid &= report_plan(&check);
+        warned |= !check.warnings.is_empty();
     }
 
     if let Some(ref inv_path) = args.inventory {
@@ -1369,7 +1399,9 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
             let shadows = |plan: &config::types::Plan| {
                 shadow_warnings(plan, &path, Some(inventory), &secret_names, &hosts)
             };
-            valid &= report_plan(&validate_plan_file(&path, inv_dir, &scope, shadows));
+            let check = validate_plan_file(&path, inv_dir, &scope, shadows);
+            valid &= report_plan(&check);
+            warned |= !check.warnings.is_empty();
         }
     }
 
@@ -1401,10 +1433,14 @@ fn cmd_validate(args: cli::ValidateArgs) -> Result<(), GlideshError> {
         println!("No files specified. Use --plan and/or --inventory.");
     }
 
-    if valid {
-        Ok(())
-    } else {
+    if !valid {
         Err(GlideshError::Other("Validation failed".to_string()))
+    } else if args.strict && warned {
+        Err(GlideshError::Other(
+            "Validation failed: --strict fails on warnings".to_string(),
+        ))
+    } else {
+        Ok(())
     }
 }
 

@@ -427,6 +427,10 @@ pub struct ValidateArgs {
     /// count as defined; without --plan, the plans it names with plan= are checked too
     #[arg(short, long)]
     pub inventory: Option<PathBuf>,
+
+    /// Fail on warnings too, for CI: exit non-zero when any check warns
+    #[arg(long)]
+    pub strict: bool,
 }
 
 fn parse_concurrency(s: &str) -> Result<usize, String> {
@@ -482,6 +486,11 @@ mod tests {
 
     /// A user reading `--help` asked for drift detection, `creates`/`unless` and retries,
     /// all of which already existed. Keep them named where that user looked.
+    #[test]
+    fn the_top_level_help_names_validate_strict() {
+        assert!(long_help(&[]).contains("--strict"));
+    }
+
     #[test]
     fn run_help_names_the_features_users_could_not_find() {
         let help = long_help(&["run"]);
