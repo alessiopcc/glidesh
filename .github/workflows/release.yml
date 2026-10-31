@@ -3,6 +3,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Builds every target without publishing: native code in a dependency can break a
+  # target that ordinary CI never builds.
+  pull_request:
+    paths: ["Cargo.toml", ".github/workflows/release.yml"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +20,9 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    env:
+      # A branch name may hold a slash, which would put the archive in a directory.
+      VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
     strategy:
       fail-fast: false
       matrix:
@@ -49,6 +57,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # ring, russh's crypto backend, compiles C for the musl target.
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Install cross
         if: matrix.use-cross
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -71,14 +84,14 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../glidesh-${{ github.ref_name }}-${{ matrix.target }}.tar.gz glidesh
+          tar czf ../../../glidesh-$VERSION-${{ matrix.target }}.tar.gz glidesh
           cd ../../..
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/glidesh.exe" -DestinationPath "glidesh-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/glidesh.exe" -DestinationPath "glidesh-$env:VERSION-${{ matrix.target }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -90,6 +103,7 @@ jobs:
   release:
     name: Create Release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -119,7 +133,7 @@ jobs:
   packages:
     name: Update Packages
     needs: release
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -163,7 +177,7 @@ jobs:
   verify-install:
     name: Verify Install (${{ matrix.os }})
     needs: [release, packages]
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -211,7 +225,7 @@ jobs:
   deploy-docs:
     name: Deploy Documentation
     needs: verify-install
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Netlify deploy

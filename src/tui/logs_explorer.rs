@@ -708,13 +708,13 @@ fn render_node_log(frame: &mut Frame, area: Rect, state: &mut LogsExplorerState)
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &LogsExplorerState) {
-    if let Some((ref msg, at)) = state.flash {
-        if at.elapsed() < std::time::Duration::from_secs(2) {
-            let paragraph =
-                Paragraph::new(format!(" {} ", msg)).style(Style::default().fg(COLOR_ACCENT));
-            frame.render_widget(paragraph, area);
-            return;
-        }
+    if let Some((ref msg, at)) = state.flash
+        && at.elapsed() < std::time::Duration::from_secs(2)
+    {
+        let paragraph =
+            Paragraph::new(format!(" {} ", msg)).style(Style::default().fg(COLOR_ACCENT));
+        frame.render_widget(paragraph, area);
+        return;
     }
 
     let text = match state.view {
@@ -744,65 +744,65 @@ pub fn run_logs_tui(run_dirs: Vec<PathBuf>) -> io::Result<()> {
 
         terminal.draw(|f| render(f, &mut state))?;
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if state.confirm_delete {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            state.delete_selected();
-                        }
-                        _ => {
-                            state.confirm_delete = false;
-                        }
-                    }
-                    continue;
-                }
-
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if state.confirm_delete {
                 match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Enter => match state.view {
-                        LogsView::RunList => state.enter_run_detail(),
-                        LogsView::RunDetail => state.enter_node_log(),
-                        LogsView::NodeLog => {}
-                    },
-                    KeyCode::Char(' ') => state.toggle_selection(),
-                    KeyCode::Char('d') | KeyCode::Delete
-                        if state.view == LogsView::RunList && !state.runs.is_empty() =>
-                    {
-                        state.confirm_delete = true;
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        state.delete_selected();
                     }
-                    KeyCode::Char('c') if state.view == LogsView::NodeLog => {
-                        state.copy_to_clipboard();
+                    _ => {
+                        state.confirm_delete = false;
                     }
-                    KeyCode::Char('e') if state.view == LogsView::NodeLog => {
-                        if let Some(path) = state.current_log_path() {
-                            terminal::disable_raw_mode()?;
-                            crate::tui::release_screen(&mut io::stdout())?;
-                            if let Err(e) = open_in_editor(&path) {
-                                state.set_flash(&format!("Editor failed: {}", e));
-                            }
-                            terminal::enable_raw_mode()?;
-                            io::stdout().execute(EnterAlternateScreen)?;
-                            terminal.clear()?;
-                        }
-                    }
-                    KeyCode::Esc | KeyCode::Backspace => state.go_back(),
-                    KeyCode::Up | KeyCode::Char('k') => state.move_up(),
-                    KeyCode::Down | KeyCode::Char('j') => state.move_down(),
-                    KeyCode::PageUp => state.page_up(visible_height),
-                    KeyCode::PageDown => state.page_down(visible_height),
-                    KeyCode::Home | KeyCode::Char('g') if state.view == LogsView::NodeLog => {
-                        state.log_scroll = 0;
-                    }
-                    KeyCode::End | KeyCode::Char('G') if state.view == LogsView::NodeLog => {
-                        state.log_scroll = usize::MAX;
-                    }
-                    _ => {}
                 }
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                KeyCode::Enter => match state.view {
+                    LogsView::RunList => state.enter_run_detail(),
+                    LogsView::RunDetail => state.enter_node_log(),
+                    LogsView::NodeLog => {}
+                },
+                KeyCode::Char(' ') => state.toggle_selection(),
+                KeyCode::Char('d') | KeyCode::Delete
+                    if state.view == LogsView::RunList && !state.runs.is_empty() =>
+                {
+                    state.confirm_delete = true;
+                }
+                KeyCode::Char('c') if state.view == LogsView::NodeLog => {
+                    state.copy_to_clipboard();
+                }
+                KeyCode::Char('e') if state.view == LogsView::NodeLog => {
+                    if let Some(path) = state.current_log_path() {
+                        terminal::disable_raw_mode()?;
+                        crate::tui::release_screen(&mut io::stdout())?;
+                        if let Err(e) = open_in_editor(&path) {
+                            state.set_flash(&format!("Editor failed: {}", e));
+                        }
+                        terminal::enable_raw_mode()?;
+                        io::stdout().execute(EnterAlternateScreen)?;
+                        terminal.clear()?;
+                    }
+                }
+                KeyCode::Esc | KeyCode::Backspace => state.go_back(),
+                KeyCode::Up | KeyCode::Char('k') => state.move_up(),
+                KeyCode::Down | KeyCode::Char('j') => state.move_down(),
+                KeyCode::PageUp => state.page_up(visible_height),
+                KeyCode::PageDown => state.page_down(visible_height),
+                KeyCode::Home | KeyCode::Char('g') if state.view == LogsView::NodeLog => {
+                    state.log_scroll = 0;
+                }
+                KeyCode::End | KeyCode::Char('G') if state.view == LogsView::NodeLog => {
+                    state.log_scroll = usize::MAX;
+                }
+                _ => {}
             }
         }
     }

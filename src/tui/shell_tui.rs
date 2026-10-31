@@ -12,7 +12,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use std::io;
 use std::sync::Arc;
 use tokio::sync::mpsc;

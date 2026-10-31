@@ -308,14 +308,14 @@ fn parse_include(node: &kdl::KdlNode) -> Result<Include, GlideshError> {
     // An attribute other than tags= used to be ignored, so a misspelled `tag=` would
     // quietly leave the included steps untagged.
     for entry in node.entries() {
-        if let Some(key) = entry.name().map(|n| n.value()) {
-            if key != "tags" {
-                return Err(GlideshError::ConfigParse {
-                    message: format!(
-                        "include '{path}': unknown attribute '{key}' (expected one of: tags)"
-                    ),
-                });
-            }
+        if let Some(key) = entry.name().map(|n| n.value())
+            && key != "tags"
+        {
+            return Err(GlideshError::ConfigParse {
+                message: format!(
+                    "include '{path}': unknown attribute '{key}' (expected one of: tags)"
+                ),
+            });
         }
     }
     let tags = match node.get("tags") {
@@ -674,16 +674,16 @@ fn parse_step(node: &kdl::KdlNode) -> Result<Step, GlideshError> {
     };
 
     let when = parse_when(node)?;
-    if let Some(cond) = &when {
-        if let Some(var) = cond.variables().find(|v| is_item_var(v)) {
-            return Err(GlideshError::ConfigParse {
-                message: format!(
-                    "step '{name}': when= cannot use ${{{var}}}: a step's condition is \
+    if let Some(cond) = &when
+        && let Some(var) = cond.variables().find(|v| is_item_var(v))
+    {
+        return Err(GlideshError::ConfigParse {
+            message: format!(
+                "step '{name}': when= cannot use ${{{var}}}: a step's condition is \
                      checked once, before its loop runs. Put when= on the task instead to \
                      test each item"
-                ),
-            });
-        }
+            ),
+        });
     }
 
     let mut tasks = Vec::new();
@@ -843,15 +843,15 @@ pub(crate) const STEP_ATTRS: &[&str] = &[
 /// silently never applies — the step runs unconditionally.
 fn reject_unknown_step_attrs(node: &kdl::KdlNode, step: &str) -> Result<(), GlideshError> {
     for entry in node.entries() {
-        if let Some(key) = entry.name().map(|n| n.value()) {
-            if !STEP_ATTRS.contains(&key) {
-                return Err(GlideshError::ConfigParse {
-                    message: format!(
-                        "step '{step}': unknown attribute '{key}' (expected one of: {})",
-                        STEP_ATTRS.join(", ")
-                    ),
-                });
-            }
+        if let Some(key) = entry.name().map(|n| n.value())
+            && !STEP_ATTRS.contains(&key)
+        {
+            return Err(GlideshError::ConfigParse {
+                message: format!(
+                    "step '{step}': unknown attribute '{key}' (expected one of: {})",
+                    STEP_ATTRS.join(", ")
+                ),
+            });
         }
     }
     Ok(())

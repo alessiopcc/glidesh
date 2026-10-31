@@ -119,12 +119,11 @@ fn parse_mem_total_mb(body: &str) -> String {
 fn parse_route_src(body: &str) -> String {
     let mut tokens = body.split_whitespace();
     while let Some(token) = tokens.next() {
-        if token == "src" {
-            if let Some(addr) = tokens.next() {
-                if addr.parse::<std::net::IpAddr>().is_ok() {
-                    return addr.to_string();
-                }
-            }
+        if token == "src"
+            && let Some(addr) = tokens.next()
+            && addr.parse::<std::net::IpAddr>().is_ok()
+        {
+            return addr.to_string();
         }
     }
     String::new()
@@ -365,12 +364,11 @@ fn detect_pkg_manager(family: &OsFamily, id: &str, version: &str) -> PkgManager 
         OsFamily::Debian => PkgManager::Apt,
         OsFamily::RedHat => {
             // CentOS < 8 uses yum
-            if id == "centos" {
-                if let Ok(major) = version.split('.').next().unwrap_or("0").parse::<u32>() {
-                    if major < 8 {
-                        return PkgManager::Yum;
-                    }
-                }
+            if id == "centos"
+                && let Ok(major) = version.split('.').next().unwrap_or("0").parse::<u32>()
+                && major < 8
+            {
+                return PkgManager::Yum;
             }
             PkgManager::Dnf
         }

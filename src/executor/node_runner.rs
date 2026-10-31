@@ -16,7 +16,7 @@ use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
 use glidesh::ssh::connection::{CommandOutput, OUTPUT_LIMIT};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;

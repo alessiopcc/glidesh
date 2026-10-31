@@ -10,7 +10,7 @@ use crate::error::GlideshError;
 use crate::modules::ModuleParams;
 use crate::modules::shell::{login_enabled, resolve_cmd_from_params, wrap_login};
 use crate::ssh::{HostKeyPolicy, SshSession};
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 
 pub const MODULE_NAME: &str = "host";
 
@@ -338,9 +338,11 @@ mod tests {
     }
 
     fn dummy_key() -> PrivateKeyWithHashAlg {
-        let private =
-            ssh_key::PrivateKey::random(&mut rand::thread_rng(), ssh_key::Algorithm::Ed25519)
-                .expect("ed25519");
-        PrivateKeyWithHashAlg::new(std::sync::Arc::new(private), None).unwrap()
+        let private = russh::keys::ssh_key::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .expect("ed25519");
+        PrivateKeyWithHashAlg::new(std::sync::Arc::new(private), None)
     }
 }

@@ -35,7 +35,7 @@ use crate::config::template::TemplateData;
 use crate::error::GlideshError;
 use config::{Provider, SecretsConfig};
 use passphrase::PassphraseProvider;
-use rand::RngCore;
+use rand::TryRng;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use zeroize::Zeroizing;
@@ -43,7 +43,9 @@ use zeroize::Zeroizing;
 /// Fill a buffer with cryptographically secure random bytes. Shared by [`token`] and
 /// [`passphrase`] for nonces, salts, and key generation.
 pub(crate) fn random_bytes(buf: &mut [u8]) {
-    rand::rngs::OsRng.fill_bytes(buf);
+    rand::rngs::SysRng
+        .try_fill_bytes(buf)
+        .expect("the operating system has no random source");
 }
 
 /// What can unwrap the data key, which depends on the provider that wrapped it.

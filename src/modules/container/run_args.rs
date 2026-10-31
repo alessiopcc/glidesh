@@ -415,10 +415,10 @@ pub(super) fn build_run_args(
 
     // The command keeps its own quoting so shell metacharacters written in the
     // plan (`nginx -g 'daemon off;'`) reach the container intact.
-    if let Some(command) = text_of(params, "command") {
-        if !command.is_empty() {
-            args.push("command", command);
-        }
+    if let Some(command) = text_of(params, "command")
+        && !command.is_empty()
+    {
+        args.push("command", command);
     }
 
     Ok(args)

@@ -617,103 +617,103 @@ pub fn template_reference_findings(
             .flat_map(|(tasks, part)| tasks.iter().map(move |task| (task, part)))
         {
             let own = part == Part::Tasks;
-            if matches!(task.args.get("template"), Some(ParamValue::Bool(true))) {
-                if let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir)) {
-                    let at = |shown: &str, line: usize| {
-                        format!(
-                            "step '{}': file '{}': template {}, line {}",
-                            step.name, task.resource, shown, line
-                        )
-                    };
-                    let defined = |name: &str| is_defined(name) || registered.contains(name);
-                    let present = |var: &str| -> Option<bool> {
-                        if is_item_var(var) {
-                            return match (own, &step.loop_source, &looped) {
-                                (false, ..) | (_, None, _) => Some(false),
-                                (_, _, None) => Some(var == "@item"),
-                                // A known item's fields are its own; see `GuardScope::reach`.
-                                (_, _, Some((_, List::Items(_)))) => Some(false),
-                                (_, _, Some((_, List::Unknown | List::Unresolved))) => {
-                                    (var == "@item").then_some(false)
-                                }
-                            };
-                        }
-                        if is_error_var(var) {
-                            if !["@error.msg", "@error.task"].contains(&var) {
-                                return Some(false);
-                            }
-                            return match part {
-                                Part::Tasks => Some(false),
-                                Part::Rescue => Some(true),
-                                // `always` runs after a failure or none.
-                                Part::Always => None,
-                            };
-                        }
-                        presence(var, &registered)
-                    };
-                    let guards = GuardScope::new(task.when.iter(), &present, &list, &|var| {
-                        scalar(var, &registered)
-                    });
-                    let gate = step_gate;
-                    let looped = looped.as_ref().filter(|_| own).map(|(name, items)| {
-                        Looped::new(name, items, gate, task.when.as_ref(), &guards)
-                    });
-                    let item = match (&step.loop_source, &looped) {
-                        _ if !own => Item::Elsewhere,
-                        (None, _) => Item::NoLoop,
-                        (_, Some(looped)) => Item::Fields(looped),
-                        (Some(_), None) => Item::Value,
-                    };
-                    let reach = match (&looped, &step.loop_source) {
-                        (Some(looped), _) => gate.and(looped.reach),
-                        // Literal items are known: the task renders if its guard lets one
-                        // through, and a loop over none runs no task of the step's own.
-                        (None, Some(LoopSource::Literal(items))) if own => {
-                            gate.and(items.iter().fold(Reach::Never, |reach, item| {
-                                reach.or(guards.reach(task.when.as_ref(), Some(Bound::Value(item))))
-                            }))
-                        }
-                        (None, _) => gate.and(guards.reach(task.when.as_ref(), None)),
-                    };
-                    let (files, unreadable) = uploaded_files(task, &resolved, &plan.vars);
-                    if let Some(unreadable) = unreadable {
-                        findings.problems.push(format!(
-                            "step '{}': file '{}': template {}: cannot be read: {}",
-                            step.name, task.resource, src, unreadable
-                        ));
-                    }
-                    for file in files {
-                        let shown = shown_source(&src, &resolved, &file);
-                        // Missing files are `missing_file_sources`'.
-                        let text = match std::fs::read(&file) {
-                            Ok(bytes) => bytes,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                            Err(e) => {
-                                findings.problems.push(format!(
-                                    "step '{}': file '{}': template {}: cannot be read: {}",
-                                    step.name, task.resource, shown, e
-                                ));
-                                continue;
+            if matches!(task.args.get("template"), Some(ParamValue::Bool(true)))
+                && let Some((src, resolved)) = local_source(task, step.base_dir(plan_dir))
+            {
+                let at = |shown: &str, line: usize| {
+                    format!(
+                        "step '{}': file '{}': template {}, line {}",
+                        step.name, task.resource, shown, line
+                    )
+                };
+                let defined = |name: &str| is_defined(name) || registered.contains(name);
+                let present = |var: &str| -> Option<bool> {
+                    if is_item_var(var) {
+                        return match (own, &step.loop_source, &looped) {
+                            (false, ..) | (_, None, _) => Some(false),
+                            (_, _, None) => Some(var == "@item"),
+                            // A known item's fields are its own; see `GuardScope::reach`.
+                            (_, _, Some((_, List::Items(_)))) => Some(false),
+                            (_, _, Some((_, List::Unknown | List::Unresolved))) => {
+                                (var == "@item").then_some(false)
                             }
                         };
-                        let Ok(text) = String::from_utf8(text) else {
+                    }
+                    if is_error_var(var) {
+                        if !["@error.msg", "@error.task"].contains(&var) {
+                            return Some(false);
+                        }
+                        return match part {
+                            Part::Tasks => Some(false),
+                            Part::Rescue => Some(true),
+                            // `always` runs after a failure or none.
+                            Part::Always => None,
+                        };
+                    }
+                    presence(var, &registered)
+                };
+                let guards = GuardScope::new(task.when.iter(), &present, &list, &|var| {
+                    scalar(var, &registered)
+                });
+                let gate = step_gate;
+                let looped = looped.as_ref().filter(|_| own).map(|(name, items)| {
+                    Looped::new(name, items, gate, task.when.as_ref(), &guards)
+                });
+                let item = match (&step.loop_source, &looped) {
+                    _ if !own => Item::Elsewhere,
+                    (None, _) => Item::NoLoop,
+                    (_, Some(looped)) => Item::Fields(looped),
+                    (Some(_), None) => Item::Value,
+                };
+                let reach = match (&looped, &step.loop_source) {
+                    (Some(looped), _) => gate.and(looped.reach),
+                    // Literal items are known: the task renders if its guard lets one
+                    // through, and a loop over none runs no task of the step's own.
+                    (None, Some(LoopSource::Literal(items))) if own => {
+                        gate.and(items.iter().fold(Reach::Never, |reach, item| {
+                            reach.or(guards.reach(task.when.as_ref(), Some(Bound::Value(item))))
+                        }))
+                    }
+                    (None, _) => gate.and(guards.reach(task.when.as_ref(), None)),
+                };
+                let (files, unreadable) = uploaded_files(task, &resolved, &plan.vars);
+                if let Some(unreadable) = unreadable {
+                    findings.problems.push(format!(
+                        "step '{}': file '{}': template {}: cannot be read: {}",
+                        step.name, task.resource, src, unreadable
+                    ));
+                }
+                for file in files {
+                    let shown = shown_source(&src, &resolved, &file);
+                    // Missing files are `missing_file_sources`'.
+                    let text = match std::fs::read(&file) {
+                        Ok(bytes) => bytes,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => {
                             findings.problems.push(format!(
-                                "step '{}': file '{}': template {} is not valid UTF-8, so it \
-                                 cannot be rendered; upload it without `template #true`",
-                                step.name, task.resource, shown
+                                "step '{}': file '{}': template {}: cannot be read: {}",
+                                step.name, task.resource, shown, e
                             ));
                             continue;
-                        };
-                        check_template(
-                            &text,
-                            &|line| at(&shown, line),
-                            &defined,
-                            &hosts,
-                            &list,
-                            Render { item, reach },
-                            &mut findings,
-                        );
-                    }
+                        }
+                    };
+                    let Ok(text) = String::from_utf8(text) else {
+                        findings.problems.push(format!(
+                            "step '{}': file '{}': template {} is not valid UTF-8, so it \
+                                 cannot be rendered; upload it without `template #true`",
+                            step.name, task.resource, shown
+                        ));
+                        continue;
+                    };
+                    check_template(
+                        &text,
+                        &|line| at(&shown, line),
+                        &defined,
+                        &hosts,
+                        &list,
+                        Render { item, reach },
+                        &mut findings,
+                    );
                 }
             }
             if let Some(name) = task.register.as_deref() {
@@ -916,10 +916,10 @@ pub fn escaped_parameter_warnings(plan: &Plan, is_defined: impl Fn(&str) -> bool
     let mut warnings = Vec::new();
     let mut check = |at: &str, text: &str| {
         for (_, token) in tokens(text) {
-            if let Token::Escaped(name) = token {
-                if defined(name) {
-                    warnings.push(old_escape_warning(at, name));
-                }
+            if let Token::Escaped(name) = token
+                && defined(name)
+            {
+                warnings.push(old_escape_warning(at, name));
             }
         }
     };

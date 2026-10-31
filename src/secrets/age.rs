@@ -151,12 +151,17 @@ mod tests {
 
     /// A throwaway ed25519 keypair: the private key on disk, the public key as a recipient.
     fn keypair(dir: &Path, name: &str) -> (std::path::PathBuf, SecretRecipient) {
-        let key = ssh_key::PrivateKey::random(&mut rand::thread_rng(), ssh_key::Algorithm::Ed25519)
-            .unwrap();
+        let key = russh::keys::ssh_key::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .unwrap();
         let path = dir.join(name);
         std::fs::write(
             &path,
-            key.to_openssh(ssh_key::LineEnding::LF).unwrap().as_str(),
+            key.to_openssh(russh::keys::ssh_key::LineEnding::LF)
+                .unwrap()
+                .as_str(),
         )
         .unwrap();
         let recipient = SecretRecipient {
@@ -233,14 +238,14 @@ mod tests {
     fn a_passphrase_protected_key_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let (path, recipient) = keypair(dir.path(), "alice");
-        let encrypted = ssh_key::PrivateKey::read_openssh_file(&path)
+        let encrypted = russh::keys::ssh_key::PrivateKey::read_openssh_file(&path)
             .unwrap()
-            .encrypt(&mut rand::thread_rng(), "hunter2")
+            .encrypt(&mut rand::rng(), "hunter2")
             .unwrap();
         std::fs::write(
             &path,
             encrypted
-                .to_openssh(ssh_key::LineEnding::LF)
+                .to_openssh(russh::keys::ssh_key::LineEnding::LF)
                 .unwrap()
                 .as_str(),
         )

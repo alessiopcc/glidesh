@@ -209,10 +209,10 @@ pub fn discover_secrets_path(explicit: Option<&Path>, inv_dir: Option<&Path>) ->
     if let Some(p) = explicit {
         return Some(p.to_path_buf());
     }
-    if let Ok(env) = std::env::var("GLIDESH_SECRETS") {
-        if !env.is_empty() {
-            return Some(PathBuf::from(env));
-        }
+    if let Ok(env) = std::env::var("GLIDESH_SECRETS")
+        && !env.is_empty()
+    {
+        return Some(PathBuf::from(env));
     }
     if let Some(dir) = inv_dir {
         let candidate = dir.join("secrets.kdl");

@@ -4,11 +4,10 @@ version = "2.0.0"
 edition = "2024"
 description = "Fast, stateless, SSH-only infrastructure automation"
 license = "MIT"
-rust-version = "1.86"
+rust-version = "1.89"
 
 [dependencies]
-russh = "0.49"
-russh-keys = "0.49"
+russh = { version = "0.65", default-features = false, features = ["flate2", "ring", "rsa"] }
 kdl = "6"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", default-features = false }
@@ -27,16 +26,17 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
-ssh-key = "0.6.7"
-russh-sftp = "2.1"
+russh-sftp = "3"
 sha2 = "0.11"
 base64 = "0.22"
 rpassword = "7"
 chacha20poly1305 = "0.10"
 scrypt = "0.11"
 zeroize = "1"
-rand = "0.8"
-age = { version = "0.12.1", features = ["ssh"] }
+rand = "0.10"
+# age 0.12.1 on crates.io needs ml-kem 0.2, which cannot build beside russh's ml-kem 0.3;
+# this commit moved age to ml-kem 0.3. Back to crates.io with the next age release.
+age = { git = "https://github.com/str4d/rage", rev = "b5b68c4f4f7ea5c368bc060f6fe0237549c3a13f", features = ["ssh"] }
 similar = "3.2.0"
 
 [target.'cfg(unix)'.dependencies]

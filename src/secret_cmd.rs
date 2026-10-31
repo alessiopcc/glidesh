@@ -144,10 +144,10 @@ pub(crate) fn secret_identity_path(
     if let Some(path) = explicit {
         return expand_tilde(path);
     }
-    if let Ok(env) = std::env::var("GLIDESH_SECRET_IDENTITY") {
-        if !env.is_empty() {
-            return expand_tilde(std::path::Path::new(&env));
-        }
+    if let Ok(env) = std::env::var("GLIDESH_SECRET_IDENTITY")
+        && !env.is_empty()
+    {
+        return expand_tilde(std::path::Path::new(&env));
     }
     ssh_key.map(expand_tilde).unwrap_or_else(default_ssh_key)
 }
@@ -655,9 +655,11 @@ fn shred(path: &std::path::Path) {
 /// `create_new` in `write_private` cannot be pre-empted by a symlink planted in a shared
 /// temp directory.
 fn edit_temp_path(file: &std::path::Path) -> PathBuf {
-    use rand::RngCore;
+    use rand::TryRng;
     let mut suffix = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut suffix);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut suffix)
+        .expect("the operating system has no random source");
     let hex: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
     let stem = file
         .file_stem()

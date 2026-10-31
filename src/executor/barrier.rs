@@ -112,10 +112,10 @@ impl Seat {
         let mut state = self.barrier.state.lock().unwrap();
         // A wait abandoned before its release still counts as arrived; withdraw it, or the
         // others could be released while a host that is still running has not finished.
-        if let SeatStatus::Waiting(generation) = *status {
-            if state.generation == generation {
-                state.arrived -= 1;
-            }
+        if let SeatStatus::Waiting(generation) = *status
+            && state.generation == generation
+        {
+            state.arrived -= 1;
         }
         state.participants -= 1;
         state.release_if_complete(&self.barrier.released);

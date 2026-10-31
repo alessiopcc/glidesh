@@ -439,10 +439,10 @@ impl ContainerModule {
         params: &ModuleParams,
         runtime: &str,
     ) -> Result<(), GlideshError> {
-        if let Some(network) = params.args.get("network").and_then(|v| v.as_str()) {
-            if !run_args::is_builtin_network(network) {
-                Self::ensure_network(ctx, runtime, network).await?;
-            }
+        if let Some(network) = params.args.get("network").and_then(|v| v.as_str())
+            && !run_args::is_builtin_network(network)
+        {
+            Self::ensure_network(ctx, runtime, network).await?;
         }
         Ok(())
     }
