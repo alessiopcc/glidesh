@@ -3,8 +3,9 @@
 //!
 //! Examples are the first plans a new user copies. Five of them once used a `target` node
 //! the parser has never accepted — the Getting Started plan among them — and nothing
-//! caught it, because nothing ran them. A `file` task with a `content` parameter no module
-//! reads went unnoticed the same way.
+//! caught it, because nothing ran them. The root README kept the same node after the
+//! website examples were fixed, and copying it failed with `Unknown node in plan: 'target'`.
+//! A `file` task with a `content` parameter no module reads went unnoticed the same way.
 
 use glidesh::config::types::Plan;
 use glidesh::modules::ModuleRegistry;
@@ -125,19 +126,38 @@ fn module_problems(plan: &Plan) -> Vec<String> {
     problems
 }
 
+/// Markdown a reader copies a plan from: the docs site, the root README, and each example's
+/// README. The website test used to be the only one, so the README's `target` node survived.
+fn documented_markdown() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    doc_files(&root.join("website/src/content/docs"), &mut files);
+    files.push(root.join("README.md"));
+    for entry in std::fs::read_dir(root.join("examples")).unwrap() {
+        let readme = entry.unwrap().path().join("README.md");
+        if readme.is_file() {
+            files.push(readme);
+        }
+    }
+    files
+}
+
 #[test]
 fn every_plan_in_the_docs_parses() {
-    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("website/src/content/docs");
-    let mut files = Vec::new();
-    doc_files(&docs, &mut files);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = documented_markdown();
 
     let mut checked = 0;
+    let mut readme_plans = 0;
     let mut failures = Vec::new();
     for file in &files {
         let page = std::fs::read_to_string(file).unwrap();
         for block in plan_blocks(&page) {
             checked += 1;
-            let rel = file.strip_prefix(&docs).unwrap_or(file);
+            if file == &root.join("README.md") {
+                readme_plans += 1;
+            }
+            let rel = file.strip_prefix(root).unwrap_or(file);
             match glidesh::config::parse_plan(&block) {
                 Ok(plan) => failures.extend(
                     module_problems(&plan)
@@ -151,6 +171,12 @@ fn every_plan_in_the_docs_parses() {
 
     // Guards the extraction itself: a change that found no plans would pass vacuously.
     assert!(checked >= 100, "only {checked} plan examples found");
+    // The README is what a new user copies first. Zero plans here would hide another
+    // `target` node, which is how the last one survived.
+    assert!(
+        readme_plans >= 1,
+        "root README has no plan example; the target-node check would pass vacuously"
+    );
     assert!(
         failures.is_empty(),
         "{} of {checked} documented plans do not parse:\n{}",
@@ -179,6 +205,15 @@ fn every_inventory_in_the_docs_and_examples_parses() {
         }
     }
     let docs_count = inventories.len();
+    for file in documented_markdown() {
+        if file.starts_with(&docs) {
+            continue;
+        }
+        let page = std::fs::read_to_string(&file).unwrap();
+        for block in inventory_blocks(&page) {
+            inventories.push((file.display().to_string(), block.to_string()));
+        }
+    }
     for entry in std::fs::read_dir(root.join("examples")).unwrap() {
         for file in std::fs::read_dir(entry.unwrap().path())
             .into_iter()
@@ -256,6 +291,40 @@ fn the_multi_tier_example_gets_its_variable_from_the_included_plan() {
     let mut plan = glidesh::config::parse_plan(&content).unwrap();
     glidesh::config::resolve_includes(&mut plan, &dir).unwrap();
     assert_eq!(plan.vars["ntp-service"], "chrony");
+}
+
+/// The docs say every example has an inventory, a plan, and a README, and both catalogs
+/// link them. A directory the README omits is the next plan a reader never finds.
+#[test]
+fn every_example_is_listed_and_has_the_files_the_docs_promise() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+    let index =
+        std::fs::read_to_string(root.join("website/src/content/docs/examples/index.md")).unwrap();
+    let mut found = 0;
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(root.join("examples")).unwrap() {
+        let dir = entry.unwrap().path();
+        if !dir.is_dir() {
+            continue;
+        }
+        found += 1;
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let link = format!("examples/{name}");
+        if !readme.contains(&link) {
+            missing.push(format!("README.md does not link {link}"));
+        }
+        if !index.contains(&link) {
+            missing.push(format!("website examples index does not link {link}"));
+        }
+        for file in ["inventory.kdl", "plan.kdl", "README.md"] {
+            if !dir.join(file).is_file() {
+                missing.push(format!("examples/{name} has no {file}"));
+            }
+        }
+    }
+    assert!(found >= 10, "only {found} examples found");
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
 
 /// Every `--tags` / `--skip-tags` an example's README shows must name tags its plan uses, or

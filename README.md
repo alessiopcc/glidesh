@@ -73,12 +73,10 @@ group "web" {
 }
 ```
 
-Describe the desired state in `plan.kdl`:
+Describe the desired state in `plan.kdl`. A plan says what to do; the command line says where:
 
 ```kdl
 plan "setup" {
-    target "web"
-
     step "Install nginx" {
         package "nginx" state="present"
     }
@@ -92,16 +90,16 @@ plan "setup" {
 }
 ```
 
-Run it:
+`-t web` runs that plan on the `web` group:
 
 ```bash
-glidesh run -i inventory.kdl -p plan.kdl
+glidesh run -i inventory.kdl -p plan.kdl -t web
 ```
 
 Preview changes without applying:
 
 ```bash
-glidesh run -i inventory.kdl -p plan.kdl --dry-run
+glidesh run -i inventory.kdl -p plan.kdl -t web --dry-run
 ```
 
 ## Documentation
@@ -118,11 +116,15 @@ See the [`examples/`](examples/) directory for ready-to-use examples:
 | [web-server](examples/web-server/) | Nginx with templated config |
 | [user-setup](examples/user-setup/) | Create users with SSH keys and groups |
 | [container-app](examples/container-app/) | Containerized app with ports and volumes |
+| [gpu-inference](examples/gpu-inference/) | GPU inference server with a readiness gate |
 | [disk-management](examples/disk-management/) | Dynamic disk formatting with register/loop |
 | [multi-tier](examples/multi-tier/) | Multi-group setup with plan includes |
+| [nix-deploy](examples/nix-deploy/) | Nix packages, shells, channels, and garbage collection |
 | [external-module](examples/external-module/) | External plugin module to set system MOTD |
 | [jump-host](examples/jump-host/) | Connect to hosts through an SSH bastion |
 | [host-module](examples/host-module/) | Run a command once and broadcast its result to every host |
+| [shared-token](examples/shared-token/) | One controller-side value shared with every host |
+| [run-as](examples/run-as/) | Escalate tasks with sudo, doas, or su |
 | [secrets](examples/secrets/) | Encrypted values in a committed vault, redacted from all output |
 
 ## License
