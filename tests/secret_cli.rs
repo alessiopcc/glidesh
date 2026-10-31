@@ -667,12 +667,17 @@ fn plain_rekey_leaves_every_token_untouched() {
 /// A throwaway ed25519 keypair on disk. Returns (private key path, public key path); the
 /// public key carries a comment, which is where the recipient name comes from.
 fn keypair(dir: &std::path::Path, name: &str) -> (String, String) {
-    let key =
-        ssh_key::PrivateKey::random(&mut rand::thread_rng(), ssh_key::Algorithm::Ed25519).unwrap();
+    let key = russh::keys::ssh_key::PrivateKey::random(
+        &mut rand::rng(),
+        russh::keys::ssh_key::Algorithm::Ed25519,
+    )
+    .unwrap();
     let private = dir.join(name);
     std::fs::write(
         &private,
-        key.to_openssh(ssh_key::LineEnding::LF).unwrap().as_str(),
+        key.to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .unwrap()
+            .as_str(),
     )
     .unwrap();
     let public = dir.join(format!("{name}.pub"));

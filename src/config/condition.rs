@@ -348,22 +348,22 @@ impl Parser {
 
     fn term(&mut self) -> Result<Term, String> {
         let negated = self.eat(&Token::Not);
-        if let Some(Token::Word(w)) = self.tokens.get(self.pos) {
-            if w == "defined" || w == "undefined" {
-                let keyword = w.clone();
-                self.pos += 1;
-                let var = match self.tokens.get(self.pos) {
-                    Some(Token::Var(v)) => v.clone(),
-                    _ => return Err(format!("'{keyword}' must be followed by a ${{variable}}")),
-                };
-                self.pos += 1;
-                let atom = if keyword == "defined" {
-                    Atom::Defined(var)
-                } else {
-                    Atom::Undefined(var)
-                };
-                return Ok(Term { negated, atom });
-            }
+        if let Some(Token::Word(w)) = self.tokens.get(self.pos)
+            && (w == "defined" || w == "undefined")
+        {
+            let keyword = w.clone();
+            self.pos += 1;
+            let var = match self.tokens.get(self.pos) {
+                Some(Token::Var(v)) => v.clone(),
+                _ => return Err(format!("'{keyword}' must be followed by a ${{variable}}")),
+            };
+            self.pos += 1;
+            let atom = if keyword == "defined" {
+                Atom::Defined(var)
+            } else {
+                Atom::Undefined(var)
+            };
+            return Ok(Term { negated, atom });
         }
         let left = self.operand()?;
         let op = if self.eat(&Token::Eq) {

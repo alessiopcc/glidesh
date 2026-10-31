@@ -216,10 +216,8 @@ impl RunLogger {
                 );
                 self.log_stream(host, "stdout", stdout);
                 self.log_stream(host, "stderr", stderr);
-                if *changed {
-                    if let Some(summary) = self.node_summaries.get_mut(host) {
-                        summary.changed += 1;
-                    }
+                if *changed && let Some(summary) = self.node_summaries.get_mut(host) {
+                    summary.changed += 1;
                 }
             }
             ExecutorEvent::ModuleFailed {
@@ -283,11 +281,11 @@ impl RunLogger {
                 self.log_line(host, &format!("[{}] [step: {}]", section.label(), step));
                 // A rescue handles the failure just logged; if the rescue fails too, its own
                 // failure is recorded in its place.
-                if *section == Section::Rescue {
-                    if let Some(summary) = self.node_summaries.get_mut(host) {
-                        summary.failed_step = None;
-                        summary.error = None;
-                    }
+                if *section == Section::Rescue
+                    && let Some(summary) = self.node_summaries.get_mut(host)
+                {
+                    summary.failed_step = None;
+                    summary.error = None;
                 }
             }
             ExecutorEvent::TaskSkipped {

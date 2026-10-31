@@ -16,7 +16,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table};
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -180,12 +180,12 @@ impl ConsoleState {
         for group in &inv.groups {
             let mut idxs = Vec::new();
             for h in &group.hosts {
-                if let Some(&i) = by_name.get(h.name.as_str()) {
-                    if seen.insert(h.name.clone()) {
-                        hosts.push(all[i].clone());
-                        host_plans.push(h.plan.clone());
-                        idxs.push(hosts.len() - 1);
-                    }
+                if let Some(&i) = by_name.get(h.name.as_str())
+                    && seen.insert(h.name.clone())
+                {
+                    hosts.push(all[i].clone());
+                    host_plans.push(h.plan.clone());
+                    idxs.push(hosts.len() - 1);
                 }
             }
             groups.push(GroupView {
@@ -198,12 +198,12 @@ impl ConsoleState {
         }
         let mut ungrouped_idxs = Vec::new();
         for h in &inv.ungrouped_hosts {
-            if let Some(&i) = by_name.get(h.name.as_str()) {
-                if seen.insert(h.name.clone()) {
-                    hosts.push(all[i].clone());
-                    host_plans.push(h.plan.clone());
-                    ungrouped_idxs.push(hosts.len() - 1);
-                }
+            if let Some(&i) = by_name.get(h.name.as_str())
+                && seen.insert(h.name.clone())
+            {
+                hosts.push(all[i].clone());
+                host_plans.push(h.plan.clone());
+                ungrouped_idxs.push(hosts.len() - 1);
             }
         }
         if !ungrouped_idxs.is_empty() {
@@ -810,10 +810,8 @@ async fn handle_dialog_key(state: &mut ConsoleState, key: KeyEvent, pool: &Arc<S
                         status: "active".to_string(),
                         kind: Some(kind),
                     });
-                    if save {
-                        if let Err(e) = tunnel_store::upsert(&state.inventory_path, spec) {
-                            state.set_flash(format!("tunnel saved but disk write failed: {}", e));
-                        }
+                    if save && let Err(e) = tunnel_store::upsert(&state.inventory_path, spec) {
+                        state.set_flash(format!("tunnel saved but disk write failed: {}", e));
                     }
                     state.dialog = None;
                     state.set_flash("tunnel opened");
@@ -902,10 +900,11 @@ async fn kill_tunnel(state: &mut ConsoleState, idx: usize, remove_saved: bool) {
     if state.tunnel_cursor >= state.tunnels.len() && !state.tunnels.is_empty() {
         state.tunnel_cursor = state.tunnels.len() - 1;
     }
-    if was_saved && remove_saved {
-        if let Err(e) = tunnel_store::remove(&state.inventory_path, direction, &via, local_port) {
-            state.set_flash(format!("saved spec removal failed: {}", e));
-        }
+    if was_saved
+        && remove_saved
+        && let Err(e) = tunnel_store::remove(&state.inventory_path, direction, &via, local_port)
+    {
+        state.set_flash(format!("saved spec removal failed: {}", e));
     }
 }
 

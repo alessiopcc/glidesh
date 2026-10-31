@@ -8,7 +8,7 @@ use crate::util::shell_escape;
 use crossterm::event::{self, Event, KeyModifiers};
 use russh::Channel;
 use russh::client;
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::OpenFlags;
@@ -400,9 +400,9 @@ impl SshSession {
                 message: e.to_string(),
             })?;
 
-        tracing::debug!("Auth result: {}", auth_result);
+        tracing::debug!("Auth result: {:?}", auth_result);
 
-        if !auth_result {
+        if !auth_result.success() {
             return Err(GlideshError::SshAuth {
                 host: host.to_string(),
                 user: user.to_string(),
@@ -472,7 +472,7 @@ impl SshSession {
                 message: format!("Jump host auth failed: {}", e),
             })?;
 
-        if !jump_auth {
+        if !jump_auth.success() {
             return Err(GlideshError::SshAuth {
                 host: jump.address.clone(),
                 user: jump.user.clone(),
@@ -528,7 +528,7 @@ impl SshSession {
                 message: e.to_string(),
             })?;
 
-        if !auth_result {
+        if !auth_result.success() {
             return Err(GlideshError::SshAuth {
                 host: host.to_string(),
                 user: user.to_string(),
@@ -590,7 +590,7 @@ impl SshSession {
             reg.insert(key.clone(), tx);
         }
 
-        let mut guard = self.handle.lock().await;
+        let guard = self.handle.lock().await;
         if let Err(e) = guard.tcpip_forward(bind_addr, bind_port as u32).await {
             drop(guard);
             if let Ok(mut reg) = self.forward_registry.lock() {
@@ -1654,10 +1654,10 @@ printf '%s' "$d""#;
                     Ok(true) => {
                         if let Ok(ev) = event::read() {
                             // Filter out Release/Repeat events (Windows sends both)
-                            if let Event::Key(ref k) = ev {
-                                if k.kind != crossterm::event::KeyEventKind::Press {
-                                    continue;
-                                }
+                            if let Event::Key(ref k) = ev
+                                && k.kind != crossterm::event::KeyEventKind::Press
+                            {
+                                continue;
                             }
                             if input_tx.send(ev).is_err() {
                                 break;

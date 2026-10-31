@@ -1,7 +1,7 @@
 use glidesh::modules::context::ModuleContext;
 use glidesh::modules::detect::{OsInfo, detect_os};
 use glidesh::ssh::SshSession;
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
@@ -28,8 +28,11 @@ macro_rules! skip_unless_integration {
 /// the private key in OpenSSH form for tests that drive the `glidesh` binary, which needs
 /// a key on disk rather than one in memory.
 pub fn generate_keypair() -> (PrivateKeyWithHashAlg, String, String) {
-    let private = ssh_key::PrivateKey::random(&mut rand::thread_rng(), ssh_key::Algorithm::Ed25519)
-        .expect("failed to generate ed25519 key");
+    let private = russh::keys::ssh_key::PrivateKey::random(
+        &mut rand::rng(),
+        russh::keys::ssh_key::Algorithm::Ed25519,
+    )
+    .expect("failed to generate ed25519 key");
 
     let pubkey_str = private
         .public_key()
@@ -37,12 +40,11 @@ pub fn generate_keypair() -> (PrivateKeyWithHashAlg, String, String) {
         .expect("failed to serialize public key");
 
     let private_pem = private
-        .to_openssh(ssh_key::LineEnding::LF)
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
         .expect("failed to serialize private key")
         .to_string();
 
-    let key = PrivateKeyWithHashAlg::new(Arc::new(private), None)
-        .expect("failed to create PrivateKeyWithHashAlg");
+    let key = PrivateKeyWithHashAlg::new(Arc::new(private), None);
 
     (key, pubkey_str, private_pem)
 }

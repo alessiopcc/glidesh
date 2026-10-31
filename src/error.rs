@@ -79,8 +79,8 @@ impl From<russh::Error> for GlideshError {
     }
 }
 
-impl From<russh_keys::Error> for GlideshError {
-    fn from(e: russh_keys::Error) -> Self {
+impl From<russh::keys::Error> for GlideshError {
+    fn from(e: russh::keys::Error) -> Self {
         GlideshError::KeyLoad {
             message: e.to_string(),
         }

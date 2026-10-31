@@ -134,23 +134,23 @@ impl Inventory {
     /// `"group:host"` (specific host within a specific group), or a
     /// comma-separated list combining any of the above.
     pub fn resolve_targets(&self, target: Option<&str>) -> Vec<ResolvedHost> {
-        if let Some(t) = target {
-            if t.contains(',') {
-                let mut out: Vec<ResolvedHost> = Vec::new();
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for piece in t.split(',') {
-                    let piece = piece.trim();
-                    if piece.is_empty() {
-                        continue;
-                    }
-                    for h in self.resolve_targets(Some(piece)) {
-                        if seen.insert(h.name.clone()) {
-                            out.push(h);
-                        }
+        if let Some(t) = target
+            && t.contains(',')
+        {
+            let mut out: Vec<ResolvedHost> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for piece in t.split(',') {
+                let piece = piece.trim();
+                if piece.is_empty() {
+                    continue;
+                }
+                for h in self.resolve_targets(Some(piece)) {
+                    if seen.insert(h.name.clone()) {
+                        out.push(h);
                     }
                 }
-                return out;
             }
+            return out;
         }
 
         let mut hosts = Vec::new();

@@ -402,17 +402,17 @@ impl FileModule {
 
         let data = ctx.download_file(src).await?;
 
-        if let Some(parent) = dest.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| GlideshError::Module {
-                    module: "file".to_string(),
-                    message: format!(
-                        "Failed to create local directory '{}': {}",
-                        parent.display(),
-                        e
-                    ),
-                })?;
-            }
+        if let Some(parent) = dest.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| GlideshError::Module {
+                module: "file".to_string(),
+                message: format!(
+                    "Failed to create local directory '{}': {}",
+                    parent.display(),
+                    e
+                ),
+            })?;
         }
 
         std::fs::write(&dest, &data).map_err(|e| GlideshError::Module {
@@ -635,10 +635,10 @@ impl FileModule {
             .iter()
             .filter(|(path, host_dir)| !host_dir && !through_link(path))
         {
-            if let Some(rel) = path.strip_prefix(&prefix).filter(|rel| !rel.is_empty()) {
-                if !strays.files.iter().any(|file| file == rel) {
-                    strays.files.push(rel.to_string());
-                }
+            if let Some(rel) = path.strip_prefix(&prefix).filter(|rel| !rel.is_empty())
+                && !strays.files.iter().any(|file| file == rel)
+            {
+                strays.files.push(rel.to_string());
             }
         }
         // A link to a directory where the source has one lists as a non-directory too, yet is

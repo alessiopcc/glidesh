@@ -11,7 +11,7 @@ use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
 use glidesh::secrets::Secrets;
 use glidesh::ssh::HostKeyPolicy;
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Semaphore, mpsc};
@@ -74,18 +74,17 @@ impl Engine {
             results.extend(batch_results);
 
             let is_last = index + 1 == sizes.len();
-            if !is_last {
-                if let Some(reason) =
+            if !is_last
+                && let Some(reason) =
                     rollout::stop_reason(self.plan.max_fail, failed, total, size, batch_failed)
-                {
-                    let rest: Vec<String> = hosts.map(|h| h.name).collect();
-                    aborted = rest.len();
-                    let _ = shared.sink.send(ExecutorEvent::HostsAborted {
-                        hosts: rest,
-                        reason,
-                    });
-                    break;
-                }
+            {
+                let rest: Vec<String> = hosts.map(|h| h.name).collect();
+                aborted = rest.len();
+                let _ = shared.sink.send(ExecutorEvent::HostsAborted {
+                    hosts: rest,
+                    reason,
+                });
+                break;
             }
         }
 

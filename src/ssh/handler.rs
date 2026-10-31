@@ -1,7 +1,7 @@
-use async_trait::async_trait;
-use russh::Channel;
 use russh::client;
-use ssh_key::PublicKey;
+use russh::keys::PublicKeyOrCertificate;
+use russh::keys::ssh_key::PublicKey;
+use russh::{Channel, ChannelOpenFailure};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -24,9 +24,7 @@ pub struct SshHandler {
     pub forward_registry: ForwardRegistry,
 }
 
-/// Returns the path to the user's known_hosts file.
-/// Unlike russh_keys which uses `~/ssh/known_hosts` on Windows,
-/// we always use `~/.ssh/known_hosts` to match OpenSSH behavior.
+/// The user's known_hosts file, `~/.ssh/known_hosts` on every platform as OpenSSH reads it.
 fn known_hosts_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("known_hosts"))
 }
@@ -39,17 +37,22 @@ impl SshHandler {
     }
 }
 
-#[async_trait]
 impl client::Handler for SshHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         if !self.host_key_policy.verify {
             return Ok(true);
         }
+        // known_hosts trusts the key itself, so a certificate is checked by the key it
+        // certifies, as a plain key would be.
+        let server_public_key = &match server_key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+            PublicKeyOrCertificate::Certificate(cert) => PublicKey::from(cert.public_key().clone()),
+        };
 
         let Some(path) = known_hosts_path() else {
             self.set_host_key_error(
@@ -58,7 +61,7 @@ impl client::Handler for SshHandler {
             return Ok(false);
         };
 
-        match russh_keys::known_hosts::check_known_hosts_path(
+        match russh::keys::known_hosts::check_known_hosts_path(
             &self.host,
             self.port,
             server_public_key,
@@ -72,7 +75,7 @@ impl client::Handler for SshHandler {
                         self.host,
                         self.port
                     );
-                    if let Err(e) = russh_keys::known_hosts::learn_known_hosts_path(
+                    if let Err(e) = russh::keys::known_hosts::learn_known_hosts_path(
                         &self.host,
                         self.port,
                         server_public_key,
@@ -95,7 +98,7 @@ impl client::Handler for SshHandler {
                     Ok(false)
                 }
             }
-            Err(russh_keys::Error::KeyChanged { line }) => {
+            Err(russh::keys::Error::KeyChanged { line }) => {
                 self.set_host_key_error(format!(
                     "HOST KEY VERIFICATION FAILED for {}:{}! \
                      Key differs from known_hosts line {}. \
@@ -123,6 +126,7 @@ impl client::Handler for SshHandler {
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
+        reply: client::ChannelOpenHandle,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
         let key = (connected_address.to_string(), connected_port as u16);
@@ -132,8 +136,12 @@ impl client::Handler for SshHandler {
             .ok()
             .and_then(|m| m.get(&key).cloned());
         if let Some(tx) = tx {
+            reply.accept().await;
             let _ = tx.send(channel);
         } else {
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
             tracing::warn!(
                 "received forwarded-tcpip for {}:{} with no active registration; dropping",
                 connected_address,

@@ -1,7 +1,7 @@
 use crate::config::types::ResolvedHost;
 use crate::error::GlideshError;
 use crate::ssh::{HostKeyPolicy, SshSession};
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;

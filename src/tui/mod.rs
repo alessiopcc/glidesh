@@ -16,7 +16,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use russh_keys::key::PrivateKeyWithHashAlg;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use state::{FocusPanel, HostConnectionInfo, TuiState};
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -75,70 +75,69 @@ pub async fn run_tui(
         // Poll for keyboard events (16ms = ~60fps)
         let mut shell_request: Option<HostConnectionInfo> = None;
 
-        if event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                let mut s = state.lock().unwrap();
+        if event::poll(Duration::from_millis(16))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            let mut s = state.lock().unwrap();
 
-                // Handle confirm-quit dialog
-                if s.confirm_quit {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            aborted = true;
-                            break;
-                        }
-                        _ => {
-                            s.confirm_quit = false;
-                            continue;
-                        }
-                    }
-                }
-
+            if s.confirm_quit {
                 match key.code {
-                    KeyCode::Char('q') => {
-                        if s.run_complete {
-                            break;
-                        } else {
-                            s.confirm_quit = true;
-                        }
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        aborted = true;
+                        break;
                     }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Enter if s.focus == FocusPanel::Nodes && s.viewing_node.is_none() => {
-                        s.enter_node_view();
+                    _ => {
+                        s.confirm_quit = false;
+                        continue;
                     }
-                    KeyCode::Esc if s.viewing_node.is_some() => {
-                        s.exit_node_view();
-                    }
-                    KeyCode::Tab | KeyCode::BackTab => {
-                        s.toggle_focus();
-                    }
-                    KeyCode::Up => match s.focus {
-                        FocusPanel::Nodes => s.prev_node(),
-                        FocusPanel::Logs => s.scroll_log_up(1),
-                    },
-                    KeyCode::Down => match s.focus {
-                        FocusPanel::Nodes => s.next_node(),
-                        FocusPanel::Logs => s.scroll_log_down(1),
-                    },
-                    KeyCode::Char('j') => match s.focus {
-                        FocusPanel::Nodes => s.next_node(),
-                        FocusPanel::Logs => s.scroll_log_down(1),
-                    },
-                    KeyCode::Char('k') => match s.focus {
-                        FocusPanel::Nodes => s.prev_node(),
-                        FocusPanel::Logs => s.scroll_log_up(1),
-                    },
-                    KeyCode::PageUp => s.scroll_log_up(10),
-                    KeyCode::PageDown => s.scroll_log_down(10),
-                    KeyCode::Home | KeyCode::Char('g') => s.scroll_log_to_top(),
-                    KeyCode::End | KeyCode::Char('G') => s.scroll_log_to_bottom(),
-                    KeyCode::Char('s') if s.run_complete && s.focus == FocusPanel::Nodes => {
-                        shell_request = Some(s.connection_info[s.selected_node].clone());
-                    }
-                    _ => {}
                 }
+            }
+
+            match key.code {
+                KeyCode::Char('q') => {
+                    if s.run_complete {
+                        break;
+                    } else {
+                        s.confirm_quit = true;
+                    }
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                KeyCode::Enter if s.focus == FocusPanel::Nodes && s.viewing_node.is_none() => {
+                    s.enter_node_view();
+                }
+                KeyCode::Esc if s.viewing_node.is_some() => {
+                    s.exit_node_view();
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    s.toggle_focus();
+                }
+                KeyCode::Up => match s.focus {
+                    FocusPanel::Nodes => s.prev_node(),
+                    FocusPanel::Logs => s.scroll_log_up(1),
+                },
+                KeyCode::Down => match s.focus {
+                    FocusPanel::Nodes => s.next_node(),
+                    FocusPanel::Logs => s.scroll_log_down(1),
+                },
+                KeyCode::Char('j') => match s.focus {
+                    FocusPanel::Nodes => s.next_node(),
+                    FocusPanel::Logs => s.scroll_log_down(1),
+                },
+                KeyCode::Char('k') => match s.focus {
+                    FocusPanel::Nodes => s.prev_node(),
+                    FocusPanel::Logs => s.scroll_log_up(1),
+                },
+                KeyCode::PageUp => s.scroll_log_up(10),
+                KeyCode::PageDown => s.scroll_log_down(10),
+                KeyCode::Home | KeyCode::Char('g') => s.scroll_log_to_top(),
+                KeyCode::End | KeyCode::Char('G') => s.scroll_log_to_bottom(),
+                KeyCode::Char('s') if s.run_complete && s.focus == FocusPanel::Nodes => {
+                    shell_request = Some(s.connection_info[s.selected_node].clone());
+                }
+                _ => {}
             }
         }
 

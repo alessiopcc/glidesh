@@ -161,14 +161,13 @@ fn prepare_landlock(_module: Option<&Path>) -> PreparedLandlock {
 #[cfg(target_os = "linux")]
 fn restrict_landlock(prepared: PreparedLandlock) {
     use landlock::{CompatLevel, Compatible};
-    if let Some(ruleset) = prepared {
-        if let Err(e) = ruleset
+    if let Some(ruleset) = prepared
+        && let Err(e) = ruleset
             .set_compatibility(CompatLevel::BestEffort)
             .restrict_self()
-        {
-            // Cannot use eprintln (allocates) in pre_exec; silently ignore.
-            let _ = e;
-        }
+    {
+        // Cannot use eprintln (allocates) in pre_exec; silently ignore.
+        let _ = e;
     }
 }
 

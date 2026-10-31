@@ -16,10 +16,10 @@ impl SystemdModule {
     }
 
     fn unit_name(resource_name: &str) -> String {
-        if let Some((_base, ext)) = resource_name.rsplit_once('.') {
-            if !ext.is_empty() {
-                return resource_name.to_string();
-            }
+        if let Some((_base, ext)) = resource_name.rsplit_once('.')
+            && !ext.is_empty()
+        {
+            return resource_name.to_string();
         }
         format!("{}.service", resource_name)
     }

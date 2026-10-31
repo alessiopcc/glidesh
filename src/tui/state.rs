@@ -225,11 +225,9 @@ impl TuiState {
                 for line in crate::logging::stream_log_lines("stderr", stderr) {
                     self.push_node_log(host, line);
                 }
-                if *changed {
-                    if let Some(&idx) = self.node_index.get(host) {
-                        self.nodes[idx].changed += 1;
-                        self.total_changed += 1;
-                    }
+                if *changed && let Some(&idx) = self.node_index.get(host) {
+                    self.nodes[idx].changed += 1;
+                    self.total_changed += 1;
                 }
             }
             ExecutorEvent::ModuleFailed {

@@ -94,10 +94,10 @@ fn build_cli_run_as(args: &cli::RunArgs) -> Result<RunAsSpec, GlideshError> {
 
 /// Source the escalation password: `GLIDESH_RUNAS_PASS` first, then `--ask-pass`.
 fn source_run_as_password(args: &cli::RunArgs) -> Result<Option<String>, GlideshError> {
-    if let Ok(p) = std::env::var("GLIDESH_RUNAS_PASS") {
-        if !p.is_empty() {
-            return Ok(Some(p));
-        }
+    if let Ok(p) = std::env::var("GLIDESH_RUNAS_PASS")
+        && !p.is_empty()
+    {
+        return Ok(Some(p));
     }
     if args.ask_pass {
         let p = rpassword::prompt_password("run-as password: ")
@@ -271,14 +271,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         let key_path = expand_tilde(&args.key.clone().unwrap_or_else(default_ssh_key));
 
         tracing::info!("Connecting to {}@{}:{}", user, host, args.port);
-        tracing::debug!("Using SSH key: {}", key_path.display());
-
-        let key_pair = russh_keys::load_secret_key(&key_path, None)?;
-        let hash_alg = match key_pair.algorithm() {
-            ssh_key::Algorithm::Rsa { .. } => Some(ssh_key::HashAlg::Sha256),
-            _ => None,
-        };
-        let key = russh_keys::key::PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg)?;
+        let key = load_key_from_path(&key_path)?;
 
         let host_key_policy = HostKeyPolicy {
             verify: !args.no_host_key_check,
@@ -1494,7 +1487,7 @@ fn build_inventory_template_data(inventory: &Inventory) -> TemplateData {
 fn load_ssh_key(
     args: &cli::RunArgs,
     targets: &[&config::types::ResolvedHost],
-) -> Result<russh_keys::key::PrivateKeyWithHashAlg, GlideshError> {
+) -> Result<russh::keys::key::PrivateKeyWithHashAlg, GlideshError> {
     let key_path = if let Some(ref k) = args.key {
         expand_tilde(k)
     } else if let Some(inv_key) = targets.first().and_then(|h| h.vars.get("ssh-key")) {
@@ -1507,17 +1500,17 @@ fn load_ssh_key(
 
 fn load_key_from_path(
     key_path: &std::path::Path,
-) -> Result<russh_keys::key::PrivateKeyWithHashAlg, GlideshError> {
+) -> Result<russh::keys::key::PrivateKeyWithHashAlg, GlideshError> {
     tracing::debug!("Using SSH key: {}", key_path.display());
-    let key_pair = russh_keys::load_secret_key(key_path, None)?;
+    let key_pair = russh::keys::load_secret_key(key_path, None)?;
     let hash_alg = match key_pair.algorithm() {
-        ssh_key::Algorithm::Rsa { .. } => Some(ssh_key::HashAlg::Sha256),
+        russh::keys::ssh_key::Algorithm::Rsa { .. } => Some(russh::keys::ssh_key::HashAlg::Sha256),
         _ => None,
     };
-    Ok(russh_keys::key::PrivateKeyWithHashAlg::new(
+    Ok(russh::keys::key::PrivateKeyWithHashAlg::new(
         Arc::new(key_pair),
         hash_alg,
-    )?)
+    ))
 }
 
 async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
@@ -1698,13 +1691,13 @@ fn resolve_key_path(
 fn resolve_key(
     cli_key: Option<&std::path::Path>,
     inv_vars: Option<&HashMap<String, String>>,
-) -> Result<russh_keys::key::PrivateKeyWithHashAlg, GlideshError> {
+) -> Result<russh::keys::key::PrivateKeyWithHashAlg, GlideshError> {
     load_key_from_path(&resolve_key_path(cli_key, inv_vars))
 }
 
 async fn connect_host(
     host: &config::types::ResolvedHost,
-    key: &russh_keys::key::PrivateKeyWithHashAlg,
+    key: &russh::keys::key::PrivateKeyWithHashAlg,
     policy: HostKeyPolicy,
 ) -> Result<SshSession, GlideshError> {
     match &host.jump {
@@ -1730,7 +1723,7 @@ fn redacted_lines(output: &str, registry: &glidesh::secrets::SecretRegistry) -> 
 /// command could not be built is reported and counted as failed without connecting.
 async fn run_command_on_hosts(
     jobs: Vec<(config::types::ResolvedHost, Result<String, String>)>,
-    key: &russh_keys::key::PrivateKeyWithHashAlg,
+    key: &russh::keys::key::PrivateKeyWithHashAlg,
     policy: HostKeyPolicy,
     concurrency: usize,
     registry: Arc<glidesh::secrets::SecretRegistry>,
@@ -1823,7 +1816,7 @@ async fn run_command_on_hosts(
 async fn run_with_ui(
     group_plans: Vec<executor::GroupPlan>,
     registry: Arc<ModuleRegistry>,
-    key: russh_keys::key::PrivateKeyWithHashAlg,
+    key: russh::keys::key::PrivateKeyWithHashAlg,
     secrets: Arc<glidesh::secrets::Secrets>,
     tags: Arc<TagFilter>,
     run_name: &str,
@@ -1924,10 +1917,10 @@ async fn run_with_ui(
         let _ = forwarder.await;
         let _ = log_consumer.await;
 
-        if let Ok(Ok(summary)) = engine_result {
-            if let Some(err) = run_failure(&summary) {
-                return Err(err);
-            }
+        if let Ok(Ok(summary)) = engine_result
+            && let Some(err) = run_failure(&summary)
+        {
+            return Err(err);
         }
     } else {
         let consumer = tokio::spawn(async move {
