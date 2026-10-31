@@ -370,6 +370,7 @@ impl GuardScope {
         conditions: impl Iterator<Item = &'c Condition>,
         present: &dyn Fn(&str) -> Option<bool>,
         list: &dyn Fn(&str) -> Option<List>,
+        scalar: &dyn Fn(&str) -> bool,
     ) -> Self {
         let mut scope = GuardScope {
             vars: HashMap::new(),
@@ -381,6 +382,11 @@ impl GuardScope {
                 Some(List::Unresolved) => None,
                 Some(_) => {
                     scope.collections.insert(var.to_string(), Vec::new());
+                    // A run compares a value of the same name instead of the list.
+                    if scalar(var) {
+                        scope.unknown.insert(var.to_string());
+                        scope.vars.insert(var.to_string(), String::new());
+                    }
                     continue;
                 }
                 None => present(var),
@@ -584,14 +590,22 @@ pub fn template_reference_findings(
         }
         (is_defined(var) || hosts(var) == Coverage::All).then_some(true)
     };
+    let scalar = |var: &str, registered: &std::collections::HashSet<&str>| {
+        registered.contains(var) || is_defined(var) || hosts(var) != Coverage::None
+    };
     for step in plan.steps() {
         let looped = match &step.loop_source {
             Some(LoopSource::Variable(name)) => list(name).map(|items| (name.as_str(), items)),
             _ => None,
         };
         // The executor decides the step's `when=` once, before any of its tasks registers.
-        let step_gate = GuardScope::new(step.when.iter(), &|var| presence(var, &registered), &list)
-            .reach(step.when.as_ref(), None);
+        let step_gate = GuardScope::new(
+            step.when.iter(),
+            &|var| presence(var, &registered),
+            &list,
+            &|var| scalar(var, &registered),
+        )
+        .reach(step.when.as_ref(), None);
         // `rescue` and `always` run after the loop; `template_scope_problems` reports it.
         let blocks = [
             (&step.tasks, Part::Tasks),
@@ -637,7 +651,9 @@ pub fn template_reference_findings(
                         }
                         presence(var, &registered)
                     };
-                    let guards = GuardScope::new(task.when.iter(), &present, &list);
+                    let guards = GuardScope::new(task.when.iter(), &present, &list, &|var| {
+                        scalar(var, &registered)
+                    });
                     let gate = step_gate;
                     let looped = looped.as_ref().filter(|_| own).map(|(name, items)| {
                         Looped::new(name, items, gate, task.when.as_ref(), &guards)
@@ -1340,6 +1356,7 @@ echo ${VAR-default}
             |name| match name {
                 "region" => Coverage::All,
                 "tier" => Coverage::Partial(vec!["db-1".to_string(), "db-2".to_string()]),
+                "flags" => Coverage::Partial(vec!["db-1".to_string()]),
                 _ => Coverage::None,
             },
             list_of,
@@ -1705,6 +1722,26 @@ echo ${VAR-default}
         );
         assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    }
+
+    /// A guard compares the value of a list's name when a host or a task sets one, which
+    /// only a run knows.
+    #[test]
+    fn a_value_sharing_a_lists_name_leaves_a_guard_undecided() {
+        let found = template_findings(VMS_PORT, &in_step("", "${empty} == on"));
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        let found = template_findings(VMS_PORT, &in_step("", "${flags} == on"));
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+        let found = template_findings(
+            VMS_PORT,
+            r#"step "Deploy" {
+                shell "echo on" register="empty"
+                file "/etc/app.conf" src="app.conf" template=#true when="${empty} == on"
+            }"#,
+        );
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
     }
 
     /// A literal loop's items are known, so a guard on `${@item}` is decided per item.
