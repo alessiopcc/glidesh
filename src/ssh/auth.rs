@@ -107,7 +107,6 @@ impl Auth {
                     let keys = identities(&mut agent).await;
                     Ok::<_, String>((agent, keys))
                 };
-                // Signing is left unbounded: it also waits on the server, which may be slow.
                 let (mut agent, keys) =
                     tokio::time::timeout(AGENT_TIMEOUT, setup)
                         .await
@@ -118,13 +117,17 @@ impl Auth {
                 for key in &keys {
                     let hash =
                         matches!(key.algorithm(), Algorithm::Rsa { .. }).then_some(HashAlg::Sha256);
-                    match handle
-                        .authenticate_publickey_with(user, key.clone(), hash, &mut agent)
-                        .await
-                    {
-                        Ok(result) if result.success() => return Ok(()),
-                        Ok(_) => {}
-                        Err(e) => refused = Some(e.to_string()),
+                    let attempt =
+                        handle.authenticate_publickey_with(user, key.clone(), hash, &mut agent);
+                    match tokio::time::timeout(SIGN_TIMEOUT, attempt).await {
+                        Ok(Ok(result)) if result.success() => return Ok(()),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => refused = Some(e.to_string()),
+                        Err(_) => {
+                            return Err(format!(
+                                "the SSH agent did not sign within {SIGN_TIMEOUT:?}"
+                            ));
+                        }
                     }
                 }
                 // A key the agent would not sign with may be the right one, so its refusal is
@@ -146,6 +149,11 @@ type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
 
 /// How long an agent may take to list its keys before glidesh goes on without it.
 const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long one signed login attempt may take. It waits on the server too, possibly through a
+/// jump host, so it matches OpenSSH's default `LoginGraceTime`, past which the server has
+/// given up anyway.
+const SIGN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The keys the user's agent holds, none when there is no agent. A socket that accepts but
 /// never answers, like a stale forwarded agent, counts as none rather than hanging the run.
