@@ -3,12 +3,12 @@ use crate::error::GlideshError;
 use crate::modules::escalation;
 use crate::modules::file_tree::{PathKind, PathStat, RemoteKind, Strays, join as tree_join};
 use crate::ssh::HostKeyPolicy;
+use crate::ssh::auth::Auth;
 use crate::ssh::handler::{ForwardRegistry, SshHandler, new_forward_registry};
 use crate::util::shell_escape;
 use crossterm::event::{self, Event, KeyModifiers};
 use russh::Channel;
 use russh::client;
-use russh::keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File as SftpFile;
 use russh_sftp::protocol::OpenFlags;
@@ -364,7 +364,7 @@ impl SshSession {
         host: &str,
         port: u16,
         user: &str,
-        key: &PrivateKeyWithHashAlg,
+        auth: &Auth,
         host_key_policy: HostKeyPolicy,
     ) -> Result<Self, GlideshError> {
         let config = ssh_config();
@@ -391,24 +391,13 @@ impl SshSession {
             })?;
 
         tracing::debug!("TCP connected, authenticating as '{}' with pubkey", user);
-        let auth_result = handle
-            .authenticate_publickey(user, key.clone())
+        auth.login(&mut handle, user)
             .await
-            .map_err(|e| GlideshError::SshAuth {
+            .map_err(|message| GlideshError::SshAuth {
                 host: host.to_string(),
                 user: user.to_string(),
-                message: e.to_string(),
+                message,
             })?;
-
-        tracing::debug!("Auth result: {:?}", auth_result);
-
-        if !auth_result.success() {
-            return Err(GlideshError::SshAuth {
-                host: host.to_string(),
-                user: user.to_string(),
-                message: "Authentication rejected by server".to_string(),
-            });
-        }
 
         Ok(SshSession {
             handle: tokio::sync::Mutex::new(handle),
@@ -428,7 +417,7 @@ impl SshSession {
         host: &str,
         port: u16,
         user: &str,
-        key: &PrivateKeyWithHashAlg,
+        auth: &Auth,
         host_key_policy: HostKeyPolicy,
         jump: &ResolvedJumpHost,
     ) -> Result<Self, GlideshError> {
@@ -463,22 +452,13 @@ impl SshSession {
         })?;
 
         tracing::debug!("Jump host TCP connected, authenticating as '{}'", jump.user);
-        let jump_auth = jump_handle
-            .authenticate_publickey(&jump.user, key.clone())
+        auth.login(&mut jump_handle, &jump.user)
             .await
             .map_err(|e| GlideshError::SshAuth {
                 host: jump.address.clone(),
                 user: jump.user.clone(),
-                message: format!("Jump host auth failed: {}", e),
+                message: format!("Jump host auth failed: {e}"),
             })?;
-
-        if !jump_auth.success() {
-            return Err(GlideshError::SshAuth {
-                host: jump.address.clone(),
-                user: jump.user.clone(),
-                message: "Jump host authentication rejected by server".to_string(),
-            });
-        }
 
         tracing::debug!("Opening tunnel through jump host to {}:{}", host, port);
         let channel = jump_handle
@@ -519,22 +499,13 @@ impl SshSession {
             })?;
 
         tracing::debug!("Tunnel established, authenticating as '{}' on target", user);
-        let auth_result = handle
-            .authenticate_publickey(user, key.clone())
+        auth.login(&mut handle, user)
             .await
             .map_err(|e| GlideshError::SshAuth {
                 host: host.to_string(),
                 user: user.to_string(),
-                message: e.to_string(),
+                message: format!("{e} (via jump host)"),
             })?;
-
-        if !auth_result.success() {
-            return Err(GlideshError::SshAuth {
-                host: host.to_string(),
-                user: user.to_string(),
-                message: "Authentication rejected by target server (via jump host)".to_string(),
-            });
-        }
 
         Ok(SshSession {
             handle: tokio::sync::Mutex::new(handle),

@@ -5,6 +5,7 @@ use crossterm::event::{
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use glidesh::config::types::ResolvedHost;
 use glidesh::error::GlideshError;
+use glidesh::ssh::auth::Auth;
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -12,7 +13,6 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
-use russh::keys::key::PrivateKeyWithHashAlg;
 use std::io;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -122,7 +122,7 @@ impl ShellTuiState {
 /// Shows an input bar at the bottom, streams command output above.
 pub async fn run_shell_tui(
     hosts: &[ResolvedHost],
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     host_key_policy: HostKeyPolicy,
     concurrency: usize,
 ) -> Result<(), GlideshError> {
@@ -140,7 +140,7 @@ pub async fn run_shell_tui(
 
 async fn run_shell_tui_inner(
     hosts: &[ResolvedHost],
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     host_key_policy: HostKeyPolicy,
     concurrency: usize,
 ) -> Result<(), GlideshError> {
@@ -170,7 +170,7 @@ async fn shell_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &Arc<std::sync::Mutex<ShellTuiState>>,
     hosts: &[ResolvedHost],
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     host_key_policy: HostKeyPolicy,
     concurrency: usize,
 ) -> Result<(), GlideshError> {
@@ -310,7 +310,7 @@ async fn shell_tui_loop(
 async fn run_on_all_hosts(
     hosts: &[ResolvedHost],
     command: &str,
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     policy: HostKeyPolicy,
     semaphore: Arc<tokio::sync::Semaphore>,
     tx: &mpsc::UnboundedSender<ShellMsg>,
@@ -378,7 +378,7 @@ async fn run_on_all_hosts(
 
 async fn connect_to_host(
     host: &ResolvedHost,
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     policy: HostKeyPolicy,
 ) -> Result<SshSession, GlideshError> {
     match &host.jump {

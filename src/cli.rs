@@ -225,9 +225,14 @@ pub struct ConsoleArgs {
     #[arg(short, long)]
     pub command: Option<String>,
 
-    /// SSH private key [default: the inventory's `ssh-key` variable, else ~/.ssh/id_ed25519]
+    /// SSH private key [default: the inventory's `ssh-key` variable, else the SSH agent, else
+    /// ~/.ssh/id_ed25519]
     #[arg(short, long)]
     pub key: Option<PathBuf>,
+
+    /// Do not log in through the SSH agent, even when no key is named
+    #[arg(long)]
+    pub no_agent: bool,
 
     /// Hosts running --command at once (minimum 1)
     #[arg(long, default_value = "10", value_parser = parse_concurrency)]
@@ -283,9 +288,14 @@ pub struct RunArgs {
     #[arg(short = 'P', long, default_value = "22")]
     pub port: u16,
 
-    /// SSH private key [default: the inventory's `ssh-key` variable, else ~/.ssh/id_ed25519]
+    /// SSH private key [default: the inventory's `ssh-key` variable, else the SSH agent, else
+    /// ~/.ssh/id_ed25519]
     #[arg(short, long)]
     pub key: Option<PathBuf>,
+
+    /// Do not log in through the SSH agent, even when no key is named
+    #[arg(long)]
+    pub no_agent: bool,
 
     /// Run this one command on --host instead of a plan. For inventory hosts, use
     /// `glidesh console -t <target> -c <command>`
@@ -531,6 +541,8 @@ mod tests {
             "dir-mode= file-mode=",
             "`[<host>]`, the inventory host name",
             "$GLIDESH_KEY_PASS",
+            "SSH agent",
+            "--no-agent",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }

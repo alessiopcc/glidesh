@@ -6,6 +6,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use glidesh::config::types::{Inventory, ResolvedHost};
 use glidesh::error::GlideshError;
 use glidesh::ssh::HostKeyPolicy;
+use glidesh::ssh::auth::Auth;
 use glidesh::ssh::session_pool::SessionPool;
 use glidesh::ssh::tunnel::{
     LocalForward, ReverseForward, TunnelDirection, start_local_forward, start_reverse_forward,
@@ -16,7 +17,6 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table};
-use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -155,7 +155,8 @@ struct ConsoleState {
     confirm_quit: bool,
     confirm_kill: Option<usize>,
     flash: Option<(String, std::time::Instant)>,
-    ssh_key_path: PathBuf,
+    /// The key file the console logs in with; `None` when it uses the SSH agent.
+    ssh_key_path: Option<PathBuf>,
     host_key_policy: HostKeyPolicy,
 }
 
@@ -163,7 +164,7 @@ impl ConsoleState {
     fn new(
         inventory_path: PathBuf,
         inv: &Inventory,
-        ssh_key_path: PathBuf,
+        ssh_key_path: Option<PathBuf>,
         host_key_policy: HostKeyPolicy,
     ) -> Self {
         let mut hosts: Vec<ResolvedHost> = Vec::new();
@@ -364,8 +365,8 @@ impl ConsoleState {
 pub async fn run(
     inventory_path: &Path,
     inventory: &Inventory,
-    ssh_key: PrivateKeyWithHashAlg,
-    ssh_key_path: PathBuf,
+    ssh_key: Auth,
+    ssh_key_path: Option<PathBuf>,
     policy: HostKeyPolicy,
 ) -> io::Result<()> {
     let mut state = ConsoleState::new(
@@ -430,7 +431,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut ConsoleState,
     pool: &Arc<SessionPool>,
-    ssh_key: &PrivateKeyWithHashAlg,
+    ssh_key: &Auth,
     policy: HostKeyPolicy,
 ) -> io::Result<()> {
     loop {
@@ -507,7 +508,7 @@ async fn handle_tree_key(
     state: &mut ConsoleState,
     key: KeyEvent,
     pool: &Arc<SessionPool>,
-    ssh_key: &PrivateKeyWithHashAlg,
+    ssh_key: &Auth,
     policy: HostKeyPolicy,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> io::Result<()> {
@@ -652,9 +653,10 @@ async fn run_plan(
         .arg("-i")
         .arg(&state.inventory_path)
         .arg("-t")
-        .arg(&target)
-        .arg("-k")
-        .arg(&state.ssh_key_path);
+        .arg(&target);
+    if let Some(key) = &state.ssh_key_path {
+        cmd.arg("-k").arg(key);
+    }
     if !state.host_key_policy.verify {
         cmd.arg("--no-host-key-check");
     }
@@ -1282,7 +1284,7 @@ mod tests {
         ConsoleState::new(
             PathBuf::from("inventory.kdl"),
             &inventory,
-            PathBuf::from("id_ed25519"),
+            Some(PathBuf::from("id_ed25519")),
             HostKeyPolicy {
                 verify: true,
                 accept_new: false,

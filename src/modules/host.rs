@@ -9,8 +9,8 @@ use crate::config::types::ResolvedHost;
 use crate::error::GlideshError;
 use crate::modules::ModuleParams;
 use crate::modules::shell::{login_enabled, resolve_cmd_from_params, wrap_login};
+use crate::ssh::auth::Auth;
 use crate::ssh::{HostKeyPolicy, SshSession};
-use russh::keys::key::PrivateKeyWithHashAlg;
 
 pub const MODULE_NAME: &str = "host";
 
@@ -33,7 +33,7 @@ pub struct HostOutput {
 pub async fn run_host_task(
     params: &ModuleParams,
     all_targets: &[ResolvedHost],
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     host_key_policy: HostKeyPolicy,
     dry_run: bool,
 ) -> Result<HostOutput, GlideshError> {
@@ -134,7 +134,7 @@ async fn run_on_named_host(
     target_name: &str,
     command: &str,
     all_targets: &[ResolvedHost],
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     host_key_policy: HostKeyPolicy,
 ) -> Result<HostOutput, GlideshError> {
     let target = all_targets
@@ -337,12 +337,15 @@ mod tests {
         }
     }
 
-    fn dummy_key() -> PrivateKeyWithHashAlg {
+    fn dummy_key() -> Auth {
         let private = russh::keys::ssh_key::PrivateKey::random(
             &mut rand::rng(),
             russh::keys::ssh_key::Algorithm::Ed25519,
         )
         .expect("ed25519");
-        PrivateKeyWithHashAlg::new(std::sync::Arc::new(private), None)
+        Auth::Key(russh::keys::key::PrivateKeyWithHashAlg::new(
+            std::sync::Arc::new(private),
+            None,
+        ))
     }
 }

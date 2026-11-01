@@ -240,7 +240,8 @@ glidesh console [OPTIONS]
 | `--target <NAME>` | `-t` | Group, host, or `group:host` to open a shell on or run `-c` against | — |
 | `--command <CMD>` | `-c` | Run a command instead of opening a shell or the TUI | — |
 | `--vars` | — | Substitute `${var}` references in `-c` from host variables and secrets | `false` |
-| `--key <PATH>` | `-k` | SSH private key path | `~/.ssh/id_ed25519` |
+| `--key <PATH>` | `-k` | SSH private key path | the SSH agent, else `~/.ssh/id_ed25519` |
+| `--no-agent` | — | Do not log in through the SSH agent | `false` |
 | `--concurrency <N>` | — | Max hosts running `-c` at once | `10` |
 | `--no-host-key-check` | — | Skip SSH host key verification | `false` |
 | `--accept-new-host-key` | — | Accept and save unknown host keys to `known_hosts` | `false` |

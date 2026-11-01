@@ -11,7 +11,7 @@ use glidesh::error::GlideshError;
 use glidesh::modules::ModuleRegistry;
 use glidesh::secrets::Secrets;
 use glidesh::ssh::HostKeyPolicy;
-use russh::keys::key::PrivateKeyWithHashAlg;
+use glidesh::ssh::auth::Auth;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Semaphore, mpsc};
@@ -20,7 +20,7 @@ pub struct Engine {
     pub plan: Arc<Plan>,
     pub targets: Vec<ResolvedHost>,
     pub registry: Arc<ModuleRegistry>,
-    pub key: PrivateKeyWithHashAlg,
+    pub key: Auth,
     pub concurrency: usize,
     pub dry_run: bool,
     pub diff: bool,
@@ -210,7 +210,7 @@ pub struct GroupPlan {
 pub async fn run(
     group_plans: Vec<GroupPlan>,
     registry: Arc<ModuleRegistry>,
-    key: PrivateKeyWithHashAlg,
+    key: Auth,
     concurrency: usize,
     dry_run: bool,
     diff: bool,

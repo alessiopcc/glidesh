@@ -1,5 +1,5 @@
-//! A passphrase-protected SSH key at `run`: without a terminal it must fail at once with
-//! how to unlock it, never wait for input.
+//! A passphrase-protected SSH key at `run`, and a run with no key at all: without a
+//! terminal each must fail at once with how to log in, never wait for input.
 //!
 //! Drives the binary with stdin not a terminal; no host or container needed. The inventory
 //! host is a TEST-NET address, so reaching the connection stage would show up as a hang or
@@ -97,4 +97,46 @@ fn a_wrong_passphrase_in_the_environment_is_reported_without_asking() {
     assert!(!ok);
     assert!(has(&out, "$GLIDESH_KEY_PASS does not unlock"), "{out}");
     assert!(!out.contains("not-it"), "the passphrase was echoed: {out}");
+}
+
+/// With no `--key`, `HOME` an empty directory and no agent, there is nothing to log in with.
+#[cfg(unix)]
+#[test]
+fn no_key_and_no_agent_says_how_to_log_in() {
+    let dir = fixture();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    for (flag, why, remedy, useless) in [
+        (
+            None,
+            "no SSH agent holds a key",
+            "add a key to ssh-agent",
+            "drop --no-agent",
+        ),
+        (
+            Some("--no-agent"),
+            "--no-agent is set",
+            "drop --no-agent",
+            "add a key to ssh-agent",
+        ),
+    ] {
+        let out = Command::cargo_bin("glidesh")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["run", "-i", "inventory.kdl", "-p", "plan.kdl"])
+            .args(["--no-tui", "--no-host-key-check"])
+            .args(flag)
+            .env("HOME", &home)
+            .env_remove("SSH_AUTH_SOCK")
+            .timeout(Duration::from_secs(60))
+            .output()
+            .unwrap();
+        let text = squash(&String::from_utf8_lossy(&out.stderr));
+        assert!(!out.status.success());
+        assert!(
+            has(&text, why) && has(&text, "pass --key") && has(&text, remedy),
+            "{text}"
+        );
+        assert!(!has(&text, useless), "{text}");
+    }
 }
