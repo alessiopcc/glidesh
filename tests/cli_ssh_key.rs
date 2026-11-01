@@ -106,9 +106,19 @@ fn no_key_and_no_agent_says_how_to_log_in() {
     let dir = fixture();
     let home = dir.path().join("home");
     std::fs::create_dir(&home).unwrap();
-    for (flag, why) in [
-        (None, "no SSH agent holds a key"),
-        (Some("--no-agent"), "--no-agent is set"),
+    for (flag, why, remedy, useless) in [
+        (
+            None,
+            "no SSH agent holds a key",
+            "add a key to ssh-agent",
+            "drop --no-agent",
+        ),
+        (
+            Some("--no-agent"),
+            "--no-agent is set",
+            "drop --no-agent",
+            "add a key to ssh-agent",
+        ),
     ] {
         let out = Command::cargo_bin("glidesh")
             .unwrap()
@@ -123,6 +133,10 @@ fn no_key_and_no_agent_says_how_to_log_in() {
             .unwrap();
         let text = squash(&String::from_utf8_lossy(&out.stderr));
         assert!(!out.status.success());
-        assert!(has(&text, why) && has(&text, "pass --key"), "{text}");
+        assert!(
+            has(&text, why) && has(&text, "pass --key") && has(&text, remedy),
+            "{text}"
+        );
+        assert!(!has(&text, useless), "{text}");
     }
 }

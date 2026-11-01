@@ -54,15 +54,15 @@ impl Auth {
                 Ok(Auth::Agent)
             }
             Choice::Key(path) if explicit.is_none() && !path.exists() => {
-                let agent = if use_agent {
-                    "no SSH agent holds a key"
+                let (agent, remedy) = if use_agent {
+                    ("no SSH agent holds a key", "add a key to ssh-agent")
                 } else {
-                    "--no-agent is set"
+                    ("--no-agent is set", "drop --no-agent")
                 };
                 Err(GlideshError::KeyLoad {
                     message: format!(
                         "no SSH key to log in with: {} does not exist and {agent}; pass --key, \
-                         or add a key to ssh-agent",
+                         or {remedy}",
                         path.display()
                     ),
                 })
@@ -267,7 +267,10 @@ mod tests {
         let error = Auth::resolve(None, &missing, false).await.err().unwrap();
         let error = error.to_string();
         assert!(
-            error.contains("--no-agent is set") && error.contains("pass --key"),
+            error.contains("--no-agent is set")
+                && error.contains("pass --key")
+                && error.contains("drop --no-agent")
+                && !error.contains("add a key to ssh-agent"),
             "{error}"
         );
     }
