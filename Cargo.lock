@@ -1494,7 +1494,7 @@ checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
 
 [[package]]
 name = "glidesh"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "age",
  "assert_cmd",
