@@ -13,10 +13,10 @@ use crate::executor::result::ExecutorEvent;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use glidesh::ssh::auth::Auth;
 use glidesh::ssh::{HostKeyPolicy, SshSession};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use russh::keys::key::PrivateKeyWithHashAlg;
 use state::{FocusPanel, HostConnectionInfo, TuiState};
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -43,7 +43,7 @@ pub async fn run_tui(
     hosts: &[(String, String, String)],
     engine_handle: tokio::task::AbortHandle,
     connection_info: Vec<HostConnectionInfo>,
-    ssh_key: PrivateKeyWithHashAlg,
+    ssh_key: Auth,
     host_key_policy: HostKeyPolicy,
     dry_run: bool,
 ) -> io::Result<bool> {
@@ -185,7 +185,7 @@ pub async fn run_tui(
 
 async fn open_shell_for_host(
     info: &HostConnectionInfo,
-    key: &PrivateKeyWithHashAlg,
+    key: &Auth,
     policy: HostKeyPolicy,
 ) -> Result<(), glidesh::error::GlideshError> {
     let session = match &info.jump {

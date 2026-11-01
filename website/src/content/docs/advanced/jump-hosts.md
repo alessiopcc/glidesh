@@ -110,7 +110,7 @@ twice, a child node — is an error, as is a `port` that is not an integer from 
 - **Opt out**: `jump #false` on a group or host means no bastion for it; a host in such a group
   can still name its own
 - **User fallback**: if `user` is omitted on the jump node, it defaults to the resolved user of the target host
-- **Same SSH key**: the same key is used for both the bastion and the target
+- **Same SSH key**: the same key, or the same SSH agent, is used for both the bastion and the target
 
 ## Complete Example
 

@@ -268,10 +268,8 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             return Ok(());
         }
 
-        let key_path = expand_tilde(&args.key.clone().unwrap_or_else(default_ssh_key));
-
         tracing::info!("Connecting to {}@{}:{}", user, host, args.port);
-        let key = glidesh::ssh::key::load(&key_path)?;
+        let key = resolve_auth(args.key.as_deref(), None, !args.no_agent).await?;
 
         let host_key_policy = HostKeyPolicy {
             verify: !args.no_host_key_check,
@@ -579,7 +577,12 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
-    let key = load_ssh_key(&args, &all_targets)?;
+    let key = resolve_auth(
+        args.key.as_deref(),
+        all_targets.first().map(|h| &h.vars),
+        !args.no_agent,
+    )
+    .await?;
 
     let run_name = run_name_parts.join("+");
 
@@ -1484,20 +1487,6 @@ fn build_inventory_template_data(inventory: &Inventory) -> TemplateData {
     data
 }
 
-fn load_ssh_key(
-    args: &cli::RunArgs,
-    targets: &[&config::types::ResolvedHost],
-) -> Result<russh::keys::key::PrivateKeyWithHashAlg, GlideshError> {
-    let key_path = if let Some(ref k) = args.key {
-        expand_tilde(k)
-    } else if let Some(inv_key) = targets.first().and_then(|h| h.vars.get("ssh-key")) {
-        expand_tilde(&PathBuf::from(inv_key))
-    } else {
-        expand_tilde(&default_ssh_key())
-    };
-    glidesh::ssh::key::load(&key_path)
-}
-
 async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
     let inv_path = match args.inventory {
         Some(p) => p,
@@ -1548,7 +1537,12 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
         if hosts.is_empty() {
             return Err(GlideshError::NoTargets);
         }
-        let key = resolve_key(args.key.as_deref(), hosts.first().map(|h| &h.vars))?;
+        let key = resolve_auth(
+            args.key.as_deref(),
+            hosts.first().map(|h| &h.vars),
+            !args.no_agent,
+        )
+        .await?;
 
         match (hosts.len(), &args.command) {
             (1, Some(command)) => {
@@ -1625,8 +1619,10 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
     if all_hosts.is_empty() {
         return Err(GlideshError::NoTargets);
     }
-    let key_path = resolve_key_path(args.key.as_deref(), all_hosts.first().map(|h| &h.vars));
-    let key = glidesh::ssh::key::load(&key_path)?;
+    let inv_vars = all_hosts.first().map(|h| &h.vars);
+    let key_path = resolve_key_path(args.key.as_deref(), inv_vars);
+    let key = resolve_auth(args.key.as_deref(), inv_vars, !args.no_agent).await?;
+    let key_path = matches!(key, glidesh::ssh::auth::Auth::Key(_)).then_some(key_path);
 
     tui::console::run(&inv_path, &inventory, key, key_path, host_key_policy)
         .await
@@ -1674,16 +1670,29 @@ fn resolve_key_path(
     }
 }
 
-fn resolve_key(
+/// How this command logs in; `--key`, else the inventory's `ssh-key`, names an explicit key.
+async fn resolve_auth(
     cli_key: Option<&std::path::Path>,
     inv_vars: Option<&HashMap<String, String>>,
-) -> Result<russh::keys::key::PrivateKeyWithHashAlg, GlideshError> {
-    glidesh::ssh::key::load(&resolve_key_path(cli_key, inv_vars))
+    use_agent: bool,
+) -> Result<glidesh::ssh::auth::Auth, GlideshError> {
+    let explicit = match cli_key {
+        Some(k) => Some(expand_tilde(k)),
+        None => inv_vars
+            .and_then(|v| v.get("ssh-key"))
+            .map(|k| expand_tilde(&PathBuf::from(k))),
+    };
+    glidesh::ssh::auth::Auth::resolve(
+        explicit.as_deref(),
+        &expand_tilde(&default_ssh_key()),
+        use_agent,
+    )
+    .await
 }
 
 async fn connect_host(
     host: &config::types::ResolvedHost,
-    key: &russh::keys::key::PrivateKeyWithHashAlg,
+    key: &glidesh::ssh::auth::Auth,
     policy: HostKeyPolicy,
 ) -> Result<SshSession, GlideshError> {
     match &host.jump {
@@ -1709,7 +1718,7 @@ fn redacted_lines(output: &str, registry: &glidesh::secrets::SecretRegistry) -> 
 /// command could not be built is reported and counted as failed without connecting.
 async fn run_command_on_hosts(
     jobs: Vec<(config::types::ResolvedHost, Result<String, String>)>,
-    key: &russh::keys::key::PrivateKeyWithHashAlg,
+    key: &glidesh::ssh::auth::Auth,
     policy: HostKeyPolicy,
     concurrency: usize,
     registry: Arc<glidesh::secrets::SecretRegistry>,
@@ -1802,7 +1811,7 @@ async fn run_command_on_hosts(
 async fn run_with_ui(
     group_plans: Vec<executor::GroupPlan>,
     registry: Arc<ModuleRegistry>,
-    key: russh::keys::key::PrivateKeyWithHashAlg,
+    key: glidesh::ssh::auth::Auth,
     secrets: Arc<glidesh::secrets::Secrets>,
     tags: Arc<TagFilter>,
     run_name: &str,

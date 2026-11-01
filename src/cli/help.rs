@@ -82,8 +82,9 @@ Non-interactive use (scripts, CI, agents):
   - `run` uses plain-text output when stdout is not a terminal; -T forces it.
   - Unknown host keys fail the connection: pass --accept-new-host-key to trust new hosts.
   - Encrypted secrets need a passphrase: set GLIDESH_SECRET_PASS or GLIDESH_SECRET_PASS_FILE.
-  - An SSH key protected by a passphrase is unlocked with GLIDESH_KEY_PASS; at a terminal
-    glidesh asks for it instead.
+  - Without --key, glidesh logs in through the SSH agent (SSH_AUTH_SOCK) when it holds a
+    key, so no passphrase is needed. Otherwise an SSH key protected by a passphrase is
+    unlocked with GLIDESH_KEY_PASS; at a terminal glidesh asks for it instead.
   - A plan's vars-prompt is answered with --var name=value; without a terminal, a prompt
     with no --var and no default fails the run before it connects, naming the fix.
   - `run` exits non-zero when any host failed; `validate` when any check failed, and with
@@ -307,9 +308,12 @@ PREVIEW AND OUTPUT
   Exit status is non-zero when any host failed or a rolling run stopped early.
 
 SSH
-  The key is --key, else the inventory's ssh-key variable, else ~/.ssh/id_ed25519. A key
-  protected by a passphrase is unlocked with $GLIDESH_KEY_PASS, else asked for once at a
-  terminal (three tries); without either the run fails before connecting. Host
+  The key is --key, else the inventory's ssh-key variable, used alone. Without either,
+  glidesh logs in through the SSH agent when one holds a key (SSH_AUTH_SOCK; on Windows
+  also the OpenSSH agent pipe or Pageant), offering each of its keys, on jump hosts too;
+  --no-agent skips it. Else the key is ~/.ssh/id_ed25519. A key protected by a passphrase
+  is unlocked with $GLIDESH_KEY_PASS, else asked for once at a terminal (three tries);
+  without either the run fails before connecting. Host
   keys are checked against ~/.ssh/known_hosts. Hosts behind a bastion use an inventory node
   `jump \"<addr>\" user=\"<user>\" port=<port>` (user and port optional: the host's user,
   port 22): at the top level for every host, in a group, or in a host; the most specific

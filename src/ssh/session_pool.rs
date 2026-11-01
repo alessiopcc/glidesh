@@ -1,7 +1,7 @@
 use crate::config::types::ResolvedHost;
 use crate::error::GlideshError;
+use crate::ssh::auth::Auth;
 use crate::ssh::{HostKeyPolicy, SshSession};
-use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -13,12 +13,12 @@ type Slot = Arc<Mutex<Option<Arc<SshSession>>>>;
 /// underlying SSH connection with other features.
 pub struct SessionPool {
     inner: Mutex<HashMap<String, Slot>>,
-    key: PrivateKeyWithHashAlg,
+    key: Auth,
     policy: HostKeyPolicy,
 }
 
 impl SessionPool {
-    pub fn new(key: PrivateKeyWithHashAlg, policy: HostKeyPolicy) -> Self {
+    pub fn new(key: Auth, policy: HostKeyPolicy) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             key,

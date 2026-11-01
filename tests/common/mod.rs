@@ -161,7 +161,7 @@ impl TestContainer {
                 "127.0.0.1",
                 self.port,
                 user,
-                &self.key,
+                &glidesh::ssh::auth::Auth::Key(self.key.clone()),
                 glidesh::ssh::HostKeyPolicy {
                     verify: false,
                     accept_new: false,

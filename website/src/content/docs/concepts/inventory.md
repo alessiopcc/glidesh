@@ -143,7 +143,7 @@ The most specific value wins. Variables can be referenced in plans using `${var-
 
 | Variable | Description |
 |----------|-------------|
-| `ssh-key` | Path to the SSH private key. Used when `--key` is not provided on the CLI. Supports `~` expansion. |
+| `ssh-key` | Path to the SSH private key. Used when `--key` is not provided on the CLI, and then the SSH agent is not. Supports `~` expansion. |
 | `deploy-user` | SSH username for hosts without a `user=` of their own. Defaults to `root`. |
 
 ```kdl

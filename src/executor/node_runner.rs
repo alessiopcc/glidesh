@@ -14,9 +14,9 @@ use glidesh::modules::detect::{Facts, OsInfo, detect_os};
 use glidesh::modules::host as host_module;
 use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
+use glidesh::ssh::auth::Auth;
 use glidesh::ssh::connection::{CommandOutput, OUTPUT_LIMIT};
 use glidesh::ssh::{HostKeyPolicy, SshSession};
-use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -206,7 +206,7 @@ pub struct NodeRunner {
     pub host: ResolvedHost,
     pub plan: Arc<Plan>,
     pub registry: Arc<ModuleRegistry>,
-    pub key: PrivateKeyWithHashAlg,
+    pub key: Auth,
     pub dry_run: bool,
     pub diff: bool,
     pub tags: Arc<TagFilter>,

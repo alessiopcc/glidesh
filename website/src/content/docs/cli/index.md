@@ -27,7 +27,8 @@ glidesh console [OPTIONS]
 | `--inventory <PATH>` | `-i` | Path to the inventory file | `./inventory.kdl` |
 | `--target <NAME>` | `-t` | A group, a host, or `group:host`; comma-separate several | — |
 | `--command <CMD>` | `-c` | Run this command on every target and print each host's output, instead of a shell | — |
-| `--key <PATH>` | `-k` | SSH private key — see [SSH Key Resolution](#ssh-key-resolution) | `~/.ssh/id_ed25519` |
+| `--key <PATH>` | `-k` | SSH private key — see [SSH Key Resolution](#ssh-key-resolution) | the SSH agent, else `~/.ssh/id_ed25519` |
+| `--no-agent` | — | Do not log in through the SSH agent | `false` |
 | `--concurrency <N>` | — | Max concurrent hosts when running a command (minimum 1) | `10` |
 | `--no-host-key-check` | — | Do not verify host keys against `~/.ssh/known_hosts` | `false` |
 | `--accept-new-host-key` | — | Trust and save the key of a host not yet in `~/.ssh/known_hosts`; a changed key still fails | `false` |
@@ -92,7 +93,8 @@ glidesh run [OPTIONS]
 | `--host <ADDR>` | — | Run on this one address instead of an inventory, with `--plan` or `--command` | — |
 | `--user <USER>` | `-u` | SSH user for `--host` (inventory hosts set their own) | `root` |
 | `--port <PORT>` | `-P` | SSH port for `--host` (inventory hosts set their own) | `22` |
-| `--key <PATH>` | `-k` | SSH private key — see [SSH Key Resolution](#ssh-key-resolution) | `~/.ssh/id_ed25519` |
+| `--key <PATH>` | `-k` | SSH private key — see [SSH Key Resolution](#ssh-key-resolution) | the SSH agent, else `~/.ssh/id_ed25519` |
+| `--no-agent` | — | Do not log in through the SSH agent | `false` |
 | `--command <CMD>` | `-c` | Run this one command on `--host` instead of a plan ([ad-hoc mode](#ad-hoc-mode)) | — |
 | `--mode <MODE>` | `-m` | [Execution mode](/concepts/execution-modes/): `sync` or `async`, overriding the plan's `mode` | the plan's `mode`, else `sync` |
 | `--serial <SIZES>` | — | [Roll out in batches](/concepts/execution-modes/#rolling-deploys), overriding the plan's `serial`: comma-separated counts or percentages, e.g. `1,25%` | the plan's `serial`, else one batch |
@@ -185,11 +187,17 @@ Details worth knowing:
 
 ### SSH Key Resolution
 
-The SSH private key is resolved in this order (first match wins):
+How glidesh logs in is resolved in this order (first match wins):
 
 1. `--key` CLI flag
 2. `ssh-key` variable from the inventory (global, group, or host `vars`)
-3. `~/.ssh/id_ed25519` (default)
+3. the SSH agent, when one is reachable and holds a key: `$SSH_AUTH_SOCK`; on Windows,
+   `$SSH_AUTH_SOCK` as a pipe name, else the OpenSSH agent pipe, else Pageant
+4. `~/.ssh/id_ed25519` (default)
+
+A key named by `--key` or `ssh-key` is used alone, even when an agent is running. With the
+agent, glidesh offers each of its keys until the host accepts one, for jump hosts and their
+targets alike. `--no-agent` skips the agent.
 
 A key protected by a passphrase is unlocked with `$GLIDESH_KEY_PASS` when it is set. Otherwise
 glidesh asks for the passphrase at the terminal, once per run, with three tries. Without a
@@ -436,6 +444,7 @@ GLIDESH_SECRET_PASS=… glidesh secret get db-password
 | `GLIDESH_SECRETS` | Path to the secrets file, overriding auto-discovery. |
 | `GLIDESH_SECRET_IDENTITY` | SSH private key that unlocks an age-wrapped secrets file. Honoured by every subcommand; outranked by `--secret-identity`. |
 | `GLIDESH_RUNAS_PASS` | Privilege-escalation password for `run-as` (else `--ask-pass`). |
+| `SSH_AUTH_SOCK` | The SSH agent glidesh logs in through when no key is named (on Windows, a pipe name). See [SSH Key Resolution](#ssh-key-resolution). |
 | `GLIDESH_KEY_PASS` | Passphrase of a protected SSH key, for runs without a terminal (else asked at the terminal). See [SSH Key Resolution](#ssh-key-resolution). |
 | `VISUAL`, `EDITOR` | Editor for `glidesh secret edit` and for opening a log from the logs browser (`VISUAL` first). |
 
