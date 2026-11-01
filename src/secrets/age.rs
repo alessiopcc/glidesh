@@ -241,6 +241,7 @@ mod tests {
 
     #[test]
     fn a_passphrase_protected_key_is_unlocked_with_the_runs_passphrase() {
+        let _cache = crate::ssh::key::CACHE.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (path, recipient) = keypair(dir.path(), "alice");
         let encrypted = russh::keys::ssh_key::PrivateKey::read_openssh_file(&path)

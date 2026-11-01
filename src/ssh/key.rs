@@ -86,12 +86,29 @@ fn passphrases() -> &'static Mutex<HashMap<PathBuf, Zeroizing<String>>> {
     PASSPHRASES.get_or_init(Default::default)
 }
 
+/// The same file spelled any way, so a key named twice is asked for once.
+fn cache_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Keeps the passphrase that unlocked `path` for the rest of the run.
 pub(crate) fn remember(path: &Path, passphrase: Zeroizing<String>) {
     if let Ok(mut known) = passphrases().lock() {
-        known.insert(path.to_path_buf(), passphrase);
+        known.insert(cache_key(path), passphrase);
     }
 }
+
+/// Wipes every passphrase kept for the run. Statics are never dropped, so the run calls
+/// this when it ends.
+pub fn forget() {
+    if let Ok(mut known) = passphrases().lock() {
+        known.clear();
+    }
+}
+
+/// Held by tests that rely on the run's passphrases, which [`forget`] clears.
+#[cfg(test)]
+pub(crate) static CACHE: Mutex<()> = Mutex::new(());
 
 /// Opens the key at `path` with `open`: without a passphrase, then with the one this run
 /// already used for it, then `env`'s, then up to [`TRIES`] typed at `ask` when there is a
@@ -108,7 +125,10 @@ pub(crate) fn unlock<T>(
         Err(Locked::Failed(e)) => return Err(failed(e)),
         Err(Locked::NeedsPassphrase) => {}
     }
-    let known = passphrases().lock().ok().and_then(|p| p.get(path).cloned());
+    let known = passphrases()
+        .lock()
+        .ok()
+        .and_then(|p| p.get(&cache_key(path)).cloned());
     if let Some(known) = known
         && let Ok(key) = open(Some(&known))
     {
@@ -236,11 +256,19 @@ mod tests {
 
     #[test]
     fn a_key_is_asked_for_once_per_run() {
+        let _cache = CACHE.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (path, open) = locked(&dir);
+        std::fs::write(&path, "").unwrap();
         let ask = |_: &str| Ok(pass("right"));
         assert!(unlock(&path, &open, None, Some(&ask)).is_ok());
         assert!(unlock(&path, &open, None, None).is_ok());
+
+        let respelled = dir.path().join(".").join("id");
+        assert!(unlock(&respelled, &open, None, None).is_ok());
+
+        forget();
+        assert!(unlock(&path, &open, None, None).is_err());
     }
 
     #[test]

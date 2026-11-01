@@ -59,16 +59,16 @@ async fn main() -> miette::Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
-    match cli.command {
-        Some(Commands::Run(args)) => cmd_run(args).await?,
-        Some(Commands::Logs(args)) => cmd_logs(args)?,
-        Some(Commands::Validate(args)) => cmd_validate(args)?,
-        Some(Commands::Console(args)) => cmd_console(args).await?,
-        Some(Commands::Secret(args)) => cmd_secret(args)?,
-        None => cmd_console(cli::ConsoleArgs::default()).await?,
-    }
-
-    Ok(())
+    let result = match cli.command {
+        Some(Commands::Run(args)) => cmd_run(args).await,
+        Some(Commands::Logs(args)) => cmd_logs(args),
+        Some(Commands::Validate(args)) => cmd_validate(args),
+        Some(Commands::Console(args)) => cmd_console(args).await,
+        Some(Commands::Secret(args)) => cmd_secret(args),
+        None => cmd_console(cli::ConsoleArgs::default()).await,
+    };
+    glidesh::ssh::key::forget();
+    Ok(result?)
 }
 
 /// Build the CLI-level escalation spec from `--run-as` / `--run-as-method`.
@@ -1585,6 +1585,7 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
                 let exit_code = session.interactive_shell().await?;
                 session.close().await?;
                 if exit_code != 0 {
+                    glidesh::ssh::key::forget();
                     std::process::exit(exit_code as i32);
                 }
             }
