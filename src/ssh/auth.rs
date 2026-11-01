@@ -91,17 +91,29 @@ impl Auth {
                 }
             }
             Auth::Agent => {
-                let mut agent = connect_agent()
-                    .await
-                    .ok_or("the SSH agent is no longer reachable")?;
-                // OpenSSH agents sign with a key restricted by `ssh-add -h` only for a bound
-                // session; an agent without the extension refuses it and signs as before.
-                if let Some(binding) = handle.agent_session_binding()
-                    && let Err(e) = agent.bind_session(binding, false).await
-                {
-                    tracing::debug!("The SSH agent did not bind the session: {e}");
-                }
-                let keys = identities(&mut agent).await;
+                let binding = handle.agent_session_binding();
+                let setup = async {
+                    let mut agent = connect_agent()
+                        .await
+                        .ok_or("the SSH agent is no longer reachable")?;
+                    // OpenSSH agents sign with a key restricted by `ssh-add -h` only for a
+                    // bound session; an agent without the extension refuses it and signs as
+                    // before.
+                    if let Some(binding) = binding
+                        && let Err(e) = agent.bind_session(binding, false).await
+                    {
+                        tracing::debug!("The SSH agent did not bind the session: {e}");
+                    }
+                    let keys = identities(&mut agent).await;
+                    Ok::<_, String>((agent, keys))
+                };
+                // Signing is left unbounded: it also waits on the server, which may be slow.
+                let (mut agent, keys) =
+                    tokio::time::timeout(AGENT_TIMEOUT, setup)
+                        .await
+                        .map_err(|_| {
+                            format!("the SSH agent did not answer within {AGENT_TIMEOUT:?}")
+                        })??;
                 let mut refused = None;
                 for key in &keys {
                     let hash =
