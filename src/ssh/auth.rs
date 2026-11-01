@@ -94,6 +94,13 @@ impl Auth {
                 let mut agent = connect_agent()
                     .await
                     .ok_or("the SSH agent is no longer reachable")?;
+                // OpenSSH agents sign with a key restricted by `ssh-add -h` only for a bound
+                // session; an agent without the extension refuses it and signs as before.
+                if let Some(binding) = handle.agent_session_binding()
+                    && let Err(e) = agent.bind_session(binding, false).await
+                {
+                    tracing::debug!("The SSH agent did not bind the session: {e}");
+                }
                 let keys = identities(&mut agent).await;
                 for key in &keys {
                     let hash =
@@ -153,13 +160,15 @@ async fn connect_agent() -> Option<Agent> {
 }
 
 /// `SSH_AUTH_SOCK` names a pipe on Windows too; Windows OpenSSH's agent listens on a fixed
-/// one, and Pageant answers otherwise.
+/// one, and Pageant answers otherwise. A stale `SSH_AUTH_SOCK` must not hide either.
 #[cfg(windows)]
 async fn connect_agent() -> Option<Agent> {
     const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
-    let pipe = std::env::var("SSH_AUTH_SOCK").unwrap_or_else(|_| OPENSSH_PIPE.to_string());
-    if let Ok(agent) = AgentClient::connect_named_pipe(&pipe).await {
-        return Some(agent.dynamic());
+    let pipes = std::env::var("SSH_AUTH_SOCK").into_iter();
+    for pipe in pipes.chain([OPENSSH_PIPE.to_string()]) {
+        if let Ok(agent) = AgentClient::connect_named_pipe(&pipe).await {
+            return Some(agent.dynamic());
+        }
     }
     AgentClient::connect_pageant()
         .await
