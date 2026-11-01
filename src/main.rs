@@ -59,16 +59,16 @@ async fn main() -> miette::Result<()> {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
-    match cli.command {
-        Some(Commands::Run(args)) => cmd_run(args).await?,
-        Some(Commands::Logs(args)) => cmd_logs(args)?,
-        Some(Commands::Validate(args)) => cmd_validate(args)?,
-        Some(Commands::Console(args)) => cmd_console(args).await?,
-        Some(Commands::Secret(args)) => cmd_secret(args)?,
-        None => cmd_console(cli::ConsoleArgs::default()).await?,
-    }
-
-    Ok(())
+    let result = match cli.command {
+        Some(Commands::Run(args)) => cmd_run(args).await,
+        Some(Commands::Logs(args)) => cmd_logs(args),
+        Some(Commands::Validate(args)) => cmd_validate(args),
+        Some(Commands::Console(args)) => cmd_console(args).await,
+        Some(Commands::Secret(args)) => cmd_secret(args),
+        None => cmd_console(cli::ConsoleArgs::default()).await,
+    };
+    glidesh::ssh::key::forget();
+    Ok(result?)
 }
 
 /// Build the CLI-level escalation spec from `--run-as` / `--run-as-method`.
@@ -271,7 +271,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         let key_path = expand_tilde(&args.key.clone().unwrap_or_else(default_ssh_key));
 
         tracing::info!("Connecting to {}@{}:{}", user, host, args.port);
-        let key = load_key_from_path(&key_path)?;
+        let key = glidesh::ssh::key::load(&key_path)?;
 
         let host_key_policy = HostKeyPolicy {
             verify: !args.no_host_key_check,
@@ -1495,22 +1495,7 @@ fn load_ssh_key(
     } else {
         expand_tilde(&default_ssh_key())
     };
-    load_key_from_path(&key_path)
-}
-
-fn load_key_from_path(
-    key_path: &std::path::Path,
-) -> Result<russh::keys::key::PrivateKeyWithHashAlg, GlideshError> {
-    tracing::debug!("Using SSH key: {}", key_path.display());
-    let key_pair = russh::keys::load_secret_key(key_path, None)?;
-    let hash_alg = match key_pair.algorithm() {
-        russh::keys::ssh_key::Algorithm::Rsa { .. } => Some(russh::keys::ssh_key::HashAlg::Sha256),
-        _ => None,
-    };
-    Ok(russh::keys::key::PrivateKeyWithHashAlg::new(
-        Arc::new(key_pair),
-        hash_alg,
-    ))
+    glidesh::ssh::key::load(&key_path)
 }
 
 async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
@@ -1600,6 +1585,7 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
                 let exit_code = session.interactive_shell().await?;
                 session.close().await?;
                 if exit_code != 0 {
+                    glidesh::ssh::key::forget();
                     std::process::exit(exit_code as i32);
                 }
             }
@@ -1640,7 +1626,7 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
         return Err(GlideshError::NoTargets);
     }
     let key_path = resolve_key_path(args.key.as_deref(), all_hosts.first().map(|h| &h.vars));
-    let key = load_key_from_path(&key_path)?;
+    let key = glidesh::ssh::key::load(&key_path)?;
 
     tui::console::run(&inv_path, &inventory, key, key_path, host_key_policy)
         .await
@@ -1692,7 +1678,7 @@ fn resolve_key(
     cli_key: Option<&std::path::Path>,
     inv_vars: Option<&HashMap<String, String>>,
 ) -> Result<russh::keys::key::PrivateKeyWithHashAlg, GlideshError> {
-    load_key_from_path(&resolve_key_path(cli_key, inv_vars))
+    glidesh::ssh::key::load(&resolve_key_path(cli_key, inv_vars))
 }
 
 async fn connect_host(

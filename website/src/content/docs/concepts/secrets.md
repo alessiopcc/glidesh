@@ -134,8 +134,10 @@ There is no passphrase. glidesh looks for your SSH private key in this order:
 2. `$GLIDESH_SECRET_IDENTITY`
 3. the key it would use to reach the hosts (`--key`), then `~/.ssh/id_ed25519`
 
-So by default **your host key is your vault key** and a normal run needs no extra flags. Keys must
-be unencrypted, the same constraint glidesh's SSH transport has.
+So by default **your host key is your vault key** and a normal run needs no extra flags. A key
+protected by a passphrase is unlocked as for the SSH connection (see
+[SSH Key Resolution](/cli/#ssh-key-resolution)); when the vault key is also the host key, the
+passphrase is asked for once.
 
 The wrapped key is a standard age file, base64url-encoded after the `agev1:` prefix. Decode it and
 `age` reads it directly, so recovering a vault never depends on glidesh being available:

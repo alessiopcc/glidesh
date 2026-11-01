@@ -191,6 +191,10 @@ The SSH private key is resolved in this order (first match wins):
 2. `ssh-key` variable from the inventory (global, group, or host `vars`)
 3. `~/.ssh/id_ed25519` (default)
 
+A key protected by a passphrase is unlocked with `$GLIDESH_KEY_PASS` when it is set. Otherwise
+glidesh asks for the passphrase at the terminal, once per run, with three tries. Without a
+terminal and without `$GLIDESH_KEY_PASS`, the run fails before connecting and says so.
+
 ### Ad-hoc mode
 
 Run a single command on a host without a plan or inventory:
@@ -432,6 +436,7 @@ GLIDESH_SECRET_PASS=… glidesh secret get db-password
 | `GLIDESH_SECRETS` | Path to the secrets file, overriding auto-discovery. |
 | `GLIDESH_SECRET_IDENTITY` | SSH private key that unlocks an age-wrapped secrets file. Honoured by every subcommand; outranked by `--secret-identity`. |
 | `GLIDESH_RUNAS_PASS` | Privilege-escalation password for `run-as` (else `--ask-pass`). |
+| `GLIDESH_KEY_PASS` | Passphrase of a protected SSH key, for runs without a terminal (else asked at the terminal). See [SSH Key Resolution](#ssh-key-resolution). |
 | `VISUAL`, `EDITOR` | Editor for `glidesh secret edit` and for opening a log from the logs browser (`VISUAL` first). |
 
 ```bash

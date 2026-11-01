@@ -530,6 +530,7 @@ mod tests {
             "prune=#true removes host paths",
             "dir-mode= file-mode=",
             "`[<host>]`, the inventory host name",
+            "$GLIDESH_KEY_PASS",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }
