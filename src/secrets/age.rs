@@ -103,11 +103,8 @@ fn parse_recipient(recipient: &SecretRecipient) -> Result<age::ssh::Recipient, G
     })
 }
 
-/// Load an SSH private key as an age identity.
-///
-/// Passphrase-protected keys are rejected with a clear message rather than silently
-/// failing to match: glidesh's SSH transport does not take encrypted keys either, so this
-/// keeps one constraint across the tool instead of two behaviours.
+/// Load an SSH private key as an age identity. A key protected by a passphrase is unlocked
+/// as the SSH transport unlocks it, so a run that uses it for both asks once.
 fn read_identity(path: &Path) -> Result<age::ssh::Identity, GlideshError> {
     let file = std::fs::File::open(path).map_err(|e| {
         err(format!(
@@ -127,11 +124,19 @@ fn read_identity(path: &Path) -> Result<age::ssh::Identity, GlideshError> {
 
     match identity {
         age::ssh::Identity::Unencrypted(_) => Ok(identity),
-        age::ssh::Identity::Encrypted(_) => Err(err(format!(
-            "the SSH key '{}' is passphrase-protected; glidesh needs an unencrypted key, as \
-             it does for its SSH transport",
-            path.display()
-        ))),
+        age::ssh::Identity::Encrypted(_) => {
+            let key = crate::ssh::key::load_private_key(path).map_err(|e| err(e.to_string()))?;
+            let pem = key
+                .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+                .map_err(|e| err(format!("could not re-encode '{}': {e}", path.display())))?;
+            age::ssh::Identity::from_buffer(pem.as_bytes(), Some(path.display().to_string()))
+                .map_err(|e| {
+                    err(format!(
+                        "'{}' is not an SSH private key: {e}",
+                        path.display()
+                    ))
+                })
+        }
         age::ssh::Identity::Unsupported(_) => Err(err(format!(
             "the SSH key '{}' is of a type age cannot use (ed25519 and rsa are supported)",
             path.display()
@@ -235,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn a_passphrase_protected_key_says_so() {
+    fn a_passphrase_protected_key_is_unlocked_with_the_runs_passphrase() {
         let dir = tempfile::tempdir().unwrap();
         let (path, recipient) = keypair(dir.path(), "alice");
         let encrypted = russh::keys::ssh_key::PrivateKey::read_openssh_file(&path)
@@ -251,8 +256,10 @@ mod tests {
         )
         .unwrap();
 
-        let wrapped = wrap_dek(&dek(), &[recipient]).unwrap();
-        let error = unwrap_dek(&wrapped, &path).unwrap_err().to_string();
-        assert!(error.contains("passphrase-protected"), "got: {error}");
+        crate::ssh::key::remember(&path, zeroize::Zeroizing::new("hunter2".to_string()));
+
+        let key = dek();
+        let wrapped = wrap_dek(&key, &[recipient]).unwrap();
+        assert_eq!(*unwrap_dek(&wrapped, &path).unwrap(), key);
     }
 }

@@ -1,5 +1,6 @@
 pub mod connection;
 pub mod handler;
+pub mod key;
 pub mod session_pool;
 pub mod tunnel;
 pub use connection::SshSession;
