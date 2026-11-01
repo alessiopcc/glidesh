@@ -29,8 +29,10 @@ impl Agent {
             .stdout(std::process::Stdio::null())
             .spawn()
             .expect("ssh-agent");
+        // Built before anything can fail, so a failed setup still stops the agent.
+        let agent = Agent { child, socket };
         for _ in 0..50 {
-            if socket.exists() {
+            if agent.socket.exists() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -38,11 +40,11 @@ impl Agent {
         std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o600)).unwrap();
         let added = std::process::Command::new("ssh-add")
             .arg(key)
-            .env("SSH_AUTH_SOCK", &socket)
+            .env("SSH_AUTH_SOCK", &agent.socket)
             .output()
             .expect("ssh-add");
         assert!(added.status.success(), "{added:?}");
-        Agent { child, socket }
+        agent
     }
 }
 

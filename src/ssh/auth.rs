@@ -102,6 +102,7 @@ impl Auth {
                     tracing::debug!("The SSH agent did not bind the session: {e}");
                 }
                 let keys = identities(&mut agent).await;
+                let mut refused = None;
                 for key in &keys {
                     let hash =
                         matches!(key.algorithm(), Algorithm::Rsa { .. }).then_some(HashAlg::Sha256);
@@ -111,14 +112,19 @@ impl Auth {
                     {
                         Ok(result) if result.success() => return Ok(()),
                         Ok(_) => {}
-                        Err(e) => tracing::debug!("The SSH agent could not sign: {e:?}"),
+                        Err(e) => refused = Some(e.to_string()),
                     }
                 }
-                Err(format!(
-                    "the server accepted none of the SSH agent's {} key(s); add the right one \
-                     with ssh-add, or pass --key",
-                    keys.len()
-                ))
+                // A key the agent would not sign with may be the right one, so its refusal is
+                // a better clue than the server's.
+                Err(match refused {
+                    Some(e) => format!("the SSH agent did not sign: {e}"),
+                    None => format!(
+                        "the server accepted none of the SSH agent's {} key(s); add the right \
+                         one with ssh-add, or pass --key",
+                        keys.len()
+                    ),
+                })
             }
         }
     }
@@ -126,12 +132,29 @@ impl Auth {
 
 type Agent = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
 
-/// The keys the user's agent holds, none when there is no agent.
+/// How long an agent may take to list its keys before glidesh goes on without it.
+const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The keys the user's agent holds, none when there is no agent. A socket that accepts but
+/// never answers, like a stale forwarded agent, counts as none rather than hanging the run.
 async fn agent_keys() -> Vec<PublicKey> {
-    match connect_agent().await {
-        Some(mut agent) => identities(&mut agent).await,
-        None => Vec::new(),
-    }
+    keys_within(AGENT_TIMEOUT, connect_agent()).await
+}
+
+async fn keys_within(
+    limit: std::time::Duration,
+    agent: impl std::future::Future<Output = Option<Agent>>,
+) -> Vec<PublicKey> {
+    let list = async {
+        match agent.await {
+            Some(mut agent) => identities(&mut agent).await,
+            None => Vec::new(),
+        }
+    };
+    tokio::time::timeout(limit, list).await.unwrap_or_else(|_| {
+        tracing::debug!("The SSH agent did not answer within {limit:?}");
+        Vec::new()
+    })
 }
 
 /// Certificates are left out: glidesh authenticates with plain keys.
@@ -193,6 +216,28 @@ mod tests {
             choose(None, Path::new("default"), false),
             Choice::Key(PathBuf::from("default"))
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_that_never_answers_counts_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agent.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _silent = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let agent = async {
+            AgentClient::connect_uds(&socket)
+                .await
+                .ok()
+                .map(AgentClient::dynamic)
+        };
+        let started = std::time::Instant::now();
+        let keys = keys_within(std::time::Duration::from_millis(200), agent).await;
+        assert!(keys.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[tokio::test]
