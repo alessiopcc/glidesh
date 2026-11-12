@@ -137,3 +137,70 @@ async fn test_package_absent_already() {
         "absent check on non-installed package should be Satisfied"
     );
 }
+
+/// Adds a source whose suite does not exist, so `apt-get update` fails while the image's own
+/// sources still work.
+async fn break_one_source(ssh: &glidesh::ssh::connection::SshSession) {
+    let added = ssh
+        .exec(
+            "mirror=$(grep -m1 '^deb ' /etc/apt/sources.list | awk '{print $2}') && \
+             echo \"deb $mirror glidesh-no-such-suite main\" > /etc/apt/sources.list.d/broken.list",
+        )
+        .await
+        .unwrap();
+    assert_eq!(added.exit_code, 0, "{}", added.stderr);
+}
+
+#[tokio::test]
+async fn a_failed_refresh_is_reported_when_the_install_fails() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    break_one_source(&ssh).await;
+
+    let params = ModuleParams {
+        resource_name: "glidesh-no-such-package".to_string(),
+        args: HashMap::new(),
+    };
+    let error = PackageModule.apply(&ctx, &params).await.err().unwrap();
+    let error = error.to_string();
+    assert!(
+        error.contains("the package index refresh failed (apt-get update -qq, exit 100)")
+            && error.contains("glidesh-no-such-suite")
+            && error.contains("Package operation failed for 'glidesh-no-such-package'"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_refresh_does_not_stop_an_install_that_works() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+    let os_info = container.detect_os(&ssh).await;
+    let vars = HashMap::new();
+    let ctx = container.module_context(&ssh, &os_info, &vars, false);
+    let _ = ssh.exec("apt-get remove -y curl 2>/dev/null").await;
+    break_one_source(&ssh).await;
+
+    let params = ModuleParams {
+        resource_name: "curl".to_string(),
+        args: HashMap::new(),
+    };
+    let result = PackageModule.apply(&ctx, &params).await.unwrap();
+    assert!(result.changed);
+    assert!(
+        result.stderr.starts_with(
+            "warning: the package index refresh failed (apt-get update -qq, exit 100)"
+        ),
+        "{}",
+        result.stderr
+    );
+    let status = PackageModule.check(&ctx, &params).await.unwrap();
+    assert!(matches!(status, ModuleStatus::Satisfied));
+}
