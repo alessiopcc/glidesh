@@ -69,10 +69,21 @@ impl Module for PackageModule {
             });
         }
 
+        let mut refresh_failed = None;
         let cmd = match desired_state {
             "present" => {
                 let update_cmd = ctx.os_info.pkg_manager.update_index_cmd();
-                ctx.exec(update_cmd).await?;
+                let refresh = ctx.exec(update_cmd).await?;
+                // One broken repository fails the whole refresh, while the package may come
+                // from one that works, so the install still runs.
+                if refresh.exit_code != 0 {
+                    refresh_failed = Some(refresh_note(
+                        update_cmd,
+                        refresh.exit_code,
+                        &refresh.stdout,
+                        &refresh.stderr,
+                    ));
+                }
                 ctx.os_info
                     .pkg_manager
                     .install_cmd(std::slice::from_ref(package))
@@ -94,9 +105,11 @@ impl Module for PackageModule {
         if output.exit_code != 0 {
             return Err(GlideshError::Module {
                 module: "package".to_string(),
-                message: format!(
-                    "Package operation failed for '{}' (exit {}): {}",
-                    package, output.exit_code, output.stderr
+                message: failure_message(
+                    package,
+                    refresh_failed.as_deref(),
+                    output.exit_code,
+                    &output.stderr,
                 ),
             });
         }
@@ -104,9 +117,92 @@ impl Module for PackageModule {
         Ok(ModuleResult {
             changed: true,
             output: output.stdout,
-            stderr: output.stderr,
+            stderr: with_warning(refresh_failed.as_deref(), output.stderr),
             exit_code: output.exit_code as i32,
             output_cut: output.stdout_cut,
         })
+    }
+}
+
+/// Describes a failed index refresh. Some managers report errors on stdout, so it falls back
+/// to that when stderr is empty.
+fn refresh_note(cmd: &str, exit_code: u32, stdout: &str, stderr: &str) -> String {
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    format!("the package index refresh failed ({cmd}, exit {exit_code}): {detail}")
+}
+
+/// The refresh's failure comes first: it is the likely cause of an install that then fails.
+fn failure_message(package: &str, refresh: Option<&str>, exit_code: u32, stderr: &str) -> String {
+    let failed = format!("Package operation failed for '{package}' (exit {exit_code}): {stderr}");
+    match refresh {
+        Some(note) => format!("{note}\n{failed}"),
+        None => failed,
+    }
+}
+
+/// Keeps a failed refresh visible when the install succeeds anyway.
+fn with_warning(refresh: Option<&str>, stderr: String) -> String {
+    match refresh {
+        Some(note) => format!("warning: {note}\n{stderr}"),
+        None => stderr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_refresh_is_named_before_the_install_error() {
+        let refresh = "E: The repository 'http://example.invalid stable Release' does not have a Release file.\n";
+        let note = refresh_note("apt-get update -qq", 100, "", refresh);
+        let message = failure_message(
+            "nginx",
+            Some(&note),
+            100,
+            "E: Unable to locate package nginx",
+        );
+        assert_eq!(
+            message,
+            "the package index refresh failed (apt-get update -qq, exit 100): E: The repository \
+             'http://example.invalid stable Release' does not have a Release file.\n\
+             Package operation failed for 'nginx' (exit 100): E: Unable to locate package nginx"
+        );
+    }
+
+    #[test]
+    fn without_a_failed_refresh_only_the_install_error_is_reported() {
+        assert_eq!(
+            failure_message("nginx", None, 100, "E: Unable to locate package nginx"),
+            "Package operation failed for 'nginx' (exit 100): E: Unable to locate package nginx"
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_reports_on_stdout_is_still_described() {
+        let note = refresh_note(
+            "pacman -Sy",
+            1,
+            "error: failed to synchronize all databases\n",
+            "",
+        );
+        assert!(
+            note.ends_with("exit 1): error: failed to synchronize all databases"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn a_successful_install_keeps_the_refresh_failure_as_a_warning() {
+        let note = "the package index refresh failed (apk update -q, exit 1): ERROR: bad repo";
+        assert_eq!(
+            with_warning(Some(note), "done\n".to_string()),
+            format!("warning: {note}\ndone\n")
+        );
+        assert_eq!(with_warning(None, "done\n".to_string()), "done\n");
     }
 }

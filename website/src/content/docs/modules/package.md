@@ -34,6 +34,15 @@ package "telnet" state="absent"
 
 The package manager is detected automatically based on the target host's OS.
 
+## Index Refresh
+
+Before installing, `package` refreshes the package index (`apt-get update`, `dnf makecache`, `pacman -Sy`, …). If the refresh fails, for example because one repository is unreachable or has a bad key, the install still runs, since the package may come from a repository that works:
+
+- **The install fails:** the error names the failed refresh first, with its command, exit code and output, then the install's error.
+- **The install succeeds:** the task's output starts with a `warning:` line describing the failed refresh.
+
+Removing a package does not refresh the index.
+
 > For installing Nix packages on non-NixOS distributions, use the [nix](/modules/nix/) module instead.
 >
 > On NixOS, `package` installs into the invoking user's profile (via `nix-env`), not system-wide configuration in `/etc/nixos/configuration.nix`. For system-wide installs, edit the NixOS configuration directly or use the `nix` module with an explicit `profile=`.
