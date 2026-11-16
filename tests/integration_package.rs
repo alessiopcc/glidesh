@@ -140,7 +140,7 @@ async fn test_package_absent_already() {
 
 /// Adds a source whose suite does not exist, so `apt-get update` fails while the image's own
 /// sources still work.
-async fn break_one_source(ssh: &glidesh::ssh::connection::SshSession) {
+async fn break_one_source(ssh: &glidesh::ssh::connection::Session) {
     let added = ssh
         .exec(
             "mirror=$(grep -m1 '^deb ' /etc/apt/sources.list | awk '{print $2}') && \

@@ -13,7 +13,7 @@ mod common;
 use glidesh::config::types::ParamValue;
 use glidesh::modules::container::ContainerModule;
 use glidesh::modules::{Module, ModuleParams, ModuleStatus};
-use glidesh::ssh::SshSession;
+use glidesh::ssh::Session;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ const STATE_ROOT: &str = "/var/lib/fakedocker";
 
 /// Install the stand-in runtime. Must run before `detect_os`, which is what
 /// decides whether the module sees a runtime at all.
-async fn install_fake_docker(ssh: &SshSession) {
+async fn install_fake_docker(ssh: &Session) {
     let out = ssh
         .exec(&format!(
             "cat > /usr/local/bin/docker <<'GLIDESH_FAKE_DOCKER_EOF'\n{}\nGLIDESH_FAKE_DOCKER_EOF\nchmod +x /usr/local/bin/docker && which docker",
@@ -37,7 +37,7 @@ async fn install_fake_docker(ssh: &SshSession) {
     );
 }
 
-async fn read_state(ssh: &SshSession, container: &str, file: &str) -> String {
+async fn read_state(ssh: &Session, container: &str, file: &str) -> String {
     let out = ssh
         .exec(&format!(
             "cat {}/c/{}/{} 2>/dev/null",
@@ -48,7 +48,7 @@ async fn read_state(ssh: &SshSession, container: &str, file: &str) -> String {
     out.stdout.trim().to_string()
 }
 
-async fn write_state(ssh: &SshSession, container: &str, file: &str, value: &str) {
+async fn write_state(ssh: &Session, container: &str, file: &str, value: &str) {
     let out = ssh
         .exec(&format!(
             "printf '%s' '{}' > {}/c/{}/{}",
@@ -59,7 +59,7 @@ async fn write_state(ssh: &SshSession, container: &str, file: &str, value: &str)
     assert_eq!(out.exit_code, 0, "write_state failed: {}", out.stderr);
 }
 
-async fn container_exists(ssh: &SshSession, container: &str) -> bool {
+async fn container_exists(ssh: &Session, container: &str) -> bool {
     ssh.exec(&format!("test -d {}/c/{}", STATE_ROOT, container))
         .await
         .expect("failed to stat fake docker state")

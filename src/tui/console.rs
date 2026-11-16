@@ -1014,7 +1014,7 @@ fn render_tree(frame: &mut ratatui::Frame, area: Rect, state: &mut ConsoleState)
                     Span::raw(format!("   [{}] ", marker)),
                     Span::raw(host.name.clone()),
                     Span::styled(
-                        format!("  {}@{}:{}", host.user, host.address, host.port),
+                        format!("  {}", host.endpoint()),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ])

@@ -91,6 +91,7 @@ glidesh run [OPTIONS]
 | `--inventory <PATH>` | `-i` | Inventory listing the hosts to run on | — |
 | `--target <NAME>` | `-t` | Target filter: group name, host name, `group:hostname`, or a comma-separated list of any of these | — |
 | `--host <ADDR>` | — | Run on this one address instead of an inventory, with `--plan` or `--command` | — |
+| `--local` | — | Run the plan on this machine, without SSH, instead of on an inventory's hosts ([local runs](#local-runs)) | — |
 | `--user <USER>` | `-u` | SSH user for `--host` (inventory hosts set their own) | `root` |
 | `--port <PORT>` | `-P` | SSH port for `--host` (inventory hosts set their own) | `22` |
 | `--key <PATH>` | `-k` | SSH private key — see [SSH Key Resolution](#ssh-key-resolution) | the SSH agent, else `~/.ssh/id_ed25519` |
@@ -260,6 +261,16 @@ glidesh run --host 192.168.1.10 -u deploy -p plan.kdl
 ```
 
 The host uses the `--user` (default `root`) and `--port` (default `22`) flags. Plan vars are applied as usual, with the secrets file's values over them.
+
+### Local runs
+
+`--local` applies the plan to the machine running glidesh, as host `local`, with no SSH server, key or agent:
+
+```bash
+glidesh run --local -p plan.kdl
+```
+
+It needs a Linux or macOS controller. See [Local Hosts](/advanced/local-hosts/).
 
 ### Inventory-linked plans
 

@@ -16,7 +16,7 @@ use glidesh::modules::ModuleRegistry;
 use glidesh::secrets::{
     config as secrets_config, passphrase as secret_passphrase, store as secret_store,
 };
-use glidesh::ssh::{HostKeyPolicy, SshSession};
+use glidesh::ssh::{HostKeyPolicy, Session};
 use logging::RunLogger;
 use secret_cmd::{
     cmd_secret, read_pass_file, secret_identity_path, secret_pass_file_from_env,
@@ -256,6 +256,9 @@ fn source_secret_pass(args: &cli::SecretSourceArgs) -> Result<Option<String>, Gl
     Ok(None)
 }
 
+/// The host name of `run --local`: what `@host.name` and the output call this machine.
+const LOCAL_HOST_NAME: &str = "local";
+
 async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
     if let (Some(host), Some(command)) = (&args.host, &args.command) {
         let user = args.user.as_deref().unwrap_or("root");
@@ -275,7 +278,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             verify: !args.no_host_key_check,
             accept_new: args.accept_new_host_key,
         };
-        let session = SshSession::connect(host, args.port, user, &key, host_key_policy).await?;
+        let session = Session::connect(host, args.port, user, &key, host_key_policy).await?;
         tracing::info!("Connected. Running command: {}", command);
 
         let output = session.exec(command).await?;
@@ -377,7 +380,18 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
         apply_mode_override(&mut plan, args.mode.as_deref());
         apply_rollout_override(&mut plan, args.serial.as_deref(), args.max_fail.as_deref())?;
 
-        let targets = if let Some(ref host) = args.host {
+        let targets = if args.local {
+            vec![config::types::ResolvedHost {
+                name: LOCAL_HOST_NAME.to_string(),
+                address: config::types::LOCAL_ADDRESS.to_string(),
+                user: config::types::local_user(),
+                port: 0,
+                vars: adhoc_host_vars(&plan, &secret_vars),
+                jump: None,
+                run_as: cli_run_as.clone(),
+                local: true,
+            }]
+        } else if let Some(ref host) = args.host {
             let user = args.user.as_deref().unwrap_or("root").to_string();
             let host_vars = adhoc_host_vars(&plan, &secret_vars);
             vec![config::types::ResolvedHost {
@@ -388,6 +402,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
                 vars: host_vars,
                 jump: None,
                 run_as: cli_run_as.clone(),
+                local: false,
             }]
         } else if let Some(ref inventory) = inventory {
             let target_filter = args.target.as_deref();
@@ -398,7 +413,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
             resolved
         } else {
             return Err(GlideshError::Other(
-                "Plan mode requires --inventory or --host".to_string(),
+                "Plan mode requires --inventory, --host or --local".to_string(),
             ));
         };
 
@@ -577,12 +592,7 @@ async fn cmd_run(args: cli::RunArgs) -> Result<(), GlideshError> {
 
     let all_targets: Vec<&config::types::ResolvedHost> =
         group_plans.iter().flat_map(|gp| &gp.targets).collect();
-    let key = resolve_auth(
-        args.key.as_deref(),
-        all_targets.first().map(|h| &h.vars),
-        !args.no_agent,
-    )
-    .await?;
+    let key = auth_for(all_targets, args.key.as_deref(), !args.no_agent).await?;
 
     let run_name = run_name_parts.join("+");
 
@@ -1537,12 +1547,7 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
         if hosts.is_empty() {
             return Err(GlideshError::NoTargets);
         }
-        let key = resolve_auth(
-            args.key.as_deref(),
-            hosts.first().map(|h| &h.vars),
-            !args.no_agent,
-        )
-        .await?;
+        let key = auth_for(&hosts, args.key.as_deref(), !args.no_agent).await?;
 
         match (hosts.len(), &args.command) {
             (1, Some(command)) => {
@@ -1571,10 +1576,7 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
             }
             (1, None) => {
                 let host = &hosts[0];
-                eprintln!(
-                    "Opening shell to {}@{}:{}",
-                    host.user, host.address, host.port
-                );
+                eprintln!("Opening shell to {}", host.endpoint());
                 let session = connect_host(host, &key, host_key_policy).await?;
                 let exit_code = session.interactive_shell().await?;
                 session.close().await?;
@@ -1619,9 +1621,10 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
     if all_hosts.is_empty() {
         return Err(GlideshError::NoTargets);
     }
-    let inv_vars = all_hosts.first().map(|h| &h.vars);
+    // The key `auth_for` loads: the first SSH host's, so a plan the console launches gets it too.
+    let inv_vars = all_hosts.iter().find(|h| !h.local).map(|h| &h.vars);
     let key_path = resolve_key_path(args.key.as_deref(), inv_vars);
-    let key = resolve_auth(args.key.as_deref(), inv_vars, !args.no_agent).await?;
+    let key = auth_for(&all_hosts, args.key.as_deref(), !args.no_agent).await?;
     let key_path = matches!(key, glidesh::ssh::auth::Auth::Key(_)).then_some(key_path);
 
     tui::console::run(&inv_path, &inventory, key, key_path, host_key_policy)
@@ -1690,18 +1693,30 @@ async fn resolve_auth(
     .await
 }
 
+/// How `hosts` log in: [`resolve_auth`] with the first remote host's variables, or not at all
+/// when every one is local, since a container build has no key to give. Called before anything
+/// connects, it also refuses a local host the controller cannot run, so no host runs first.
+async fn auth_for<'a>(
+    hosts: impl IntoIterator<Item = &'a config::types::ResolvedHost>,
+    cli_key: Option<&std::path::Path>,
+    use_agent: bool,
+) -> Result<glidesh::ssh::auth::Auth, GlideshError> {
+    let hosts: Vec<_> = hosts.into_iter().collect();
+    for host in hosts.iter().filter(|h| h.local) {
+        glidesh::ssh::local_supported(&host.name)?;
+    }
+    match hosts.into_iter().find(|h| !h.local) {
+        Some(remote) => resolve_auth(cli_key, Some(&remote.vars), use_agent).await,
+        None => Ok(glidesh::ssh::auth::Auth::Unused),
+    }
+}
+
 async fn connect_host(
     host: &config::types::ResolvedHost,
     key: &glidesh::ssh::auth::Auth,
     policy: HostKeyPolicy,
-) -> Result<SshSession, GlideshError> {
-    match &host.jump {
-        Some(jump) => {
-            SshSession::connect_via_jump(&host.address, host.port, &host.user, key, policy, jump)
-                .await
-        }
-        None => SshSession::connect(&host.address, host.port, &host.user, key, policy).await,
-    }
+) -> Result<Session, GlideshError> {
+    Session::open(host, key, policy).await
 }
 
 /// Redacts the whole stream before splitting it, so a secret that itself contains a newline is
@@ -1842,12 +1857,7 @@ async fn run_with_ui(
         let connection_info: Vec<tui::state::HostConnectionInfo> = group_plans
             .iter()
             .flat_map(|gp| &gp.targets)
-            .map(|h| tui::state::HostConnectionInfo {
-                address: h.address.clone(),
-                user: h.user.clone(),
-                port: h.port,
-                jump: h.jump.clone(),
-            })
+            .cloned()
             .collect();
 
         let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2265,6 +2275,7 @@ mod tests {
                 .collect(),
             jump: None,
             run_as: Default::default(),
+            local: false,
         }
     }
 

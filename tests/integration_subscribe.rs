@@ -7,7 +7,7 @@
 mod common;
 
 use assert_cmd::Command;
-use glidesh::ssh::SshSession;
+use glidesh::ssh::Session;
 use std::path::Path;
 
 const FAKE_DOCKER: &str = include_str!("fake-docker.sh");
@@ -93,7 +93,7 @@ async fn a_subscriber_redoes_its_work_only_when_triggered() {
     );
 }
 
-async fn install_fake_docker(ssh: &SshSession) {
+async fn install_fake_docker(ssh: &Session) {
     let out = ssh
         .exec(&format!(
             "cat > /usr/local/bin/docker <<'GLIDESH_FAKE_DOCKER_EOF'\n{}\nGLIDESH_FAKE_DOCKER_EOF\nchmod +x /usr/local/bin/docker",
@@ -104,7 +104,7 @@ async fn install_fake_docker(ssh: &SshSession) {
     assert_eq!(out.exit_code, 0, "{}", out.stderr);
 }
 
-async fn cron_pid(ssh: &SshSession) -> String {
+async fn cron_pid(ssh: &Session) -> String {
     let out = ssh
         .exec("systemctl show -p MainPID --value cron")
         .await
@@ -114,7 +114,7 @@ async fn cron_pid(ssh: &SshSession) -> String {
     pid
 }
 
-async fn generation(ssh: &SshSession, name: &str) -> String {
+async fn generation(ssh: &Session, name: &str) -> String {
     let out = ssh
         .exec(&format!("cat /var/lib/fakedocker/c/{name}/generation"))
         .await

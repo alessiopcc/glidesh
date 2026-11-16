@@ -64,7 +64,7 @@ fn run(dir: &Path, extra: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
-async fn stamp(ssh: &glidesh::ssh::SshSession, file: &str) -> u128 {
+async fn stamp(ssh: &glidesh::ssh::Session, file: &str) -> u128 {
     let out = ssh.exec(&format!("cat /root/{file}")).await.unwrap();
     out.stdout
         .trim()

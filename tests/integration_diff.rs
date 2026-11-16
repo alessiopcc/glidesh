@@ -13,7 +13,7 @@ use glidesh::modules::{Module, ModuleParams, ModuleStatus};
 use glidesh::secrets::config::{Provider, SecretsConfig};
 use glidesh::secrets::passphrase::{PassphraseProvider, generate_dek};
 use glidesh::secrets::{Identity, Secrets, token};
-use glidesh::ssh::SshSession;
+use glidesh::ssh::Session;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -40,7 +40,7 @@ fn pending_diff(status: ModuleStatus) -> Option<String> {
     }
 }
 
-async fn put(ssh: &SshSession, path: &str, content: &str) {
+async fn put(ssh: &Session, path: &str, content: &str) {
     ssh.upload_file(content.as_bytes(), path).await.unwrap();
 }
 
@@ -275,7 +275,7 @@ async fn diff_false_keeps_a_task_out_of_the_diff() {
     );
 }
 
-async fn install_fake_docker(ssh: &SshSession) {
+async fn install_fake_docker(ssh: &Session) {
     let out = ssh
         .exec(&format!(
             "cat > /usr/local/bin/docker <<'GLIDESH_FAKE_DOCKER_EOF'\n{}\nGLIDESH_FAKE_DOCKER_EOF\nchmod +x /usr/local/bin/docker",

@@ -607,7 +607,7 @@ fn source_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
     dir
 }
 
-async fn exists(ssh: &glidesh::ssh::SshSession, path: &str) -> bool {
+async fn exists(ssh: &glidesh::ssh::Session, path: &str) -> bool {
     ssh.exec(&format!("test -e {path} && echo yes"))
         .await
         .unwrap()

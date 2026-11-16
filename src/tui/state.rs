@@ -1,16 +1,9 @@
 use crate::executor::result::{ExecutorEvent, waiting_text};
-use glidesh::config::types::ResolvedJumpHost;
 use std::collections::HashMap;
 use std::time::Instant;
 
 /// Connection details for a host, used to open a shell after plan completion.
-#[derive(Debug, Clone)]
-pub struct HostConnectionInfo {
-    pub address: String,
-    pub user: String,
-    pub port: u16,
-    pub jump: Option<ResolvedJumpHost>,
-}
+pub type HostConnectionInfo = glidesh::config::types::ResolvedHost;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusPanel {

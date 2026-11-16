@@ -16,7 +16,7 @@ use glidesh::modules::{ModuleParams, ModuleRegistry, ModuleStatus};
 use glidesh::secrets::{Secrets, token};
 use glidesh::ssh::auth::Auth;
 use glidesh::ssh::connection::{CommandOutput, OUTPUT_LIMIT};
-use glidesh::ssh::{HostKeyPolicy, SshSession};
+use glidesh::ssh::{HostKeyPolicy, Session};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -197,7 +197,7 @@ struct StepRun<'a> {
     step: &'a Step,
     step_idx: usize,
     template_data: &'a TemplateData,
-    session: &'a SshSession,
+    session: &'a Session,
     os_info: &'a OsInfo,
     trigger: Trigger,
 }
@@ -507,35 +507,14 @@ impl NodeRunner {
             host: self.host.name.clone(),
         });
 
-        let session = match &self.host.jump {
-            Some(jump) => {
-                SshSession::connect_via_jump(
-                    &self.host.address,
-                    self.host.port,
-                    &self.host.user,
-                    &self.key,
-                    self.host_key_policy,
-                    jump,
-                )
-                .await
-            }
-            None => {
-                SshSession::connect(
-                    &self.host.address,
-                    self.host.port,
-                    &self.host.user,
-                    &self.key,
-                    self.host_key_policy,
-                )
-                .await
-            }
-        }
-        .inspect_err(|e| {
-            let _ = self.event_tx.send(ExecutorEvent::NodeAuthFailed {
-                host: self.host.name.clone(),
-                error: e.to_string(),
-            });
-        })?;
+        let session = Session::open(&self.host, &self.key, self.host_key_policy)
+            .await
+            .inspect_err(|e| {
+                let _ = self.event_tx.send(ExecutorEvent::NodeAuthFailed {
+                    host: self.host.name.clone(),
+                    error: e.to_string(),
+                });
+            })?;
 
         let os_info = detect_os(&session).await?;
 
@@ -747,7 +726,7 @@ impl NodeRunner {
         step: &Step,
         gate: &UntilGate,
         vars: &HashMap<String, String>,
-        session: &SshSession,
+        session: &Session,
     ) -> Result<(), String> {
         let mut command = glidesh::config::template::interpolate(&gate.command, vars)
             .map_err(|e| format!("until=: {e}"))?;
@@ -1611,6 +1590,7 @@ mod tests {
             vars: HashMap::new(),
             jump: None,
             run_as: Default::default(),
+            local: false,
         };
         let vars: HashMap<String, String> = host_builtin_vars(&host).into_iter().collect();
         assert_eq!(vars.get("@host.name").map(String::as_str), Some("web-1"));
@@ -1792,6 +1772,7 @@ mod tests {
             vars: HashMap::new(),
             jump: None,
             run_as: Default::default(),
+            local: false,
         };
         let os = os_info(OsFamily::Debian, None);
         let names = host_builtin_vars(&host)

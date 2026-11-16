@@ -148,7 +148,7 @@ leaves none behind for the login user.
 |--------|----------|-------|
 | `sudo` (default) | passwordless **or** password via stdin | Recommended. |
 | `doas` | passwordless only | `doas` reads passwords from a TTY; configure `nopass`/`persist` in `doas.conf`. |
-| `su` | password via PTY | Requires a PTY, which merges stderr into stdout. File uploads, fetches and `--diff` reads work only for `run-as="root"` or the login user. Best-effort; prefer `sudo`. |
+| `su` | password via PTY | Requires a PTY, which merges stderr into stdout. File uploads, fetches and `--diff` reads work only for `run-as="root"` or the login user. Best-effort; prefer `sudo`. Not available on a [local host](/advanced/local-hosts/), which has no terminal to give it. |
 
 A denied escalation (wrong password, not a sudoer, missing TTY) is reported as a
 distinct error, not confused with a command that failed on its own.

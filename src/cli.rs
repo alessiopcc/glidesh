@@ -280,6 +280,11 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_host)]
     pub host: Option<String>,
 
+    /// Run the plan on this machine, without SSH, instead of on an inventory's hosts: to build
+    /// a container image, or set up the machine you are on. Needs a Linux or macOS controller
+    #[arg(long, requires = "plan", conflicts_with_all = ["host", "inventory", "target", "user"])]
+    pub local: bool,
+
     /// SSH user for --host (inventory hosts set their own) [default: root]
     #[arg(short, long)]
     pub user: Option<String>,
@@ -543,6 +548,9 @@ mod tests {
             "$GLIDESH_KEY_PASS",
             "SSH agent",
             "--no-agent",
+            "LOCAL HOSTS",
+            "run --local -p plan.kdl",
+            "local=#true",
         ] {
             assert!(help.contains(needle), "run --help lacks {needle}:\n{help}");
         }
@@ -561,6 +569,7 @@ mod tests {
             "--var name=value",
             "exits non-zero",
             "glidesh run --help",
+            "glidesh run --local",
         ] {
             assert!(
                 help.contains(needle),
@@ -608,5 +617,23 @@ mod tests {
         assert!(parse(&["-i", "inv.kdl", "-c", "uptime"]).is_err());
         assert!(parse(&["--host", "h", "-p", "plan.kdl", "-c", "uptime"]).is_err());
         assert!(parse(&["--host", "h", "-c", "uptime"]).is_ok());
+    }
+
+    #[test]
+    fn local_runs_a_plan_and_takes_no_way_of_reaching_a_host() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["glidesh", "run"], args].concat());
+        assert!(parse(&["--local", "-p", "plan.kdl"]).is_ok());
+        assert!(parse(&["--local"]).is_err());
+        for other in [
+            &["--host", "h"][..],
+            &["-i", "inv.kdl"],
+            &["-t", "web"],
+            &["-u", "deploy"],
+        ] {
+            assert!(
+                parse(&[&["--local", "-p", "plan.kdl"][..], other].concat()).is_err(),
+                "{other:?}"
+            );
+        }
     }
 }

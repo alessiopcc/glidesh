@@ -1,5 +1,5 @@
 use crate::error::GlideshError;
-use crate::ssh::SshSession;
+use crate::ssh::Session;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::io;
@@ -35,12 +35,13 @@ impl LocalForward {
 }
 
 pub async fn start_local_forward(
-    session: Arc<SshSession>,
+    session: Arc<Session>,
     via_host: String,
     local_port: u16,
     remote_host: String,
     remote_port: u16,
 ) -> Result<LocalForward, GlideshError> {
+    session.can_forward()?;
     let listener = TcpListener::bind(("127.0.0.1", local_port))
         .await
         .map_err(|e| {
@@ -120,7 +121,7 @@ pub struct ReverseForward {
     pub local_port: u16,
     pub accepts: Arc<AtomicUsize>,
     cancel_token: CancellationToken,
-    session: Arc<SshSession>,
+    session: Arc<Session>,
 }
 
 impl ReverseForward {
@@ -134,7 +135,7 @@ impl ReverseForward {
 }
 
 pub async fn start_reverse_forward(
-    session: Arc<SshSession>,
+    session: Arc<Session>,
     via_host: String,
     remote_bind_addr: String,
     remote_bind_port: u16,
@@ -193,4 +194,19 @@ pub async fn start_reverse_forward(
         cancel_token,
         session,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_local_host_refuses_a_forward_before_listening() {
+        let session = Arc::new(Session::local("self").unwrap());
+        let refused = start_local_forward(session, "self".into(), 0, "localhost".into(), 80).await;
+        let Err(GlideshError::Local { message, .. }) = refused else {
+            panic!("a local host forwarded a port");
+        };
+        assert!(message.contains("forward a port"), "{message}");
+    }
 }

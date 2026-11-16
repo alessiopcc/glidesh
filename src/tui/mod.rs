@@ -14,7 +14,7 @@ use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use glidesh::ssh::auth::Auth;
-use glidesh::ssh::{HostKeyPolicy, SshSession};
+use glidesh::ssh::{HostKeyPolicy, Session};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use state::{FocusPanel, HostConnectionInfo, TuiState};
@@ -188,13 +188,7 @@ async fn open_shell_for_host(
     key: &Auth,
     policy: HostKeyPolicy,
 ) -> Result<(), glidesh::error::GlideshError> {
-    let session = match &info.jump {
-        Some(jump) => {
-            SshSession::connect_via_jump(&info.address, info.port, &info.user, key, policy, jump)
-                .await?
-        }
-        None => SshSession::connect(&info.address, info.port, &info.user, key, policy).await?,
-    };
+    let session = Session::open(info, key, policy).await?;
 
     println!(
         "Connected to {}@{}. Type 'exit' to return to TUI.\r",

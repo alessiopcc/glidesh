@@ -1,12 +1,12 @@
 use crate::config::types::ResolvedHost;
 use crate::error::GlideshError;
 use crate::ssh::auth::Auth;
-use crate::ssh::{HostKeyPolicy, SshSession};
+use crate::ssh::{HostKeyPolicy, Session};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-type Slot = Arc<Mutex<Option<Arc<SshSession>>>>;
+type Slot = Arc<Mutex<Option<Arc<Session>>>>;
 
 /// A per-host cache of live SSH sessions. Used by the console TUI so
 /// long-running tunnels survive across shell entries and can share one
@@ -26,10 +26,7 @@ impl SessionPool {
         }
     }
 
-    pub async fn get_or_connect(
-        &self,
-        host: &ResolvedHost,
-    ) -> Result<Arc<SshSession>, GlideshError> {
+    pub async fn get_or_connect(&self, host: &ResolvedHost) -> Result<Arc<Session>, GlideshError> {
         let key = pool_key(host);
 
         let slot: Slot = {
@@ -52,24 +49,8 @@ impl SessionPool {
         Ok(arc)
     }
 
-    async fn connect_one(&self, host: &ResolvedHost) -> Result<SshSession, GlideshError> {
-        match &host.jump {
-            Some(jump) => {
-                SshSession::connect_via_jump(
-                    &host.address,
-                    host.port,
-                    &host.user,
-                    &self.key,
-                    self.policy,
-                    jump,
-                )
-                .await
-            }
-            None => {
-                SshSession::connect(&host.address, host.port, &host.user, &self.key, self.policy)
-                    .await
-            }
-        }
+    async fn connect_one(&self, host: &ResolvedHost) -> Result<Session, GlideshError> {
+        Session::open(host, &self.key, self.policy).await
     }
 
     pub async fn remove(&self, host: &ResolvedHost) {
@@ -86,6 +67,10 @@ impl SessionPool {
 }
 
 fn pool_key(host: &ResolvedHost) -> String {
+    // Every local host has the same address, user and port; its name tells them apart.
+    if host.local {
+        return format!("local:{}", host.name);
+    }
     let base = format!("{}@{}:{}", host.user, host.address, host.port);
     match &host.jump {
         Some(j) => format!("{}|via={}@{}:{}", base, j.user, j.address, j.port),
