@@ -121,7 +121,7 @@ async fn host_facts_match_the_host() {
     );
 }
 
-async fn sh(ssh: &glidesh::ssh::SshSession, command: &str) -> String {
+async fn sh(ssh: &glidesh::ssh::Session, command: &str) -> String {
     let out = ssh.exec(command).await.unwrap();
     assert_eq!(out.exit_code, 0, "`{command}` failed: {}", out.stderr);
     out.stdout.trim().to_string()
@@ -135,7 +135,7 @@ fn run(dir: &Path) {
     cmd.assert().success();
 }
 
-async fn read(ssh: &glidesh::ssh::SshSession, path: &str) -> String {
+async fn read(ssh: &glidesh::ssh::Session, path: &str) -> String {
     let out = ssh.exec(&format!("cat {path}")).await.unwrap();
     assert_eq!(out.exit_code, 0, "{path} was not written: {}", out.stderr);
     out.stdout.trim().to_string()

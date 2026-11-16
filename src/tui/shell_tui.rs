@@ -6,7 +6,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use glidesh::config::types::ResolvedHost;
 use glidesh::error::GlideshError;
 use glidesh::ssh::auth::Auth;
-use glidesh::ssh::{HostKeyPolicy, SshSession};
+use glidesh::ssh::{HostKeyPolicy, Session};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -380,14 +380,8 @@ async fn connect_to_host(
     host: &ResolvedHost,
     key: &Auth,
     policy: HostKeyPolicy,
-) -> Result<SshSession, GlideshError> {
-    match &host.jump {
-        Some(jump) => {
-            SshSession::connect_via_jump(&host.address, host.port, &host.user, key, policy, jump)
-                .await
-        }
-        None => SshSession::connect(&host.address, host.port, &host.user, key, policy).await,
-    }
+) -> Result<Session, GlideshError> {
+    Session::open(host, key, policy).await
 }
 
 fn render_shell_tui(frame: &mut ratatui::Frame, state: &ShellTuiState) {

@@ -52,7 +52,7 @@ fn run(dir: &Path, plan: &str, extra: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
-async fn stamp(ssh: &glidesh::ssh::SshSession, file: &str) -> u128 {
+async fn stamp(ssh: &glidesh::ssh::Session, file: &str) -> u128 {
     let out = ssh.exec(&format!("cat /root/{file}")).await.unwrap();
     out.stdout
         .trim()
@@ -60,7 +60,7 @@ async fn stamp(ssh: &glidesh::ssh::SshSession, file: &str) -> u128 {
         .unwrap_or_else(|_| panic!("/root/{file} was not written: {:?}", out.stdout))
 }
 
-async fn ran(ssh: &glidesh::ssh::SshSession, host: &str) -> bool {
+async fn ran(ssh: &glidesh::ssh::Session, host: &str) -> bool {
     ssh.exec(&format!("test -e /root/ran-{host}"))
         .await
         .unwrap()

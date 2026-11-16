@@ -57,6 +57,7 @@ export default defineConfig({
 					label: 'Advanced',
 					items: [
 						{ label: 'Jump Hosts', slug: 'advanced/jump-hosts' },
+						{ label: 'Local Hosts', slug: 'advanced/local-hosts' },
 						{ label: 'Privilege Escalation', slug: 'advanced/run-as' },
 						{ label: 'Conditionals', slug: 'advanced/conditionals' },
 						{ label: 'Loops & Register', slug: 'advanced/loops-register' },

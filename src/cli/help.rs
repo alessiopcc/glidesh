@@ -77,6 +77,8 @@ Typical workflow:
                                                         show what would change, and how
   glidesh run -i inventory.kdl -p plan.kdl              apply it
   glidesh logs --last                                   read the last run's per-host log
+  glidesh run --local -p plan.kdl                       apply it to this machine, no SSH
+                                                        (a Dockerfile RUN, a workstation)
 
 Non-interactive use (scripts, CI, agents):
   - `run` uses plain-text output when stdout is not a terminal; -T forces it.
@@ -108,6 +110,7 @@ Examples:
   glidesh run -i inventory.kdl -p plan.kdl --var release=v1.4   # answer a vars-prompt
   glidesh run --host 10.0.0.5 -u deploy -p plan.kdl
   glidesh run --host 10.0.0.5 -u deploy -c uptime
+  glidesh run --local -p plan.kdl              # this machine, no SSH: e.g. a Dockerfile RUN
 
 PLAN SYNTAX
   plan \"<name>\" [run-as=\"root\"] {
@@ -318,6 +321,16 @@ SSH
   `jump \"<addr>\" user=\"<user>\" port=<port>` (user and port optional: the host's user,
   port 22): at the top level for every host, in a group, or in a host; the most specific
   wins, and `jump #false` in a group or host connects to it directly.
+
+LOCAL HOSTS
+  `run --local -p plan.kdl` applies the plan to the machine running glidesh, as host
+  `local`, without SSH: no server, key or agent is needed, so it works in a Dockerfile
+  `RUN` step. In an inventory, `host \"<name>\" local=#true` is such a host: it takes no
+  address, `user`, `port` or `jump` (a group's jump does not apply), and runs beside SSH
+  hosts. Commands run in `sh -c` as the user running glidesh, from their home directory,
+  without glidesh's GLIDESH_* variables and SSH_AUTH_SOCK; ${@host.address} is localhost,
+  ${@host.user} that user, ${@host.port} 0. run-as works with sudo and doas, not su (it
+  needs a terminal). Linux and macOS only.
 
 Docs: https://glidesh.netlify.app/cli/#glidesh-run"
 );

@@ -26,6 +26,10 @@ pub enum GlideshError {
     #[error("SSH channel error: {message}")]
     SshChannel { message: String },
 
+    /// A local host (`local=#true`, `run --local`) could not run a command or reach a file.
+    #[error("Local host '{host}': {message}")]
+    Local { host: String, message: String },
+
     #[error("Key loading failed: {message}")]
     KeyLoad { message: String },
 

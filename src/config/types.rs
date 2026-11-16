@@ -106,6 +106,8 @@ pub struct Host {
     pub plan: Option<String>,
     pub jump: Option<Jump>,
     pub run_as: RunAsSpec,
+    /// `local=#true`: the controller itself, worked on without SSH. It has no address.
+    pub local: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +249,19 @@ impl Inventory {
     }
 
     fn resolve_host(&self, host: &Host, group: Option<&Group>) -> ResolvedHost {
+        if host.local {
+            let mut resolved = self.resolve_remote(host, group);
+            resolved.address = LOCAL_ADDRESS.to_string();
+            resolved.user = local_user();
+            resolved.port = 0;
+            resolved.jump = None;
+            resolved.local = true;
+            return resolved;
+        }
+        self.resolve_remote(host, group)
+    }
+
+    fn resolve_remote(&self, host: &Host, group: Option<&Group>) -> ResolvedHost {
         // Merge vars: global -> group -> host (most specific wins)
         let mut vars = self.global_vars.clone();
         if let Some(g) = group {
@@ -287,8 +302,39 @@ impl Inventory {
             vars,
             jump,
             run_as,
+            local: false,
         }
     }
+}
+
+impl ResolvedHost {
+    /// How the host is reached, for display: `user@address:port`, or `this machine`.
+    pub fn endpoint(&self) -> String {
+        if self.local {
+            return "this machine".to_string();
+        }
+        format!("{}@{}:{}", self.user, self.address, self.port)
+    }
+}
+
+/// The `@host.address` of a local host.
+pub const LOCAL_ADDRESS: &str = "localhost";
+
+/// The user glidesh runs as, the login user of a local host: `$USER`, else `$LOGNAME`, else
+/// `id -un` (a container sets neither variable), else empty.
+pub fn local_user() -> String {
+    for name in ["USER", "LOGNAME"] {
+        if let Some(user) = std::env::var(name).ok().filter(|u| !u.is_empty()) {
+            return user;
+        }
+    }
+    std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +348,8 @@ pub struct ResolvedHost {
     /// Merged escalation from global -> group -> host (CLI default applied later
     /// in the executor, since it is the least-specific layer).
     pub run_as: RunAsSpec,
+    /// The controller itself (`local=#true`, `run --local`): no SSH, no address, port or jump.
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

@@ -1,5 +1,5 @@
 use crate::error::GlideshError;
-use crate::ssh::SshSession;
+use crate::ssh::Session;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::io;
@@ -35,7 +35,7 @@ impl LocalForward {
 }
 
 pub async fn start_local_forward(
-    session: Arc<SshSession>,
+    session: Arc<Session>,
     via_host: String,
     local_port: u16,
     remote_host: String,
@@ -120,7 +120,7 @@ pub struct ReverseForward {
     pub local_port: u16,
     pub accepts: Arc<AtomicUsize>,
     cancel_token: CancellationToken,
-    session: Arc<SshSession>,
+    session: Arc<Session>,
 }
 
 impl ReverseForward {
@@ -134,7 +134,7 @@ impl ReverseForward {
 }
 
 pub async fn start_reverse_forward(
-    session: Arc<SshSession>,
+    session: Arc<Session>,
     via_host: String,
     remote_bind_addr: String,
     remote_bind_port: u16,

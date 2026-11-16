@@ -10,7 +10,7 @@ use crate::error::GlideshError;
 use crate::modules::ModuleParams;
 use crate::modules::shell::{login_enabled, resolve_cmd_from_params, wrap_login};
 use crate::ssh::auth::Auth;
-use crate::ssh::{HostKeyPolicy, SshSession};
+use crate::ssh::{HostKeyPolicy, Session};
 
 pub const MODULE_NAME: &str = "host";
 
@@ -148,29 +148,7 @@ async fn run_on_named_host(
             ),
         })?;
 
-    let session = match &target.jump {
-        Some(jump) => {
-            SshSession::connect_via_jump(
-                &target.address,
-                target.port,
-                &target.user,
-                key,
-                host_key_policy,
-                jump,
-            )
-            .await
-        }
-        None => {
-            SshSession::connect(
-                &target.address,
-                target.port,
-                &target.user,
-                key,
-                host_key_policy,
-            )
-            .await
-        }
-    }?;
+    let session = Session::open(target, key, host_key_policy).await?;
 
     let output = session.exec(command).await?;
     let _ = session.close().await;

@@ -224,10 +224,15 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         .filter_map(|e| e.value().as_string())
         .collect();
 
+    let local = parse_local(node)?;
+    if local {
+        return parse_local_host(node, &args);
+    }
     if args.len() < 2 {
         return Err(GlideshError::ConfigParse {
             message: format!(
-                "Host node requires name and address arguments, got {} args",
+                "Host node requires name and address arguments, got {} args (or local=#true \
+                 for the machine running glidesh)",
                 args.len()
             ),
         });
@@ -292,6 +297,94 @@ fn parse_host(node: &kdl::KdlNode) -> Result<Host, GlideshError> {
         plan,
         jump,
         run_as,
+        local: false,
+    })
+}
+
+/// The host's `local=` attribute; absent is `false`.
+fn parse_local(node: &kdl::KdlNode) -> Result<bool, GlideshError> {
+    let Some(entry) = node
+        .entries()
+        .iter()
+        .find(|e| e.name().map(|n| n.value()) == Some("local"))
+    else {
+        return Ok(false);
+    };
+    entry
+        .value()
+        .as_bool()
+        .ok_or_else(|| GlideshError::ConfigParse {
+            message: format!("`local` takes #true or #false, not {}", entry.value()),
+        })
+}
+
+/// A `local=#true` host: the machine running glidesh, reached without SSH. It is named only,
+/// since every way of reaching a host over the network would be ignored.
+fn parse_local_host(node: &kdl::KdlNode, args: &[&str]) -> Result<Host, GlideshError> {
+    let name = args
+        .first()
+        .copied()
+        .ok_or_else(|| GlideshError::ConfigParse {
+            message: "Host node requires a name argument".to_string(),
+        })?;
+    validate_name(name, NameKind::Host)?;
+    let refuse = |what: &str| GlideshError::ConfigParse {
+        message: format!(
+            "host '{name}' is local=#true, the machine running glidesh: it takes no {what}"
+        ),
+    };
+    // Every argument after the name, a number too: only the name is read.
+    if node.entries().iter().filter(|e| e.name().is_none()).count() > 1 {
+        return Err(refuse("address"));
+    }
+    for (attr, why) in [
+        ("user", "it runs as the user running glidesh"),
+        ("port", "nothing connects to it"),
+    ] {
+        if node
+            .entries()
+            .iter()
+            .any(|e| e.name().map(|n| n.value()) == Some(attr))
+        {
+            return Err(refuse(&format!("`{attr}`: {why}")));
+        }
+    }
+    let plan = node
+        .entries()
+        .iter()
+        .find(|e| e.name().map(|n| n.value()) == Some("plan"))
+        .and_then(|e| e.value().as_string())
+        .map(|s| s.to_string());
+
+    let mut vars = HashMap::new();
+    if let Some(children) = node.children() {
+        for child in children.nodes() {
+            match child.name().value() {
+                "jump" => return Err(refuse("`jump`")),
+                "vars" => {
+                    if let Some(vc) = child.children() {
+                        vars = parse_vars_block(vc)?;
+                    }
+                }
+                other => {
+                    return Err(GlideshError::ConfigParse {
+                        message: format!("Unknown node in host '{}': '{}'", name, other),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(Host {
+        name: name.to_string(),
+        address: String::new(),
+        user: None,
+        port: None,
+        vars,
+        plan,
+        jump: None,
+        run_as: super::parse_run_as_attrs(node)?,
+        local: true,
     })
 }
 
@@ -1015,5 +1108,65 @@ group "web" {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Duplicate variable 'port'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn a_local_host_resolves_to_this_machine_and_ignores_a_group_jump() {
+        let input = r#"
+group "build" {
+    jump "bastion.example.com"
+    host "builder" local=#true plan="image.kdl" run-as="root" {
+        vars {
+            role "image"
+        }
+    }
+    host "remote" "10.0.0.1"
+}
+"#;
+        let inv = parse_inventory(input).unwrap();
+        let hosts = inv.resolve_targets(None);
+        let builder = hosts.iter().find(|h| h.name == "builder").unwrap();
+        assert!(builder.local);
+        assert_eq!(builder.address, "localhost");
+        assert_eq!(builder.port, 0);
+        assert!(builder.jump.is_none());
+        assert_eq!(builder.vars.get("role").map(String::as_str), Some("image"));
+        assert!(builder.run_as.user.is_some());
+        assert_eq!(inv.groups[0].hosts[0].plan.as_deref(), Some("image.kdl"));
+
+        assert_eq!(builder.endpoint(), "this machine");
+
+        let remote = hosts.iter().find(|h| h.name == "remote").unwrap();
+        assert!(!remote.local);
+        assert!(remote.jump.is_some());
+        assert_eq!(remote.endpoint(), "root@10.0.0.1:22");
+    }
+
+    #[test]
+    fn local_false_is_an_ordinary_host() {
+        let inv = parse_inventory(r#"host "web" "10.0.0.1" local=#false"#).unwrap();
+        assert!(!inv.resolve_targets(None)[0].local);
+    }
+
+    #[test]
+    fn a_local_host_takes_no_way_of_reaching_it() {
+        for (input, needle) in [
+            (r#"host "a" "10.0.0.1" local=#true"#, "takes no address"),
+            (r#"host "a" local=#true user="deploy""#, "takes no `user`"),
+            (
+                r#"host "a" local=#true port=22"#,
+                "takes no `port`: nothing connects to it",
+            ),
+            (r#"host "a" 10 local=#true"#, "takes no address"),
+            (
+                "host \"a\" local=#true {\n    jump \"bastion\"\n}",
+                "takes no `jump`",
+            ),
+            (r#"host "a" local="yes""#, "`local` takes #true or #false"),
+            (r#"host "a""#, "or local=#true"),
+        ] {
+            let msg = parse_inventory(input).unwrap_err().to_string();
+            assert!(msg.contains(needle), "{input}: {msg}");
+        }
     }
 }

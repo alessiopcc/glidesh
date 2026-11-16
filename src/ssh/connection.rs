@@ -1,4 +1,4 @@
-use crate::config::types::{ResolvedJumpHost, ResolvedRunAs, RunAsMethod};
+use crate::config::types::{ResolvedHost, ResolvedJumpHost, ResolvedRunAs, RunAsMethod};
 use crate::error::GlideshError;
 use crate::modules::escalation;
 use crate::modules::file_tree::{PathKind, PathStat, RemoteKind, Strays, join as tree_join};
@@ -68,6 +68,31 @@ fn exit_outcome(status: Option<u32>, signal: Option<&str>) -> (u32, Option<Strin
     }
 }
 
+/// A finished command's output: both streams as kept, and on stderr why its exit code is not
+/// its own when it is not.
+pub(super) fn collected(
+    stdout: CappedStream,
+    stderr: CappedStream,
+    status: Option<u32>,
+    signal: Option<&str>,
+) -> CommandOutput {
+    let (exit_code, why) = exit_outcome(status, signal);
+    let (mut stderr, _) = stderr.finish();
+    if let Some(why) = why {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&why);
+    }
+    let (stdout, stdout_cut) = stdout.finish();
+    CommandOutput {
+        exit_code,
+        stdout,
+        stderr,
+        stdout_cut,
+    }
+}
+
 /// Most bytes of one output stream (stdout or stderr) a command keeps in memory: the first
 /// half and the latest half. A command that prints without end — a `yes`, a chatty build, a
 /// log followed by an `until=` gate — would otherwise grow the controller's memory until the
@@ -76,7 +101,7 @@ pub const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 
 /// One output stream, capped at a limit: it keeps the start, where a command says what it
 /// is doing, and the end, where it says how it failed.
-struct CappedStream {
+pub(super) struct CappedStream {
     limit: usize,
     head: Vec<u8>,
     tail: VecDeque<u8>,
@@ -92,7 +117,7 @@ fn growth(len: usize, capacity: usize, adding: usize, max: usize) -> Option<usiz
 }
 
 impl CappedStream {
-    fn new(limit: usize) -> Self {
+    pub(super) fn new(limit: usize) -> Self {
         Self {
             limit,
             head: Vec::new(),
@@ -101,7 +126,7 @@ impl CappedStream {
         }
     }
 
-    fn push(&mut self, mut data: &[u8]) {
+    pub(super) fn push(&mut self, mut data: &[u8]) {
         let head_limit = self.limit / 2;
         let to_head = (head_limit - self.head.len()).min(data.len());
         if let Some(more) = growth(self.head.len(), self.head.capacity(), to_head, head_limit) {
@@ -134,7 +159,7 @@ impl CappedStream {
     }
 
     /// The kept text, and whether anything was dropped.
-    fn finish(self) -> (String, bool) {
+    pub(super) fn finish(self) -> (String, bool) {
         let mut bytes = self.head;
         let cut = self.dropped > 0;
         if cut {
@@ -151,7 +176,7 @@ impl CappedStream {
     }
 }
 
-/// Optional controls for [`SshSession::exec_with`]: feed bytes on stdin (e.g. `su`'s
+/// Optional controls for [`Session::exec_with`]: feed bytes on stdin (e.g. `su`'s
 /// password), allocate a PTY (required by `su`), or hold stdin for a [`Handshake`] —
 /// which then writes stdin alone, and `stdin` is ignored.
 #[derive(Default)]
@@ -180,7 +205,7 @@ pub struct Handshake {
 
 /// What a [`Handshake`] writes on stdin next.
 #[derive(Debug, PartialEq, Eq)]
-enum Reply {
+pub(super) enum Reply {
     Bytes(Vec<u8>),
     Close,
 }
@@ -188,11 +213,11 @@ enum Reply {
 /// How long a line sudo left unfinished stays quiet before it counts as a prompt: PAM
 /// shows its own prompt instead of `-p`'s when it is not the standard one (Kerberos,
 /// one-time codes).
-const PROMPT_QUIET: Duration = Duration::from_secs(2);
+pub(super) const PROMPT_QUIET: Duration = Duration::from_secs(2);
 
 /// A [`Handshake`] in progress. The first prompt gets the password; a second means it
 /// was wrong, and stdin is closed with nothing more sent.
-struct Handshaking {
+pub(super) struct Handshaking {
     handshake: Handshake,
     pending: Vec<u8>,
     marked_prompts: usize,
@@ -203,7 +228,7 @@ struct Handshaking {
 }
 
 impl Handshaking {
-    fn new(handshake: Handshake) -> Self {
+    pub(super) fn new(handshake: Handshake) -> Self {
         Handshaking {
             handshake,
             pending: Vec::new(),
@@ -216,14 +241,14 @@ impl Handshaking {
     }
 
     /// Whether a quiet unfinished line could still be a prompt.
-    fn awaits_prompt(&self) -> bool {
+    pub(super) fn awaits_prompt(&self) -> bool {
         !self.done && !self.started && self.handshake.prompt.is_some()
     }
 
     /// Takes a stderr chunk; returns what to write and the stderr to keep, without the
     /// markers. Stderr is held back until the exchange ends, as a marker may be split
     /// across chunks.
-    fn stderr(&mut self, chunk: &[u8]) -> (Vec<Reply>, Vec<u8>) {
+    pub(super) fn stderr(&mut self, chunk: &[u8]) -> (Vec<Reply>, Vec<u8>) {
         if self.done {
             return (Vec::new(), chunk.to_vec());
         }
@@ -258,7 +283,7 @@ impl Handshaking {
 
     /// Stderr went quiet for [`PROMPT_QUIET`]: a line sudo left unfinished since the last
     /// prompt is one — unless it is the start of `-p`'s, still arriving.
-    fn quiet(&mut self) -> (Vec<Reply>, Vec<u8>) {
+    pub(super) fn quiet(&mut self) -> (Vec<Reply>, Vec<u8>) {
         if !self.awaits_prompt()
             || self.pending.len() <= self.answered
             || self.pending.ends_with(b"\n")
@@ -297,7 +322,7 @@ impl Handshaking {
     }
 
     /// The stderr still held back, without the markers.
-    fn finish(&mut self) -> Vec<u8> {
+    pub(super) fn finish(&mut self) -> Vec<u8> {
         let mut kept = std::mem::take(&mut self.pending);
         if let Some((prompt, _)) = &self.handshake.prompt {
             kept = without(&kept, prompt.as_bytes());
@@ -350,16 +375,93 @@ fn marker(kind: &str) -> String {
     format!("glidesh-{kind}-{}", uuid::Uuid::new_v4().simple())
 }
 
-pub struct SshSession {
-    handle: tokio::sync::Mutex<client::Handle<SshHandler>>,
+/// A host glidesh works on: one reached over SSH, or the controller itself for a host declared
+/// `local=#true`. Every module goes through it, so the two differ only in how a command runs
+/// and a file is read or written.
+pub struct Session {
+    link: Link,
     host: String,
-    _jump_handle: tokio::sync::Mutex<Option<client::Handle<SshHandler>>>,
-    forward_registry: ForwardRegistry,
     /// The login user's uid, read once: [`trusted_paths`] trusts it.
     login_uid: tokio::sync::OnceCell<String>,
 }
 
-impl SshSession {
+// One per host, held for the whole run: the local variant's spare bytes are not worth a Box.
+#[allow(clippy::large_enum_variant)]
+enum Link {
+    Ssh {
+        handle: tokio::sync::Mutex<client::Handle<SshHandler>>,
+        _jump_handle: tokio::sync::Mutex<Option<client::Handle<SshHandler>>>,
+        forward_registry: ForwardRegistry,
+    },
+    Local,
+}
+
+impl Session {
+    /// Opens `host`: on the controller when it is local, else over SSH, through its jump host
+    /// if it has one.
+    pub async fn open(
+        host: &ResolvedHost,
+        auth: &Auth,
+        host_key_policy: HostKeyPolicy,
+    ) -> Result<Self, GlideshError> {
+        if host.local {
+            return Self::local(&host.name);
+        }
+        match &host.jump {
+            Some(jump) => {
+                Self::connect_via_jump(
+                    &host.address,
+                    host.port,
+                    &host.user,
+                    auth,
+                    host_key_policy,
+                    jump,
+                )
+                .await
+            }
+            None => {
+                Self::connect(&host.address, host.port, &host.user, auth, host_key_policy).await
+            }
+        }
+    }
+
+    /// The controller itself, as host `name`: commands run in a local `sh`, files are read
+    /// and written directly.
+    pub fn local(name: &str) -> Result<Self, GlideshError> {
+        super::local::supported(name)?;
+        Ok(Session {
+            link: Link::Local,
+            host: name.to_string(),
+            login_uid: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    /// The SSH connection, or why a local host has none.
+    fn handle(
+        &self,
+        what: &str,
+    ) -> Result<&tokio::sync::Mutex<client::Handle<SshHandler>>, GlideshError> {
+        match &self.link {
+            Link::Ssh { handle, .. } => Ok(handle),
+            Link::Local => Err(GlideshError::Local {
+                host: self.host.clone(),
+                message: format!("it has no SSH connection to {what}"),
+            }),
+        }
+    }
+
+    fn forward_registry(&self) -> Result<&ForwardRegistry, GlideshError> {
+        match &self.link {
+            Link::Ssh {
+                forward_registry, ..
+            } => Ok(forward_registry),
+            Link::Local => Err(GlideshError::Local {
+                host: self.host.clone(),
+                message: "it has no SSH connection to forward a port over".to_string(),
+            }),
+        }
+    }
+
     pub async fn connect(
         host: &str,
         port: u16,
@@ -399,11 +501,13 @@ impl SshSession {
                 message,
             })?;
 
-        Ok(SshSession {
-            handle: tokio::sync::Mutex::new(handle),
+        Ok(Session {
+            link: Link::Ssh {
+                handle: tokio::sync::Mutex::new(handle),
+                _jump_handle: tokio::sync::Mutex::new(None),
+                forward_registry,
+            },
             host: host.to_string(),
-            _jump_handle: tokio::sync::Mutex::new(None),
-            forward_registry,
             login_uid: tokio::sync::OnceCell::new(),
         })
     }
@@ -507,11 +611,13 @@ impl SshSession {
                 message: format!("{e} (via jump host)"),
             })?;
 
-        Ok(SshSession {
-            handle: tokio::sync::Mutex::new(handle),
+        Ok(Session {
+            link: Link::Ssh {
+                handle: tokio::sync::Mutex::new(handle),
+                _jump_handle: tokio::sync::Mutex::new(Some(jump_handle)),
+                forward_registry,
+            },
             host: host.to_string(),
-            _jump_handle: tokio::sync::Mutex::new(Some(jump_handle)),
-            forward_registry,
             login_uid: tokio::sync::OnceCell::new(),
         })
     }
@@ -524,7 +630,7 @@ impl SshSession {
         originator_addr: &str,
         originator_port: u32,
     ) -> Result<Channel<client::Msg>, GlideshError> {
-        let guard = self.handle.lock().await;
+        let guard = self.handle("open a tunnel over")?.lock().await;
         guard
             .channel_open_direct_tcpip(remote_host, remote_port, originator_addr, originator_port)
             .await
@@ -545,9 +651,9 @@ impl SshSession {
     ) -> Result<mpsc::UnboundedReceiver<Channel<client::Msg>>, GlideshError> {
         let key = (bind_addr.to_string(), bind_port);
         let (tx, rx) = mpsc::unbounded_channel();
+        let registry = self.forward_registry()?;
         {
-            let mut reg = self
-                .forward_registry
+            let mut reg = registry
                 .lock()
                 .map_err(|_| GlideshError::Other("forward registry mutex poisoned".to_string()))?;
             if reg.contains_key(&key) {
@@ -561,10 +667,10 @@ impl SshSession {
             reg.insert(key.clone(), tx);
         }
 
-        let guard = self.handle.lock().await;
+        let guard = self.handle("forward a port over")?.lock().await;
         if let Err(e) = guard.tcpip_forward(bind_addr, bind_port as u32).await {
             drop(guard);
-            if let Ok(mut reg) = self.forward_registry.lock() {
+            if let Ok(mut reg) = registry.lock() {
                 reg.remove(&key);
             }
             return Err(GlideshError::SshChannel {
@@ -582,12 +688,12 @@ impl SshSession {
         bind_addr: &str,
         bind_port: u16,
     ) -> Result<(), GlideshError> {
-        let guard = self.handle.lock().await;
+        let guard = self.handle("forward a port over")?.lock().await;
         let _ = guard
             .cancel_tcpip_forward(bind_addr, bind_port as u32)
             .await;
         drop(guard);
-        if let Ok(mut reg) = self.forward_registry.lock() {
+        if let Ok(mut reg) = self.forward_registry()?.lock() {
             reg.remove(&(bind_addr.to_string(), bind_port));
         }
         Ok(())
@@ -602,7 +708,11 @@ impl SshSession {
         command: &str,
         opts: ExecOptions,
     ) -> Result<CommandOutput, GlideshError> {
-        let guard = self.handle.lock().await;
+        let handle = match &self.link {
+            Link::Ssh { handle, .. } => handle,
+            Link::Local => return super::local::exec(&self.host, command, opts).await,
+        };
+        let guard = handle.lock().await;
         let mut channel =
             guard
                 .channel_open_session()
@@ -749,21 +859,7 @@ impl SshSession {
             writer.abort();
         }
 
-        let (exit_code, why) = exit_outcome(status, signal.as_deref());
-        let (mut stderr, _) = stderr.finish();
-        if let Some(why) = why {
-            if !stderr.is_empty() && !stderr.ends_with('\n') {
-                stderr.push('\n');
-            }
-            stderr.push_str(&why);
-        }
-        let (stdout, stdout_cut) = stdout.finish();
-        Ok(CommandOutput {
-            exit_code,
-            stdout,
-            stderr,
-            stdout_cut,
-        })
+        Ok(collected(stdout, stderr, status, signal.as_deref()))
     }
 
     /// Execute `command`, escalating to another user when `run_as` is set. A denied
@@ -928,7 +1024,7 @@ impl SshSession {
     }
 
     async fn sftp(&self) -> Result<SftpSession, GlideshError> {
-        let guard = self.handle.lock().await;
+        let guard = self.handle("open SFTP over")?.lock().await;
         let channel = guard
             .channel_open_session()
             .await
@@ -955,6 +1051,10 @@ impl SshSession {
 
     pub async fn upload_file(&self, content: &[u8], remote_path: &str) -> Result<(), GlideshError> {
         use tokio::io::AsyncWriteExt;
+
+        if let Link::Local = self.link {
+            return super::local::write_file(&self.host, content, remote_path).await;
+        }
 
         let sftp = self.sftp().await?;
         let mut file: SftpFile = sftp
@@ -989,6 +1089,9 @@ impl SshSession {
     }
 
     pub async fn download_file(&self, remote_path: &str) -> Result<Vec<u8>, GlideshError> {
+        if let Link::Local = self.link {
+            return super::local::read_file(&self.host, remote_path).await;
+        }
         let sftp = self.sftp().await?;
         let data = sftp
             .read(remote_path)
@@ -1568,9 +1671,12 @@ printf '%s' "$d""#;
     /// Takes over stdin/stdout until the remote shell exits.
     /// Returns the remote exit code.
     pub async fn interactive_shell(&self) -> Result<u32, GlideshError> {
+        if let Link::Local = self.link {
+            return super::local::interactive_shell(&self.host).await;
+        }
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
-        let guard = self.handle.lock().await;
+        let guard = self.handle("open a shell over")?.lock().await;
         let mut channel =
             guard
                 .channel_open_session()
@@ -1690,7 +1796,14 @@ printf '%s' "$d""#;
     }
 
     pub async fn close(self) -> Result<(), GlideshError> {
-        let handle = self.handle.into_inner();
+        let (handle, jump_handle) = match self.link {
+            Link::Ssh {
+                handle,
+                _jump_handle,
+                ..
+            } => (handle.into_inner(), _jump_handle.into_inner()),
+            Link::Local => return Ok(()),
+        };
         handle
             .disconnect(russh::Disconnect::ByApplication, "session closed", "en")
             .await
@@ -1698,7 +1811,7 @@ printf '%s' "$d""#;
                 message: format!("Error closing connection to {}: {}", self.host, e),
             })?;
 
-        if let Some(jump_handle) = self._jump_handle.into_inner() {
+        if let Some(jump_handle) = jump_handle {
             jump_handle
                 .disconnect(russh::Disconnect::ByApplication, "session closed", "en")
                 .await
@@ -1838,7 +1951,7 @@ fn write_streamed_upload(dest: &str, login_uid: &str, ready: &str) -> String {
     )
 }
 
-/// The command behind [`SshSession::is_root_dir_as`]. `/` is compared on the host by
+/// The command behind [`Session::is_root_dir_as`]. `/` is compared on the host by
 /// device and inode and the answer is a word, since `pwd -P` may print `//`, and under
 /// `su`'s PTY every line ends in `\r\n`, after any prompt.
 fn root_dir_check(path: &str) -> String {
@@ -1870,7 +1983,7 @@ fn after_tree_mark(stdout: &str) -> Option<&str> {
     )
 }
 
-/// The command listing every entry under `dest` for [`SshSession::list_tree_as`]: after
+/// The command listing every entry under `dest` for [`Session::list_tree_as`]: after
 /// [`TREE_MARK`], NUL-separated entries — `dest`'s real path after `r`, then each name after
 /// `d` (a directory) or `f` — then `@@` and find's status; a name may hold any other byte.
 /// `@@link` stands for a `dest` that is a symlink; a missing one prints the real path it

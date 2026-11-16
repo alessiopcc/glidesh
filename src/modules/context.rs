@@ -3,14 +3,14 @@ use crate::config::types::ResolvedRunAs;
 use crate::error::GlideshError;
 use crate::modules::detect::OsInfo;
 use crate::secrets::SecretRegistry;
-use crate::ssh::SshSession;
+use crate::ssh::Session;
 use crate::ssh::connection::CommandOutput;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 pub struct ModuleContext<'a> {
-    pub ssh: &'a SshSession,
+    pub ssh: &'a Session,
     pub os_info: &'a OsInfo,
     pub vars: &'a HashMap<String, String>,
     pub template_data: &'a TemplateData,

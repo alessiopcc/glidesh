@@ -15,6 +15,8 @@ pub enum Auth {
     Key(PrivateKeyWithHashAlg),
     /// Each connection asks the agent afresh, so concurrent hosts never share one stream.
     Agent,
+    /// Every host of the command is local: nothing logs in, so no key or agent is needed.
+    Unused,
 }
 
 impl From<PrivateKeyWithHashAlg> for Auth {
@@ -78,6 +80,9 @@ impl Auth {
         user: &str,
     ) -> Result<(), String> {
         match self {
+            Auth::Unused => {
+                Err("no SSH login was set up, since every host of the run is local".to_string())
+            }
             Auth::Key(key) => {
                 let result = handle
                     .authenticate_publickey(user, key.clone())

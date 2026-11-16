@@ -58,12 +58,16 @@ fn kdl_blocks(page: &str) -> Vec<(&str, &str)> {
     blocks
 }
 
-/// An inventory's `host "name" "address"`, which is not a `host` task.
+/// An inventory's `host "name" "address"` or `host "name" local=#true`, which is not a `host`
+/// task.
 fn is_inventory_host(first_line: &str) -> bool {
     first_line
         .strip_prefix("host \"")
         .and_then(|rest| rest.split_once('"'))
-        .is_some_and(|(_, after)| after.trim_start().starts_with('"'))
+        .is_some_and(|(_, after)| {
+            let after = after.trim_start();
+            after.starts_with('"') || after.starts_with("local=")
+        })
 }
 
 /// The ```kdl blocks of a page that are plans, each as a whole plan: a block whose first node

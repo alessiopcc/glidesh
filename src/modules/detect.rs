@@ -1,5 +1,5 @@
 use crate::error::GlideshError;
-use crate::ssh::SshSession;
+use crate::ssh::Session;
 use crate::util::shell_escape;
 
 // Nix commands live in profile-script paths that non-login SSH shells don't
@@ -292,7 +292,7 @@ impl PkgManager {
     }
 }
 
-pub async fn detect_os(ssh: &SshSession) -> Result<OsInfo, GlideshError> {
+pub async fn detect_os(ssh: &Session) -> Result<OsInfo, GlideshError> {
     let output = ssh.exec(PROBE_SCRIPT).await?;
     let Probe { os_release, facts } = parse_probe(&output.stdout);
 
@@ -388,7 +388,7 @@ fn detect_init_system(family: &OsFamily) -> InitSystem {
     }
 }
 
-async fn detect_nix(ssh: &SshSession) -> Result<bool, GlideshError> {
+async fn detect_nix(ssh: &Session) -> Result<bool, GlideshError> {
     // Nix's PATH entry comes from /etc/profile, which SSH non-interactive
     // sessions don't source — so `command -v nix` alone gives false negatives.
     let output = ssh
@@ -401,9 +401,7 @@ async fn detect_nix(ssh: &SshSession) -> Result<bool, GlideshError> {
     Ok(output.exit_code == 0)
 }
 
-async fn detect_container_runtime(
-    ssh: &SshSession,
-) -> Result<Option<ContainerRuntime>, GlideshError> {
+async fn detect_container_runtime(ssh: &Session) -> Result<Option<ContainerRuntime>, GlideshError> {
     let podman = ssh.exec("which podman 2>/dev/null").await?;
     if podman.exit_code == 0 {
         return Ok(Some(ContainerRuntime::Podman));

@@ -1,6 +1,6 @@
 use glidesh::modules::context::ModuleContext;
 use glidesh::modules::detect::{OsInfo, detect_os};
-use glidesh::ssh::SshSession;
+use glidesh::ssh::Session;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use std::collections::HashMap;
 use std::process::Command;
@@ -148,16 +148,16 @@ impl TestContainer {
     }
 
     /// Connect an SSH session to this container as root, with retries.
-    pub async fn ssh_session(&self) -> SshSession {
+    pub async fn ssh_session(&self) -> Session {
         self.ssh_session_as("root").await
     }
 
     /// Connect an SSH session as a specific user, with retries.
     #[allow(dead_code)]
-    pub async fn ssh_session_as(&self, user: &str) -> SshSession {
+    pub async fn ssh_session_as(&self, user: &str) -> Session {
         let mut last_err = None;
         for attempt in 0..15 {
-            match SshSession::connect(
+            match Session::connect(
                 "127.0.0.1",
                 self.port,
                 user,
@@ -194,7 +194,7 @@ impl TestContainer {
 
     /// Detect the OS on the container.
     #[allow(dead_code)]
-    pub async fn detect_os(&self, ssh: &SshSession) -> OsInfo {
+    pub async fn detect_os(&self, ssh: &Session) -> OsInfo {
         detect_os(ssh).await.expect("failed to detect OS")
     }
 
@@ -202,7 +202,7 @@ impl TestContainer {
     #[allow(dead_code)]
     pub fn module_context<'a>(
         &self,
-        ssh: &'a SshSession,
+        ssh: &'a Session,
         os_info: &'a OsInfo,
         vars: &'a HashMap<String, String>,
         dry_run: bool,
@@ -225,7 +225,7 @@ impl TestContainer {
     #[allow(dead_code)]
     pub fn module_context_run_as<'a>(
         &self,
-        ssh: &'a SshSession,
+        ssh: &'a Session,
         os_info: &'a OsInfo,
         vars: &'a HashMap<String, String>,
         dry_run: bool,
@@ -259,7 +259,7 @@ impl Drop for TestContainer {
 
 /// Set up a loopback device on the container. Returns the device path (e.g. "/dev/loop0").
 #[allow(dead_code)]
-pub async fn setup_loopback(ssh: &SshSession) -> String {
+pub async fn setup_loopback(ssh: &Session) -> String {
     let output = ssh
         .exec("losetup --find --show /opt/fake.img")
         .await
@@ -270,6 +270,6 @@ pub async fn setup_loopback(ssh: &SshSession) -> String {
 
 /// Tear down a loopback device.
 #[allow(dead_code)]
-pub async fn teardown_loopback(ssh: &SshSession, device: &str) {
+pub async fn teardown_loopback(ssh: &Session, device: &str) {
     let _ = ssh.exec(&format!("losetup -d {}", device)).await;
 }

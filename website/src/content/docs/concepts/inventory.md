@@ -59,6 +59,16 @@ host "web-1" "10.0.0.1" user="deploy" {
 }
 ```
 
+### Local hosts
+
+`local=#true` makes a host the machine running glidesh, worked on without SSH. It takes a name only:
+
+```kdl
+host "builder" local=#true
+```
+
+See [Local Hosts](/advanced/local-hosts/).
+
 ## Groups
 
 A `group` node collects hosts under a name. Select that name with `--target` on the command line (`-t web`, a host name, or `group:host`). Groups can define their own `vars` block and an optional `plan=` attribute to link a plan file (see [Inline Plans](#inline-plans)).

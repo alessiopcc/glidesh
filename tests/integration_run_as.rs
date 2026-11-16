@@ -148,7 +148,7 @@ fn upload_params(src: &std::path::Path, dest: &str, extra: &[(&str, ParamValue)]
     }
 }
 
-async fn stat(session: &glidesh::ssh::SshSession, path: &str) -> String {
+async fn stat(session: &glidesh::ssh::Session, path: &str) -> String {
     let out = session
         .exec(&format!("stat -c '%a %U:%G' {path}"))
         .await
@@ -880,7 +880,7 @@ fn run_as_app() -> ResolvedRunAs {
 /// newline at the end.
 const BINARY: &[u8] = b"\x00\xff\r\nline\nno newline at the end";
 
-async fn hex_of(session: &glidesh::ssh::SshSession, path: &str) -> String {
+async fn hex_of(session: &glidesh::ssh::Session, path: &str) -> String {
     let out = session
         .exec(&format!("od -An -v -tx1 {path} | tr -d ' \\n'"))
         .await
@@ -890,7 +890,7 @@ async fn hex_of(session: &glidesh::ssh::SshSession, path: &str) -> String {
 
 /// The modes of a file and a directory `app` creates itself through deploy's sudo: its
 /// session's umask, `002` where pam_umask gives user-private groups one.
-async fn app_creates(deploy: &glidesh::ssh::SshSession) -> (String, String) {
+async fn app_creates(deploy: &glidesh::ssh::Session) -> (String, String) {
     let out = deploy
         .exec(
             "sudo -n -u app sh -c 'd=$(mktemp -d /srv/app/ref.XXXXXX) && : > \"$d/f\" && \
