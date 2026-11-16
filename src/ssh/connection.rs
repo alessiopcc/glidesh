@@ -450,6 +450,11 @@ impl Session {
         }
     }
 
+    /// Fails for a local host, before a forward is set up that could never carry a connection.
+    pub(super) fn can_forward(&self) -> Result<(), GlideshError> {
+        self.forward_registry().map(|_| ())
+    }
+
     fn forward_registry(&self) -> Result<&ForwardRegistry, GlideshError> {
         match &self.link {
             Link::Ssh {

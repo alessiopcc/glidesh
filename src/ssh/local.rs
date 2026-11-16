@@ -8,6 +8,7 @@ use super::connection::{
     collected,
 };
 use crate::error::GlideshError;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,10 +38,24 @@ fn command(program: &str) -> Command {
             cmd.env_remove(&name);
         }
     }
-    if let Some(home) = dirs::home_dir().filter(|h| h.is_dir()) {
+    if let Some(home) = home() {
         cmd.current_dir(home);
     }
     cmd
+}
+
+/// The directory a local command starts in, and so the one its relative paths mean.
+fn home() -> Option<PathBuf> {
+    dirs::home_dir().filter(|h| h.is_dir())
+}
+
+/// `path` as a command would read it: a relative one from `home`, as SFTP resolves it from
+/// the login user's home, not from wherever glidesh was started.
+fn resolve(home: Option<&Path>, path: &str) -> PathBuf {
+    match home {
+        Some(home) => home.join(path),
+        None => PathBuf::from(path),
+    }
 }
 
 /// The exit status as SSH reports it: a code, or the signal that killed the command, named
@@ -245,7 +260,7 @@ pub(super) async fn write_file(host: &str, content: &[u8], path: &str) -> Result
         .create(true)
         .truncate(true)
         .write(true)
-        .open(path)
+        .open(resolve(home().as_deref(), path))
         .await
         .map_err(|e| failed("open file", e))?;
     file.write_all(content)
@@ -256,7 +271,7 @@ pub(super) async fn write_file(host: &str, content: &[u8], path: &str) -> Result
 
 /// [`Session::download_file`](super::Session::download_file) on the controller.
 pub(super) async fn read_file(host: &str, path: &str) -> Result<Vec<u8>, GlideshError> {
-    tokio::fs::read(path)
+    tokio::fs::read(resolve(home().as_deref(), path))
         .await
         .map_err(|e| GlideshError::Local {
             host: host.to_string(),
@@ -405,5 +420,13 @@ mod tests {
         assert_eq!(read_file("self", path).await.unwrap(), b"short");
         let missing = read_file("self", &format!("{path}.missing")).await;
         assert!(missing.is_err());
+    }
+
+    #[test]
+    fn a_relative_path_means_the_same_file_to_a_command_and_to_a_transfer() {
+        let home = Path::new("/home/me");
+        assert_eq!(resolve(Some(home), "a/f"), Path::new("/home/me/a/f"));
+        assert_eq!(resolve(Some(home), "/etc/f"), Path::new("/etc/f"));
+        assert_eq!(resolve(None, "a/f"), Path::new("a/f"));
     }
 }

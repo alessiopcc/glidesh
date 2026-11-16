@@ -41,6 +41,7 @@ pub async fn start_local_forward(
     remote_host: String,
     remote_port: u16,
 ) -> Result<LocalForward, GlideshError> {
+    session.can_forward()?;
     let listener = TcpListener::bind(("127.0.0.1", local_port))
         .await
         .map_err(|e| {
@@ -193,4 +194,19 @@ pub async fn start_reverse_forward(
         cancel_token,
         session,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_local_host_refuses_a_forward_before_listening() {
+        let session = Arc::new(Session::local("self").unwrap());
+        let refused = start_local_forward(session, "self".into(), 0, "localhost".into(), 80).await;
+        let Err(GlideshError::Local { message, .. }) = refused else {
+            panic!("a local host forwarded a port");
+        };
+        assert!(message.contains("forward a port"), "{message}");
+    }
 }
