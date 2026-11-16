@@ -1621,7 +1621,8 @@ async fn cmd_console(args: cli::ConsoleArgs) -> Result<(), GlideshError> {
     if all_hosts.is_empty() {
         return Err(GlideshError::NoTargets);
     }
-    let inv_vars = all_hosts.first().map(|h| &h.vars);
+    // The key `auth_for` loads: the first SSH host's, so a plan the console launches gets it too.
+    let inv_vars = all_hosts.iter().find(|h| !h.local).map(|h| &h.vars);
     let key_path = resolve_key_path(args.key.as_deref(), inv_vars);
     let key = auth_for(&all_hosts, args.key.as_deref(), !args.no_agent).await?;
     let key_path = matches!(key, glidesh::ssh::auth::Auth::Key(_)).then_some(key_path);

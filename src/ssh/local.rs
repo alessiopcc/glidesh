@@ -58,6 +58,25 @@ fn resolve(home: Option<&Path>, path: &str) -> PathBuf {
     }
 }
 
+/// Kills a command's whole process group (`setsid` made its id the command's pid) when `exec`
+/// is dropped before the command exits, as a timed-out `until=` does: `kill_on_drop` stops only
+/// `sh`, and what it started would go on changing the machine after the step gave up. Disarmed
+/// once the command exits, so a process it leaves running on purpose survives.
+#[cfg(unix)]
+struct GroupKill(Option<i32>);
+
+#[cfg(unix)]
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        if let Some(group) = self.0 {
+            // SAFETY: `kill` only sends a signal; a group that is already gone makes it fail.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 /// The exit status as SSH reports it: a code, or the signal that killed the command, named
 /// as SSH names it (`KILL`).
 fn exit_parts(status: ExitStatus) -> (Option<u32>, Option<String>) {
@@ -145,6 +164,8 @@ pub(super) async fn exec(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| failed("start sh", e))?;
+    #[cfg(unix)]
+    let mut group = GroupKill(child.id().map(|pid| pid as i32));
 
     let mut handshaking = opts.handshake.map(Handshaking::new);
     let stdin = child.stdin.take();
@@ -227,6 +248,10 @@ pub(super) async fn exec(
                 None => stderr.push(&err_buf[..n]),
             },
             Event::Exited(exited) => {
+                #[cfg(unix)]
+                {
+                    group.0 = None;
+                }
                 status = Some(exit_parts(exited.map_err(|e| failed("wait for sh", e))?));
             }
             Event::Quiet if status.is_some() => break,
@@ -357,9 +382,43 @@ mod tests {
     #[tokio::test]
     async fn a_child_left_running_does_not_hold_the_command_open() {
         let started = std::time::Instant::now();
-        let out = run("sleep 30 & echo done", ExecOptions::default()).await;
-        assert_eq!(out.stdout, "done\n");
+        let out = run("sleep 30 & echo $!", ExecOptions::default()).await;
         assert!(started.elapsed() < Duration::from_secs(10));
+        let child: i32 = out.stdout.trim().parse().unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive = unsafe { libc::kill(child, 0) } == 0;
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        assert!(alive, "a child left running on purpose was killed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_command_given_up_on_takes_what_it_started_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let line = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+        let gave_up = tokio::time::timeout(
+            Duration::from_millis(500),
+            exec("self", &line, ExecOptions::default()),
+        )
+        .await;
+        assert!(gave_up.is_err());
+        let child: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut alive = true;
+        for _ in 0..40 {
+            // A killed child stays a zombie until init reaps it.
+            let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).ok();
+            alive = stat.is_some_and(|s| !s.contains(") Z "));
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!alive, "the command's child outlived it");
     }
 
     #[tokio::test]

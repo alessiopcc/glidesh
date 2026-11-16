@@ -320,20 +320,26 @@ impl ResolvedHost {
 /// The `@host.address` of a local host.
 pub const LOCAL_ADDRESS: &str = "localhost";
 
-/// The user glidesh runs as, the login user of a local host: `$USER`, else `$LOGNAME`, else
-/// `id -un` (a container sets neither variable), else empty.
+/// The user glidesh runs as, the login user of a local host: `id -un`, else `id -u` (a uid
+/// with no name, as `docker run -u 1234` gives), else `$USER`, else `$LOGNAME`, else empty.
+/// The variables come last: a container started as another user keeps its image's.
 pub fn local_user() -> String {
-    for name in ["USER", "LOGNAME"] {
-        if let Some(user) = std::env::var(name).ok().filter(|u| !u.is_empty()) {
-            return user;
-        }
-    }
-    std::process::Command::new("id")
-        .arg("-un")
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let id = |flag: &str| {
+        std::process::Command::new("id")
+            .arg(flag)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|user| !user.is_empty())
+    };
+    id("-un")
+        .or_else(|| id("-u"))
+        .or_else(|| {
+            ["USER", "LOGNAME"]
+                .into_iter()
+                .find_map(|name| std::env::var(name).ok().filter(|u| !u.is_empty()))
+        })
         .unwrap_or_default()
 }
 
