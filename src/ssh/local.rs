@@ -4,13 +4,12 @@
 //! logic above that are shared with SSH hosts.
 
 use super::connection::{
-    CappedStream, CommandOutput, ExecOptions, Handshaking, OUTPUT_LIMIT, PROMPT_QUIET, Reply,
-    collected,
+    CappedStream, CommandOutput, EXIT_DRAIN, ExecOptions, Handshaking, OUTPUT_LIMIT, PROMPT_QUIET,
+    Reply, collected,
 };
 use crate::error::GlideshError;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
@@ -211,14 +210,15 @@ pub(super) async fn exec(
     let mut stdout = CappedStream::new(OUTPUT_LIMIT);
     let mut stderr = CappedStream::new(OUTPUT_LIMIT);
     let mut status: Option<(Option<u32>, Option<String>)> = None;
+    let mut drain_until: Option<tokio::time::Instant> = None;
 
     while status.is_none() || out_open || err_open {
         // Once the command has exited, a child it left in the background may hold its output
-        // open for good: take what is already there, then stop, as over SSH.
+        // open for good: take what comes until a fixed deadline, then stop, as over SSH.
         let wait = if status.is_some() {
-            Some(Duration::from_millis(200))
+            Some(*drain_until.get_or_insert_with(|| tokio::time::Instant::now() + EXIT_DRAIN))
         } else if handshaking.as_ref().is_some_and(|h| h.awaits_prompt()) {
-            Some(PROMPT_QUIET)
+            Some(tokio::time::Instant::now() + PROMPT_QUIET)
         } else {
             None
         };
@@ -230,7 +230,7 @@ pub(super) async fn exec(
             }
         };
         let event = match wait {
-            Some(wait) => tokio::time::timeout(wait, next)
+            Some(deadline) => tokio::time::timeout_at(deadline, next)
                 .await
                 .unwrap_or(Event::Quiet),
             None => next.await,
@@ -330,6 +330,7 @@ pub(super) async fn interactive_shell(host: &str) -> Result<u32, GlideshError> {
 mod tests {
     use super::*;
     use crate::ssh::connection::Handshake;
+    use std::time::Duration;
 
     async fn run(command_line: &str, opts: ExecOptions) -> CommandOutput {
         exec("self", command_line, opts).await.unwrap()
@@ -389,6 +390,28 @@ mod tests {
         let alive = unsafe { libc::kill(child, 0) } == 0;
         unsafe { libc::kill(child, libc::SIGKILL) };
         assert!(alive, "a child left running on purpose was killed");
+    }
+
+    #[tokio::test]
+    async fn a_child_that_keeps_writing_does_not_hold_the_command_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let line = format!(
+            "(while :; do echo tick; sleep 0.05; done) & echo $! > {}; echo started",
+            pid_file.display()
+        );
+        let finished = tokio::time::timeout(
+            Duration::from_secs(10),
+            exec("self", &line, ExecOptions::default()),
+        )
+        .await;
+        if let Ok(child) = std::fs::read_to_string(&pid_file) {
+            unsafe { libc::kill(child.trim().parse().unwrap(), libc::SIGKILL) };
+        }
+        let out = finished
+            .expect("a chatty child held the command open")
+            .unwrap();
+        assert!(out.stdout.contains("started"), "{}", out.stdout);
     }
 
     #[cfg(target_os = "linux")]

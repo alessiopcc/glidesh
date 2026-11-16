@@ -215,6 +215,10 @@ pub(super) enum Reply {
 /// one-time codes).
 pub(super) const PROMPT_QUIET: Duration = Duration::from_secs(2);
 
+/// How long output is still taken once a command has exited: what it wrote last may still be
+/// on its way, and a child it left in the background may hold its output open for good.
+pub(super) const EXIT_DRAIN: Duration = Duration::from_millis(200);
+
 /// A [`Handshake`] in progress. The first prompt gets the password; a second means it
 /// was wrong, and stdin is closed with nothing more sent.
 pub(super) struct Handshaking {
@@ -804,15 +808,19 @@ impl Session {
         let mut signal: Option<String> = None;
         let mut exited = false;
 
+        let mut drain_until: Option<tokio::time::Instant> = None;
         loop {
             // Once the command has reported its exit status, don't block forever
             // waiting for the channel to close. A backgrounded child (e.g. an
             // auto-started daemon) can inherit the command's stdout/stderr and
             // hold the channel open indefinitely — the command is done, but the
             // server never sends a close. After exit, drain any already-buffered
-            // output briefly, then stop.
+            // output until a fixed deadline, then stop: one that restarted on each
+            // message would never end for a child that keeps writing.
             let msg = if exited {
-                match tokio::time::timeout(Duration::from_millis(200), channel.wait()).await {
+                let deadline =
+                    *drain_until.get_or_insert_with(|| tokio::time::Instant::now() + EXIT_DRAIN);
+                match tokio::time::timeout_at(deadline, channel.wait()).await {
                     Ok(Some(msg)) => msg,
                     Ok(None) | Err(_) => break,
                 }

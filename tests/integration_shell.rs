@@ -269,6 +269,26 @@ async fn test_shell_backgrounded_child_does_not_hang() {
     );
 }
 
+/// The drain after exit has a fixed end: one that restarted on each message would never end
+/// for a background child that keeps writing.
+#[tokio::test]
+async fn a_background_child_that_keeps_writing_does_not_hang() {
+    skip_unless_integration!();
+
+    let container = common::TestContainer::start();
+    let ssh = container.ssh_session().await;
+
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        ssh.exec("(while :; do echo tick; sleep 0.05; done) & echo started"),
+    )
+    .await
+    .expect("exec must not hang while a background child keeps writing")
+    .unwrap();
+
+    assert!(out.stdout.contains("started"), "{}", out.stdout);
+}
+
 /// A command killed by a signal sends no exit status. It must not read as exit 0, or a
 /// `check=` guard or an `until=` gate would pass on it.
 #[tokio::test]
